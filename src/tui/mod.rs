@@ -48,7 +48,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui_image::picker::{Picker, ProtocolType};
 
-use crate::application::browse::{BrowseRequest, BrowseWorker};
+use crate::application::browse::{BrowseRequest, BrowseResult, BrowseWorker, TreeCollected};
 use crate::application::enrich::default_probe;
 use crate::application::runtime::{
     AppCommand, CoverKey, FlushReport, LibraryStores, PlayerRuntime, RuntimeParts,
@@ -373,7 +373,18 @@ fn run_loop(
             return Ending::Failed(LifecycleError::Terminal(error).into());
         }
         runtime.pump();
-        browsing.poll();
+        // A finished folder walk belongs to the application, not the
+        // browser that asked for it (M8 §8): it lands here even if the
+        // browser has since closed or moved to another directory.
+        let trees = browsing.poll();
+        let landed_a_tree = !trees.is_empty();
+        for tree in trees {
+            runtime.handle(AppCommand::AddTree(tree));
+        }
+        if landed_a_tree {
+            let hint = runtime.take_selection_hint();
+            ui.reconcile(&runtime.view(), hint);
+        }
         // Every pass, so the worker's one-slot result channel never stalls it.
         artwork.poll(runtime);
         if let Some(ending) = interrupted(signals, cleanup) {
@@ -634,20 +645,27 @@ impl Browsing {
             .request(request);
     }
 
-    /// Hands every finished read to the open browser, and sends the read a
-    /// mutation's answer asks for; an answer that finishes after the
-    /// browser closed is dropped.
-    fn poll(&mut self) {
+    /// Hands every finished read to the open browser and returns the folder
+    /// walks, which belong to the application: an add the listener asked for
+    /// must land even if the browser has since closed or moved (M8 §8).
+    fn poll(&mut self) -> Vec<TreeCollected> {
         let Some(worker) = &self.worker else {
-            return;
+            return Vec::new();
         };
+        let mut trees = Vec::new();
         while let Some(result) = worker.try_result() {
-            if let Some(state) = &mut self.state
-                && let Some(follow_up) = state.apply(result)
-            {
-                worker.request(follow_up);
+            match result {
+                BrowseResult::TreeCollected(tree) => trees.push(tree),
+                result => {
+                    if let Some(state) = &mut self.state
+                        && let Some(follow_up) = state.apply(result)
+                    {
+                        worker.request(follow_up);
+                    }
+                }
             }
         }
+        trees
     }
 }
 

@@ -202,8 +202,10 @@ impl BrowserState {
                     BrowserTab::Files => {}
                 }
             }
-            // Routed through the application, not `BrowserState` (M8 §8):
-            // Task 13 gives this its own handling.
+            // Never reaches here: `Browsing::poll` (src/tui/mod.rs) intercepts
+            // this variant before it is offered to `apply`, and hands it to
+            // the application instead, so it lands whatever the browser is
+            // doing by the time the walk finishes (M8 §8).
             BrowseResult::TreeCollected(_) => return None,
         }
         self.cursor = self.cursor.min(self.len().saturating_sub(1));

@@ -5,12 +5,14 @@
 //!
 //! [`pump`]: PlayerRuntime::pump
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use url::Url;
 
+use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, resolve_podcast,
@@ -141,6 +143,9 @@ pub enum AppCommand {
         dest: PlaylistId,
         items: Vec<EnqueueItem>,
     },
+    /// A finished folder walk, applied to the playlist captured when it was
+    /// requested (M8 §8, P2) — not wherever the browser is now.
+    AddTree(TreeCollected),
     Remove(QueueEntryId),
     Move(QueueEntryId, Direction),
     ClearPlaylist(PlaylistId),
@@ -518,6 +523,7 @@ impl PlayerRuntime {
             }
             AppCommand::AdjustVolume(delta) => self.adjust_volume(delta),
             AppCommand::Enqueue { dest, items } => self.enqueue(dest, items),
+            AppCommand::AddTree(tree) => self.add_tree(tree),
             AppCommand::Remove(id) => self.remove(id),
             AppCommand::Move(id, direction) => match self.session.move_entry(id, direction) {
                 Ok(action) => self.submit(action),
@@ -1046,6 +1052,71 @@ impl PlayerRuntime {
             }
             Err(error) => self.status = Some(error.to_string()),
         }
+    }
+
+    /// Applies a finished folder walk to the destination captured when it
+    /// was requested (M8 §8, P2). Capacity is rechecked here (P7): the
+    /// playlists may have grown while the worker walked.
+    fn add_tree(&mut self, tree: TreeCollected) {
+        for path in &tree.unreadable {
+            tracing::warn!(path = %path.display(), "folder add: directory could not be read");
+        }
+        let Some(playlist) = self.session.state().playlist(tree.dest) else {
+            self.status = Some("Playlist was deleted; nothing added".to_owned());
+            return;
+        };
+        let queued: HashSet<&MediaId> = playlist
+            .queue()
+            .entries()
+            .iter()
+            .map(QueueEntry::media)
+            .collect();
+        let mut fresh = Vec::new();
+        let mut already = 0usize;
+        for path in &tree.items {
+            match new_entry(EnqueueItem::Path(path.clone())) {
+                Ok(entry) if queued.contains(entry.media()) => already += 1,
+                Ok(entry) => fresh.push(entry),
+                Err(_) => {}
+            }
+        }
+        let free = MAX_PLAYLIST_ENTRIES.saturating_sub(self.session.state().total_entries());
+        let did_not_fit = fresh.len().saturating_sub(free);
+        fresh.truncate(free);
+        let added = fresh.len();
+        if added > 0 {
+            match self.session.enqueue(tree.dest, fresh) {
+                Ok((ids, action)) => {
+                    self.submit(action);
+                    self.request_enrichment(&ids);
+                }
+                Err(error) => {
+                    self.status = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        let mut parts = Vec::new();
+        if added > 0 {
+            parts.push(format!("added {added}"));
+        }
+        if already > 0 {
+            parts.push(format!("{already} already queued"));
+        }
+        if !tree.unreadable.is_empty() {
+            parts.push(format!("{} unreadable", tree.unreadable.len()));
+        }
+        if did_not_fit > 0 {
+            parts.push(format!("{did_not_fit} did not fit"));
+        }
+        if tree.scan_limit_reached {
+            parts.push("scan limit reached".to_owned());
+        }
+        self.status = Some(if parts.is_empty() {
+            "nothing to add".to_owned()
+        } else {
+            parts.join(" · ")
+        });
     }
 
     fn remove(&mut self, id: QueueEntryId) {

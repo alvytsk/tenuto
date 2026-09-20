@@ -7,15 +7,18 @@ mod runtime;
 #[path = "support/tagged_flac.rs"]
 mod tagged_flac;
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids};
+use tenuto::application::browse::TreeCollected;
 use tenuto::application::enrich::default_probe;
 use tenuto::application::runtime::{AppCommand, EnqueueItem, PlayerRuntime};
 use tenuto::lifecycle::hooks::TestHook;
 use tenuto::media::id::{AbsolutePath, MediaId};
 use tenuto::persistence::model::PersistedState;
-use tenuto::queue::{NewQueueEntry, QueueSource};
+use tenuto::playlist::PlaylistId;
+use tenuto::queue::{MAX_PLAYLIST_ENTRIES, NewQueueEntry, QueueSource};
 
 const SHORT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine.flac");
 const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
@@ -330,4 +333,96 @@ fn toggling_shuffle_marks_the_tab_and_keeps_the_track_playing() {
     assert_eq!(view.active, Some(id));
     rig.runtime.handle(AppCommand::ToggleShuffle(first));
     assert!(!rig.runtime.view().tabs[0].shuffled);
+}
+
+fn tree(dest: PlaylistId, items: Vec<PathBuf>) -> TreeCollected {
+    TreeCollected {
+        dest,
+        items,
+        unreadable: Vec::new(),
+        scan_limit_reached: false,
+    }
+}
+
+/// `count` copies of the fixture under distinct names, so each is its own media.
+fn copies(dir: &Path, count: usize) -> Vec<PathBuf> {
+    (0..count)
+        .map(|i| {
+            let path = dir.join(format!("{i:04}.flac"));
+            std::fs::copy(SHORT, &path).unwrap_or_else(|error| panic!("copy: {error}"));
+            path
+        })
+        .collect()
+}
+
+#[test]
+fn a_tree_lands_in_its_captured_destination_whatever_is_viewed_now() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime
+        .handle(AppCommand::CreatePlaylist("Elsewhere".into()));
+    rig.runtime
+        .handle(AppCommand::AddTree(tree(first, copies(dir.path(), 3))));
+    assert_eq!(rig.runtime.rows_of(first).len(), 3);
+    assert!(rig.runtime.view().rows.is_empty());
+    assert_eq!(rig.runtime.view().status.as_deref(), Some("added 3"));
+}
+
+#[test]
+fn already_queued_files_are_skipped_and_counted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let files = copies(dir.path(), 3);
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(files[1].clone())],
+    });
+    rig.runtime.handle(AppCommand::AddTree(tree(first, files)));
+    assert_eq!(rig.runtime.rows_of(first).len(), 3);
+    assert_eq!(
+        rig.runtime.view().status.as_deref(),
+        Some("added 2 · 1 already queued")
+    );
+}
+
+#[test]
+fn a_tree_for_a_deleted_playlist_is_dropped_with_a_notice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rig = rig_with(PersistedState::default());
+    rig.runtime
+        .handle(AppCommand::CreatePlaylist("Doomed".into()));
+    let doomed = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::DeletePlaylist(doomed));
+    rig.runtime
+        .handle(AppCommand::AddTree(tree(doomed, copies(dir.path(), 2))));
+    assert_eq!(
+        rig.runtime.view().status.as_deref(),
+        Some("Playlist was deleted; nothing added")
+    );
+    assert!(rig.runtime.view().rows.is_empty());
+}
+
+#[test]
+fn capacity_is_rechecked_on_apply_and_the_notice_counts_only_what_is_known() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    // Fill all but two slots with URLs: cheap, and each is its own media.
+    let fill = (0..MAX_PLAYLIST_ENTRIES - 2)
+        .map(|i| EnqueueItem::Url(format!("https://example.test/{i}.mp3")))
+        .collect();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: fill,
+    });
+    let mut collected = tree(first, copies(dir.path(), 5));
+    collected.unreadable = vec![dir.path().join("locked")];
+    collected.scan_limit_reached = true;
+    rig.runtime.handle(AppCommand::AddTree(collected));
+    assert_eq!(
+        rig.runtime.view().status.as_deref(),
+        Some("added 2 · 1 unreadable · 3 did not fit · scan limit reached")
+    );
 }
