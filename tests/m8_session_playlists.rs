@@ -432,3 +432,103 @@ fn deleting_another_playlist_leaves_playback_alone() {
     assert_eq!(two.session.adopted().map(|a| a.request), Some(playing));
     assert_eq!(two.session.state().playing(), two.a);
 }
+
+fn track(id: u64, name: &str) -> serde_json::Value {
+    serde_json::json!({ "id": id, "media": format!("local:/music/{name}.flac"),
+        "source": { "kind": "local", "path": format!("/music/{name}.flac") } })
+}
+
+/// A session as a real run starts one: restored from a schema 4 file, with
+/// whatever cursors that file remembers and nothing adopted. Integration
+/// tests cannot reach the `pub(crate)` setters, and this is the only state
+/// in which an unowned cursor exists without a playback history.
+fn restored(playlists: serde_json::Value, playing: u64) -> Session {
+    let file = serde_json::json!({ "schema_version": 4, "volume": 1.0, "checkpoints": {},
+        "current_media": "local:/music/a1.flac", "playlists": playlists, "playing": playing });
+    Session::new(
+        serde_json::from_value(file).unwrap_or_else(|error| panic!("a schema 4 file: {error}")),
+    )
+}
+
+#[test]
+fn removing_a_restored_cursor_with_nothing_adopted_only_clears_it() {
+    let mut session = restored(
+        serde_json::json!([{ "id": 1, "name": "Default", "shuffle": null,
+            "entries": [track(1, "a1"), track(2, "a2")], "active_entry": 1 }]),
+        1,
+    );
+    let cursor = session
+        .state()
+        .queue()
+        .active()
+        .expect("the file's cursor survived recovery");
+    assert!(
+        session.adopted().is_none(),
+        "a fresh run has adopted nothing"
+    );
+
+    let removal = session
+        .remove_entry(cursor, &progress(0, "a1", None), FakeClock::new().sample())
+        .expect("queued");
+
+    assert!(
+        !removal.stop_playback,
+        "a restored cursor nothing adopted is not ownership (M8 §5)"
+    );
+    assert!(session.adopted().is_none());
+    assert_eq!(
+        session.state().queue().active(),
+        None,
+        "the cursor only clears"
+    );
+}
+
+#[test]
+fn removing_the_playing_cursor_while_another_playlist_loads_leaves_that_load_valid() {
+    // A is playing and holds a cursor it never adopted; B's load is in
+    // flight. The third unowned-cursor case of §12.
+    let mut session = restored(
+        serde_json::json!([
+            { "id": 1, "name": "A", "shuffle": null, "entries": [track(1, "a1")], "active_entry": 1 },
+            { "id": 2, "name": "B", "shuffle": null, "entries": [track(2, "b1")], "active_entry": null }]),
+        1,
+    );
+    let a = PlaylistId::from_raw_for_tests(1);
+    let b = PlaylistId::from_raw_for_tests(2);
+    let cursor = session
+        .state()
+        .queue()
+        .active()
+        .expect("A's cursor survived recovery");
+    let in_b = session.state().playlist(b).expect("B").queue().entries()[0].id();
+    let pending = session
+        .register_load(LoadTarget::Queue(in_b), &media("b1"))
+        .expect("registered");
+    assert!(
+        session.adopted().is_none(),
+        "a request alone adopts nothing"
+    );
+
+    let removal = session
+        .remove_entry(cursor, &progress(0, "a1", None), FakeClock::new().sample())
+        .expect("queued");
+
+    assert!(
+        !removal.stop_playback,
+        "the playing playlist's cursor is not ownership while another load is pending (M8 §5)"
+    );
+    assert!(session.adopted().is_none());
+    assert_eq!(
+        session.state().playlist(a).expect("A").queue().active(),
+        None,
+        "the cursor only clears"
+    );
+
+    session.observe(&loaded(pending, 1, "b1"), FakeClock::new().sample());
+    assert_eq!(
+        session.adopted().map(|adopted| adopted.request),
+        Some(pending),
+        "B's load was never invalidated"
+    );
+    assert_eq!(session.state().playing(), b);
+}
