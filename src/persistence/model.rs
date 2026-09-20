@@ -275,9 +275,6 @@ impl PersistedState {
         self.index_of(id).map(|index| &self.playlists[index])
     }
 
-    /// Wired up by the task that exposes playlist mutation through `Session`
-    /// (rename/remove); unused until then.
-    #[allow(dead_code)]
     pub(crate) fn playlist_mut(&mut self, id: PlaylistId) -> Option<&mut Playlist> {
         self.index_of(id).map(|index| &mut self.playlists[index])
     }
@@ -342,9 +339,6 @@ impl PersistedState {
             .enqueue(batch, &mut self.entry_ids)
     }
 
-    /// Wired up by the task that exposes playlist management through
-    /// `Session`; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn create_playlist(&mut self, name: &str) -> Result<PlaylistId, PlaylistError> {
         let name = clean_name(name).ok_or(PlaylistError::InvalidName)?;
         if self.playlists.len() >= MAX_PLAYLISTS {
@@ -359,9 +353,6 @@ impl PersistedState {
         Ok(id)
     }
 
-    /// Wired up by the task that exposes playlist management through
-    /// `Session`; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn rename_playlist(
         &mut self,
         id: PlaylistId,

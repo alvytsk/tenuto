@@ -32,8 +32,9 @@ use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDispo
 use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
+use crate::playlist::{Playlist, PlaylistError, PlaylistId};
 use crate::queue::{
-    Direction, DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueError,
+    Direction, DisplayDuration, DurationSource, NewQueueEntry, Queue, QueueEntryId, QueueError,
     QueueSource,
 };
 use url::Url;
@@ -320,7 +321,7 @@ impl Session {
             return Err(RegisterLoadError::Busy);
         }
         if let LoadTarget::Queue(id) = target {
-            match self.state.queue().get(id) {
+            match self.state.find_entry(id) {
                 None => return Err(RegisterLoadError::UnknownEntry),
                 Some(entry) if entry.media() != media => {
                     return Err(RegisterLoadError::MediaMismatch);
@@ -385,8 +386,7 @@ impl Session {
         match pending.target {
             LoadTarget::Queue(id) => self
                 .state
-                .queue()
-                .get(id)
+                .find_entry(id)
                 .is_some_and(|entry| entry.media() == media)
                 .then_some(pending.target),
             LoadTarget::Legacy => Some(pending.target),
@@ -415,15 +415,36 @@ impl Session {
 
     // --------------------------------------------------------------- queue
 
-    /// Enqueues `batch` all-or-nothing. `Ordinary` submit on success; the
-    /// queue is untouched on failure, so nothing is submitted for it.
-    /// Touches neither adoption nor any pending load's target.
+    /// Enqueues `batch` all-or-nothing into `dest`. `Ordinary` submit on
+    /// success; the queue is untouched on failure, so nothing is submitted
+    /// for it. Touches neither adoption nor any pending load's target.
     pub fn enqueue(
         &mut self,
+        dest: PlaylistId,
         batch: Vec<NewQueueEntry>,
     ) -> Result<(Vec<QueueEntryId>, Action), QueueError> {
-        let ids = self.state.enqueue(self.state.playing(), batch)?;
+        let ids = self.state.enqueue(dest, batch)?;
         Ok((ids, self.submit(Urgency::Ordinary)))
+    }
+
+    /// Creates a new, empty playlist named `name`. `Ordinary` submit on
+    /// success; nothing is submitted on failure.
+    pub fn create_playlist(&mut self, name: &str) -> Result<(PlaylistId, Action), PlaylistError> {
+        let id = self.state.create_playlist(name)?;
+        Ok((id, self.submit(Urgency::Ordinary)))
+    }
+
+    /// Renames an existing playlist. `Ordinary` submit on success; nothing is
+    /// submitted on failure.
+    pub fn rename_playlist(&mut self, id: PlaylistId, name: &str) -> Result<Action, PlaylistError> {
+        self.state.rename_playlist(id, name)?;
+        Ok(self.submit(Urgency::Ordinary))
+    }
+
+    /// The queue that holds `id`, in whichever playlist owns it (M8 §5).
+    fn owner_queue_mut(&mut self, id: QueueEntryId) -> Option<&mut Queue> {
+        let owner = self.state.owner_of(id)?;
+        self.state.playlist_mut(owner).map(Playlist::queue_mut)
     }
 
     /// Moves one entry a step in `direction`. `Ordinary` submit only when the
@@ -436,7 +457,10 @@ impl Session {
         id: QueueEntryId,
         direction: Direction,
     ) -> Result<Action, QueueError> {
-        let moved = self.state.queue_mut().move_entry(id, direction)?;
+        let moved = self
+            .owner_queue_mut(id)
+            .ok_or(QueueError::UnknownEntry(id))?
+            .move_entry(id, direction)?;
         Ok(if moved {
             self.submit(Urgency::Ordinary)
         } else {
@@ -540,15 +564,15 @@ impl Session {
         }
         let ids: Vec<QueueEntryId> = self
             .state
-            .queue()
-            .entries()
+            .playlists()
             .iter()
+            .flat_map(|playlist| playlist.queue().entries())
             .filter(|entry| entry.media() == media)
             .map(|entry| entry.id())
             .collect();
         let mut changed = false;
         for id in ids {
-            let Some(entry) = self.state.queue_mut().get_mut(id) else {
+            let Some(entry) = self.owner_queue_mut(id).and_then(|queue| queue.get_mut(id)) else {
                 continue;
             };
             let display = entry.display_mut();
@@ -604,9 +628,8 @@ impl Session {
         url: Url,
     ) -> Result<Action, QueueError> {
         let entry = self
-            .state
-            .queue_mut()
-            .get_mut(id)
+            .owner_queue_mut(id)
+            .and_then(|queue| queue.get_mut(id))
             .ok_or(QueueError::UnknownEntry(id))?;
         if let QueueSource::Podcast { fallback } = entry.source()
             && *fallback == url
@@ -622,7 +645,7 @@ impl Session {
     /// actually reported it: `MediaMetadata`'s absent fields must never blank
     /// out what the entry already displayed.
     fn absorb_load_metadata(&mut self, id: QueueEntryId, metadata: &MediaMetadata) {
-        let Some(entry) = self.state.queue_mut().get_mut(id) else {
+        let Some(entry) = self.owner_queue_mut(id).and_then(|queue| queue.get_mut(id)) else {
             return;
         };
         let display = entry.display_mut();

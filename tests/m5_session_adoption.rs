@@ -31,7 +31,10 @@ fn entry(name: &str) -> NewQueueEntry {
 fn queued(names: &[&str]) -> (Session, Vec<QueueEntryId>) {
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
-        .enqueue(names.iter().map(|n| entry(n)).collect())
+        .enqueue(
+            session.state().playing(),
+            names.iter().map(|n| entry(n)).collect(),
+        )
         .unwrap_or_else(|error| panic!("fits: {error}"));
     (session, ids)
 }

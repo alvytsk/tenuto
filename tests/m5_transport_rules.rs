@@ -31,7 +31,10 @@ fn with_active() -> (Queue, Vec<QueueEntryId>) {
     use tenuto::playback::event::{PlaybackEvent, StartDisposition};
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
-        .enqueue(vec![entry("a"), entry("b"), entry("c")])
+        .enqueue(
+            session.state().playing(),
+            vec![entry("a"), entry("b"), entry("c")],
+        )
         .unwrap_or_else(|error| panic!("fits: {error}"));
     let request = session
         .register_load(LoadTarget::Queue(ids[1]), &media("b"))

@@ -745,7 +745,7 @@ impl PlayerRuntime {
         id: QueueEntryId,
         start: impl FnOnce(&EngineHandle, LoadRequestId) -> Admission,
     ) {
-        let Some(entry) = self.session.state().queue().get(id) else {
+        let Some(entry) = self.session.state().find_entry(id) else {
             return;
         };
         let (media, source) = (entry.media().clone(), entry.source().clone());
@@ -976,7 +976,7 @@ impl PlayerRuntime {
                 }
             }
         }
-        match self.session.enqueue(batch) {
+        match self.session.enqueue(self.session.state().playing(), batch) {
             Ok((ids, action)) => {
                 self.submit(action);
                 self.request_enrichment(&ids);

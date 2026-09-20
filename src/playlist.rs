@@ -112,9 +112,6 @@ impl Playlist {
     pub fn queue_mut_for_tests(&mut self) -> &mut Queue {
         &mut self.queue
     }
-    /// Only reachable through `PersistedState::rename_playlist`, unused
-    /// until the task that wires that through `Session`.
-    #[allow(dead_code)]
     pub(crate) fn set_name(&mut self, name: String) {
         self.name = name;
     }

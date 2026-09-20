@@ -75,7 +75,9 @@ fn playing(rev: u64) -> PlaybackEvent {
 #[test]
 fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
     let mut session = Session::new(PersistedState::default());
-    let (_, action) = session.enqueue(vec![entry("a")]).expect("fits");
+    let (_, action) = session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     let Action::Submit { state, .. } = action else {
         panic!("must submit")
     };
@@ -84,7 +86,7 @@ fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
         .map(|i| entry(&format!("t{i}")))
         .collect();
     assert!(matches!(
-        session.enqueue(too_many),
+        session.enqueue(session.state().playing(), too_many),
         Err(QueueError::Capacity { .. })
     ));
     assert_eq!(session.state().queue().len(), 1);
@@ -94,7 +96,9 @@ fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
 fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
         .expect("registered");
@@ -127,7 +131,9 @@ fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
 fn removing_a_nonplaying_entry_leaves_playback_alone() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
         .expect("registered");
@@ -143,7 +149,9 @@ fn removing_a_nonplaying_entry_leaves_playback_alone() {
 fn clearing_stops_and_keeps_listening_history() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[1]), &media("b"))
         .expect("registered");
@@ -228,7 +236,9 @@ fn a_queued_track_can_lose_its_history_to_eviction_and_stays_queued() {
 #[test]
 fn volume_and_display_updates_submit_through_the_session() {
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("a")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("a")])
+        .expect("fits");
     assert!(matches!(
         session.set_volume(tenuto::playback::volume::Volume::new(0.4)),
         Action::Submit { .. }
@@ -259,7 +269,9 @@ fn volume_and_display_updates_submit_through_the_session() {
 #[test]
 fn an_identical_display_update_submits_nothing_and_leaves_state_unchanged() {
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry("a")]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     let update = DisplayUpdate {
         title: Some("Title".into()),
         artist: Some("Artist".into()),
@@ -287,7 +299,9 @@ fn an_identical_display_update_submits_nothing_and_leaves_state_unchanged() {
 fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps_the_repeated_field()
  {
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry("a")]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     session.update_display(
         &media("a"),
         DisplayUpdate {
@@ -327,7 +341,9 @@ fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps
 #[test]
 fn a_none_field_in_a_display_update_never_blanks_an_existing_value() {
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry("a")]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     session.update_display(
         &media("a"),
         DisplayUpdate {
@@ -392,7 +408,9 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
     );
     let mut session = Session::new(PersistedState::default());
 
-    let (ids, action) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, action) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     if let Action::Submit { state, .. } = action {
         writer.submit(state, Urgency::Forced);
     }
@@ -411,7 +429,9 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
     {
         writer.submit(state, urgency);
     }
-    let (_, action) = session.enqueue(vec![entry("c")]).expect("fits");
+    let (_, action) = session
+        .enqueue(session.state().playing(), vec![entry("c")])
+        .expect("fits");
     if let Action::Submit { state, .. } = action {
         writer.submit(state, Urgency::Forced);
     }

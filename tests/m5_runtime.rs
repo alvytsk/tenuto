@@ -64,7 +64,7 @@ fn local_entry(path: &Path) -> NewQueueEntry {
 fn seeded(entries: Vec<NewQueueEntry>) -> PersistedState {
     let mut session = Session::new(PersistedState::default());
     session
-        .enqueue(entries)
+        .enqueue(session.state().playing(), entries)
         .unwrap_or_else(|error| panic!("fits: {error}"));
     session.state().clone()
 }
