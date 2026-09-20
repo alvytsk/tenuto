@@ -14,6 +14,7 @@ use crate::persistence::model::{PersistedCheckpoint, PersistedState};
 use crate::playback::command::LoadRequestId;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
+use crate::playlist::PlaylistId;
 use crate::queue::{DisplayDuration, QueueEntry, QueueEntryId};
 
 /// What listening history says about a media, as a row shows it.
@@ -101,9 +102,23 @@ pub enum PersistenceStatus {
     Failing,
 }
 
+/// One playlist as the tab strip shows it (M8 §10).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaylistTab {
+    pub id: PlaylistId,
+    /// Already sanitized for the terminal.
+    pub name: String,
+    pub playing: bool,
+    pub shuffled: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlayerView {
+    /// The *viewed* playlist's rows; `active` and `now_playing` stay the
+    /// playing playlist's.
     pub rows: Vec<QueueRow>,
+    pub tabs: Vec<PlaylistTab>,
+    pub viewed: PlaylistId,
     pub active: Option<QueueEntryId>,
     pub now_playing: Option<NowPlaying>,
     pub phase: PlaybackPhase,
@@ -117,9 +132,26 @@ pub struct PlayerView {
     pub reconnecting: bool,
 }
 
-/// Every queue row, in queue order.
-pub(crate) fn queue_rows(state: &PersistedState) -> Vec<QueueRow> {
+pub(crate) fn playlist_tabs(state: &PersistedState) -> Vec<PlaylistTab> {
     state
+        .playlists()
+        .iter()
+        .map(|playlist| PlaylistTab {
+            id: playlist.id(),
+            name: displayable(playlist.name()),
+            playing: playlist.id() == state.playing(),
+            shuffled: playlist.shuffle().is_some(),
+        })
+        .collect()
+}
+
+/// Every row of one playlist, in queue order; empty for a playlist that is
+/// no longer there.
+pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<QueueRow> {
+    let Some(playlist) = state.playlist(playlist) else {
+        return Vec::new();
+    };
+    playlist
         .queue()
         .entries()
         .iter()
@@ -238,7 +270,7 @@ mod tests {
             false,
         );
 
-        let rows = queue_rows(&state);
+        let rows = queue_rows(&state, playing);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].title.contains('\u{1b}'), "{:?}", rows[0].title);
         assert!(rows[0].title.contains("title"));

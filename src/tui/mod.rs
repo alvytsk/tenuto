@@ -785,7 +785,8 @@ fn apply_browser_effect(effect: BrowserEffect, front: &mut Front<'_>) -> io::Res
             Ok(())
         }
         BrowserEffect::Enqueue(items) => {
-            apply_effect(Effect::App(AppCommand::Enqueue(items)), front)
+            let dest = front.runtime.viewed();
+            apply_effect(Effect::App(AppCommand::Enqueue { dest, items }), front)
         }
         BrowserEffect::Remove(id) => apply_effect(Effect::App(AppCommand::Remove(id)), front),
         BrowserEffect::Close => apply_effect(Effect::CloseBrowser, front),

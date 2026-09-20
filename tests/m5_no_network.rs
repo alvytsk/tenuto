@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ratatui::{Terminal, backend::TestBackend};
-use runtime::{pump_for, rig_with, rig_with_probe, row_ids};
+use runtime::{enqueue, pump_for, rig_with, rig_with_probe, row_ids};
 use serde_json::json;
 use support::browse::wait_for_result;
 use support::server::{Script, TestServer};
@@ -123,12 +123,15 @@ fn restoring_enqueueing_and_browsing_remote_entries_make_no_requests() {
         published: None,
     };
     let local = std::fs::canonicalize(LOCAL).unwrap_or_else(|error| panic!("fixture: {error}"));
-    rig.runtime.handle(AppCommand::Enqueue(vec![
-        EnqueueItem::Url(server.url("/b.mp3")),
-        EnqueueItem::Episode(episode),
-        // The positive control: enrichment is running in this rig.
-        EnqueueItem::Path(local.clone()),
-    ]));
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Url(server.url("/b.mp3")),
+            EnqueueItem::Episode(episode),
+            // The positive control: enrichment is running in this rig.
+            EnqueueItem::Path(local.clone()),
+        ],
+    );
     let view = rig.runtime.view();
     assert_eq!(view.rows.len(), 5, "{view:?}");
     pump_for(&mut rig.runtime, Duration::from_millis(300));

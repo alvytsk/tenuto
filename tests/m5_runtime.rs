@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use runtime::{
-    null_engine, parts, pump_for, pump_until, rig_with, rig_with_parts, rig_with_probe, row_ids,
+    enqueue, null_engine, parts, pump_for, pump_until, rig_with, rig_with_parts, rig_with_probe,
+    row_ids,
 };
 use support::server::{DocumentReply, Script, TestServer};
 use tenuto::application::enrich::default_probe;
@@ -109,10 +110,13 @@ fn is_playing(view: &PlayerView, id: QueueEntryId) -> bool {
 #[test]
 fn enter_plays_the_selected_entry_and_adopts_only_it() {
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime.handle(AppCommand::Enqueue(vec![
-        EnqueueItem::Path(SHORT.into()),
-        EnqueueItem::Path(SHORT.into()),
-    ]));
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Path(SHORT.into()),
+            EnqueueItem::Path(SHORT.into()),
+        ],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
     // `Loaded` adopts the row while the engine is still paused; the start
@@ -126,10 +130,13 @@ fn enter_plays_the_selected_entry_and_adopts_only_it() {
 #[test]
 fn completion_advances_once_and_the_last_entry_stays_ended() {
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime.handle(AppCommand::Enqueue(vec![
-        EnqueueItem::Path(SHORT.into()),
-        EnqueueItem::Path(SHORT.into()),
-    ]));
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Path(SHORT.into()),
+            EnqueueItem::Path(SHORT.into()),
+        ],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     pump_until(&mut rig.runtime, "advanced to the second row", |view| {
@@ -149,8 +156,7 @@ fn completion_advances_once_and_the_last_entry_stays_ended() {
 fn a_failed_load_keeps_the_queue_and_does_not_skip() {
     let state = seeded(vec![local_entry(Path::new(MISSING))]);
     let mut rig = rig_with(state);
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Path(SHORT.into())]));
+    enqueue(&mut rig.runtime, vec![EnqueueItem::Path(SHORT.into())]);
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     pump_until(&mut rig.runtime, "load failed", |view| {
@@ -175,9 +181,7 @@ fn space_before_loading_loads_the_restored_active_entry() {
         "active_entry": 2 });
     let mut rig = rig_with(serde_json::from_value(file).expect("valid"));
     let ids = row_ids(&rig.runtime);
-    rig.runtime.handle(AppCommand::PlayPause {
-        selected: Some(ids[0]),
-    });
+    rig.runtime.handle(AppCommand::PlayPause);
     pump_until(&mut rig.runtime, "active entry loaded", |view| {
         view.now_playing
             .as_ref()
@@ -188,8 +192,7 @@ fn space_before_loading_loads_the_restored_active_entry() {
 #[test]
 fn seeking_before_any_load_is_a_notice_and_opens_nothing() {
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Path(SHORT.into())]));
+    enqueue(&mut rig.runtime, vec![EnqueueItem::Path(SHORT.into())]);
     rig.runtime.handle(AppCommand::SeekBy(10));
     assert_eq!(
         rig.runtime.view().status.as_deref(),
@@ -224,8 +227,7 @@ fn enqueueing_a_tagged_local_file_fills_title_and_artist_in_the_background() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = tagged_flac::tagged_flac(dir.path(), "Morning Tide", "Harbor", "Coast", None);
     let mut rig = rig_with_probe(PersistedState::default(), default_probe(TestHook::None));
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Path(path)]));
+    enqueue(&mut rig.runtime, vec![EnqueueItem::Path(path)]);
     assert_eq!(
         rig.runtime.view().rows[0].title,
         "tagged.flac",
@@ -254,8 +256,7 @@ fn loading_a_tagged_file_fills_artist_and_album_from_the_decoder() {
     let path = tagged_flac::tagged_flac(dir.path(), "Morning Tide", "Harbor", "Coast", None);
     // Enrichment disabled: only the load itself can supply the tags.
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Path(path)]));
+    enqueue(&mut rig.runtime, vec![EnqueueItem::Path(path)]);
     let id = row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(id));
     pump_until(&mut rig.runtime, "tags adopted with the load", shows_tags);
@@ -269,23 +270,27 @@ fn loading_a_tagged_file_fills_artist_and_album_from_the_decoder() {
 #[test]
 fn an_oversized_enqueue_is_rejected_whole_with_a_visible_message() {
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime.handle(AppCommand::Enqueue(
+    enqueue(
+        &mut rig.runtime,
         (0..4097).map(|_| EnqueueItem::Path(SHORT.into())).collect(),
-    ));
+    );
     assert!(rig.runtime.view().rows.is_empty());
     assert_eq!(
         rig.runtime.view().status.as_deref(),
-        Some("Queue is full (4096 entries)")
+        Some("Playlists are full (4096 entries in total)")
     );
 }
 
 #[test]
 fn two_loads_of_one_media_submitted_together_end_on_the_later_row() {
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime.handle(AppCommand::Enqueue(vec![
-        EnqueueItem::Path(SHORT.into()),
-        EnqueueItem::Path(SHORT.into()),
-    ]));
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Path(SHORT.into()),
+            EnqueueItem::Path(SHORT.into()),
+        ],
+    );
     let ids = row_ids(&rig.runtime);
     // Both are submitted before a single event is drained.
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
@@ -382,10 +387,10 @@ fn supersede_a_burst(how: Superseding) {
         _ => EnqueueItem::Path(b_path.clone()),
     };
     let mut rig = rig_with(PersistedState::default());
-    rig.runtime.handle(AppCommand::Enqueue(vec![
-        EnqueueItem::Path(a_path.clone()),
-        b_item,
-    ]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Path(a_path.clone()), b_item],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     pump_until(&mut rig.runtime, "A playing with a duration", |view| {
@@ -403,7 +408,10 @@ fn supersede_a_burst(how: Superseding) {
         }
         Superseding::Stop => rig.runtime.handle(AppCommand::Stop),
         Superseding::RemoveActive => rig.runtime.handle(AppCommand::Remove(ids[0])),
-        Superseding::Clear => rig.runtime.handle(AppCommand::ClearQueue),
+        Superseding::Clear => {
+            let viewed = rig.runtime.viewed();
+            rig.runtime.handle(AppCommand::ClearPlaylist(viewed));
+        }
         Superseding::SeekTo => rig
             .runtime
             .handle(AppCommand::SeekTo(Duration::from_secs(1))),
@@ -533,10 +541,10 @@ fn removing_the_active_entry_does_not_cancel_a_newer_load_in_flight() {
     let server = delayed_fixture("/b.flac", Duration::from_millis(600));
     let (_media, root) = media_dir(&["a.flac"]);
     let mut rig = rig_with(seeded(vec![local_entry(&root.join("a.flac"))]));
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Url(
-            server.url("/b.flac"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Url(server.url("/b.flac"))],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     pump_until(&mut rig.runtime, "A playing", |view| {
@@ -560,10 +568,10 @@ fn clearing_during_a_load_never_adopts_the_invalidated_load() {
     let server = delayed_fixture("/b.flac", Duration::from_millis(600));
     let (_media, root) = media_dir(&["a.flac"]);
     let mut rig = rig_with(seeded(vec![local_entry(&root.join("a.flac"))]));
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Url(
-            server.url("/b.flac"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Url(server.url("/b.flac"))],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     pump_until(&mut rig.runtime, "A playing", |view| {
@@ -572,7 +580,8 @@ fn clearing_during_a_load_never_adopts_the_invalidated_load() {
 
     rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
     pump_for(&mut rig.runtime, Duration::from_millis(200));
-    rig.runtime.handle(AppCommand::ClearQueue);
+    let viewed = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::ClearPlaylist(viewed));
     let deadline = Instant::now() + Duration::from_secs(20);
     while rig.runtime.session().pending_load_count() > 0 {
         rig.runtime.pump();
@@ -643,24 +652,9 @@ fn retry_a_failed_switch(retry: impl Fn(QueueEntryId) -> AppCommand, duplicates:
 
 #[test]
 fn space_retries_a_failed_switch_with_a_fresh_token() {
-    retry_a_failed_switch(
-        |selected| AppCommand::PlayPause {
-            selected: Some(selected),
-        },
-        false,
-    );
-    retry_a_failed_switch(
-        |selected| AppCommand::Play {
-            selected: Some(selected),
-        },
-        false,
-    );
-    retry_a_failed_switch(
-        |selected| AppCommand::PlayPause {
-            selected: Some(selected),
-        },
-        true,
-    );
+    retry_a_failed_switch(|_| AppCommand::PlayPause, false);
+    retry_a_failed_switch(|_| AppCommand::Play, false);
+    retry_a_failed_switch(|_| AppCommand::PlayPause, true);
 }
 
 const FEED_URL: &str = "https://feeds.example/radio-t.xml";
@@ -765,13 +759,12 @@ fn a_failure_before_admission_leaves_the_transport_with_the_playing_track() {
     });
 
     // Space pauses A rather than retrying B, and `p` resumes it.
-    rig.runtime
-        .handle(AppCommand::PlayPause { selected: Some(b) });
+    rig.runtime.handle(AppCommand::PlayPause);
     assert_eq!(rig.runtime.session().pending_load_count(), 0, "no retry");
     pump_until(&mut rig.runtime, "A paused", |view| {
         view.phase == PlaybackPhase::Paused
     });
-    rig.runtime.handle(AppCommand::Play { selected: Some(b) });
+    rig.runtime.handle(AppCommand::Play);
     assert_eq!(rig.runtime.session().pending_load_count(), 0, "no retry");
     pump_until(&mut rig.runtime, "A playing again", |view| {
         is_playing(view, a)
@@ -861,7 +854,7 @@ fn a_resolution_failure_is_retryable_without_losing_the_previous_adoption() {
     library
         .seed(&podcast_rss(&enclosure), FEED_URL)
         .expect("repair the cache");
-    rig.runtime.handle(AppCommand::Play { selected: Some(a) });
+    rig.runtime.handle(AppCommand::Play);
     pump_until(&mut rig.runtime, "B loaded", |view| {
         view.active == Some(b) && view.now_playing.as_ref().is_some_and(|now| now.loaded)
     });
@@ -919,10 +912,10 @@ fn a_failed_second_load_is_not_retried_implicitly() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").status(404));
     let (_media, root) = media_dir(&["a.flac"]);
     let mut rig = rig_with(seeded(vec![local_entry(&root.join("a.flac"))]));
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Url(
-            server.url("/b.flac"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Url(server.url("/b.flac"))],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
@@ -974,8 +967,7 @@ fn automatic_start_handles_intervening_outcomes() {
 fn the_spectrum_exists_once_the_engine_does_and_labels_the_adopted_revision() {
     let mut rig = rig_with(PersistedState::default());
     assert!(rig.runtime.spectrum().is_none(), "no engine yet");
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::Path(FIVE.into())]));
+    enqueue(&mut rig.runtime, vec![EnqueueItem::Path(FIVE.into())]);
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     pump_until(&mut rig.runtime, "playing", |view| is_playing(view, ids[0]));

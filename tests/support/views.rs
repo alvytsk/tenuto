@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use tenuto::application::transport::PlaybackPhase;
 use tenuto::application::view::{
-    NowPlaying, PersistenceStatus, PlayerView, QueueRow, SavedHistory,
+    NowPlaying, PersistenceStatus, PlayerView, PlaylistTab, QueueRow, SavedHistory,
 };
 use tenuto::media::id::{AbsolutePath, MediaId};
+use tenuto::persistence::model::PersistedState;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::volume::Volume;
 use tenuto::queue::{
@@ -56,7 +57,15 @@ pub fn decoded(seconds: u64) -> DisplayDuration {
 
 pub fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
     let ids = ids();
+    let viewed = PersistedState::default().playing();
     PlayerView {
+        tabs: vec![PlaylistTab {
+            id: viewed,
+            name: "Default".into(),
+            playing: true,
+            shuffled: false,
+        }],
+        viewed,
         rows: vec![
             QueueRow {
                 id: ids[0],

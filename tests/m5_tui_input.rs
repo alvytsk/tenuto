@@ -61,14 +61,14 @@ fn selection_moves_without_touching_playback() {
 }
 
 #[test]
-fn transport_keys_carry_the_selection_as_an_argument() {
+fn transport_keys_map_to_their_commands_and_enter_carries_the_selection() {
     let view = sample_view();
     let mut ui = UiState::new(true);
     ui.selected = Some(view.rows[2].id);
     let selected = ui.selected;
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char(' ')), &mut ui, &view))[..],
-        [AppCommand::PlayPause { selected: s }] if *s == selected
+        [AppCommand::PlayPause]
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Enter), &mut ui, &view))[..],
@@ -76,7 +76,7 @@ fn transport_keys_carry_the_selection_as_an_argument() {
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char('p')), &mut ui, &view))[..],
-        [AppCommand::Play { .. }]
+        [AppCommand::Play]
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Left), &mut ui, &view))[..],
@@ -88,7 +88,7 @@ fn transport_keys_carry_the_selection_as_an_argument() {
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char(']')), &mut ui, &view))[..],
-        [AppCommand::Next { .. }]
+        [AppCommand::Next]
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char('J')), &mut ui, &view))[..],
@@ -124,7 +124,8 @@ fn typing_a_url_never_triggers_shortcuts_and_enter_enqueues_it() {
     let effects = handle_key(key(KeyCode::Enter), &mut ui, &view);
     assert!(matches!(
         app(&effects)[..],
-        [AppCommand::Enqueue(items)] if matches!(&items[..], [EnqueueItem::Url(u)] if u == "https://q.example/ p+.mp3")
+        [AppCommand::Enqueue { dest, items }] if *dest == view.viewed
+            && matches!(&items[..], [EnqueueItem::Url(u)] if u == "https://q.example/ p+.mp3")
     ));
     assert_eq!(ui.overlay, Overlay::None);
 }
@@ -153,7 +154,7 @@ fn clearing_requires_confirmation() {
     handle_key(key(KeyCode::Char('c')), &mut ui, &view);
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char('y')), &mut ui, &view))[..],
-        [AppCommand::ClearQueue]
+        [AppCommand::ClearPlaylist(id)] if *id == view.viewed
     ));
 }
 
@@ -306,12 +307,11 @@ fn scrolling_inside_the_queue_moves_the_selection() {
 }
 
 #[test]
-fn clicking_play_pause_carries_the_selection() {
+fn clicking_play_pause_is_the_play_pause_command() {
     let view = sample_view();
     let hits = draw_hits(&view, &UiState::new(true));
     let mut ui = UiState::new(true);
     ui.selected = Some(view.rows[1].id);
-    let selected = ui.selected;
     let rect = hits
         .buttons
         .iter()
@@ -320,10 +320,7 @@ fn clicking_play_pause_carries_the_selection() {
         .0;
     let (col, row) = centre(rect);
     let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
-    assert!(matches!(
-        app(&effects)[..],
-        [AppCommand::PlayPause { selected: s }] if *s == selected
-    ));
+    assert!(matches!(app(&effects)[..], [AppCommand::PlayPause]));
 }
 
 #[test]
