@@ -327,6 +327,11 @@ impl Queue {
         Self { entries, active }
     }
 
+    #[doc(hidden)]
+    pub fn from_parts_for_tests(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
+        Self::from_parts(entries, active)
+    }
+
     pub(crate) fn entry_from_parts(
         id: QueueEntryId,
         media: MediaId,

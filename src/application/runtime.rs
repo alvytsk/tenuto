@@ -648,13 +648,18 @@ impl PlayerRuntime {
     }
 
     fn decide(&self, input: TransportInput, selected: Option<QueueEntryId>) -> TransportDecision {
+        let state = self.session.state();
+        let playing = state.playing_playlist();
         decide(
             input,
             &TransportSituation {
-                queue: self.session.state().queue(),
+                navigation: playing,
+                viewed: playing,
                 selected,
                 phase: self.phase(),
-                last_requested: self.last_requested,
+                retry: self
+                    .last_requested
+                    .filter(|id| state.find_entry(*id).is_some()),
                 live: self.indefinite(),
             },
         )

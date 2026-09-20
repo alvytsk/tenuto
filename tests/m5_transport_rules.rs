@@ -6,6 +6,7 @@ use support::media;
 use tenuto::application::transport::*;
 use tenuto::media::id::MediaId;
 use tenuto::persistence::model::PersistedState;
+use tenuto::playlist::{Playlist, PlaylistId};
 use tenuto::queue::{
     DisplayMetadata, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueSource,
 };
@@ -68,6 +69,17 @@ fn without_active() -> (Queue, Vec<QueueEntryId>) {
     (queue, ids)
 }
 
+/// One playlist, both navigated and viewed: the single-list world these
+/// M5 rules were written for.
+fn only(queue: &Queue) -> Playlist {
+    Playlist::from_parts(
+        PlaylistId::from_raw_for_tests(1),
+        "P".into(),
+        None,
+        queue.clone(),
+    )
+}
+
 fn run(
     queue: &Queue,
     selected: Option<QueueEntryId>,
@@ -75,13 +87,17 @@ fn run(
     last: Option<QueueEntryId>,
     input: TransportInput,
 ) -> TransportDecision {
+    let playlist = only(queue);
     decide(
         input,
         &TransportSituation {
-            queue,
+            navigation: &playlist,
+            viewed: &playlist,
             selected,
             phase,
-            last_requested: last,
+            // The runtime validates the retry across every playlist; with one
+            // playlist that is this queue.
+            retry: last.filter(|id| queue.get(*id).is_some()),
             live: false,
         },
     )
@@ -132,6 +148,8 @@ fn without_an_active_entry_the_default_selection_is_the_first_row() {
         ),
         TransportDecision::Load(ids[0])
     );
+    // M8 §7: Space and `p` never follow the viewed tab, so a selected row
+    // no longer outranks the first entry in playback order.
     assert_eq!(
         run(
             &queue,
@@ -140,7 +158,7 @@ fn without_an_active_entry_the_default_selection_is_the_first_row() {
             None,
             TransportInput::Play
         ),
-        TransportDecision::Load(ids[2])
+        TransportDecision::Load(ids[0])
     );
 }
 
@@ -295,6 +313,8 @@ fn a_failed_load_retries_the_last_requested_entry_while_it_is_queued() {
         ),
         TransportDecision::Load(ids[2])
     );
+    // With the retry gone the chain falls through to the cursor, then the
+    // first entry in playback order — never the selected row (M8 §7).
     let mut shorter = queue.clone();
     shorter.remove(ids[2]).expect("known");
     assert_eq!(
@@ -305,7 +325,7 @@ fn a_failed_load_retries_the_last_requested_entry_while_it_is_queued() {
             Some(ids[2]),
             TransportInput::Play
         ),
-        TransportDecision::Load(ids[1])
+        TransportDecision::Load(ids[0])
     );
 }
 
@@ -526,11 +546,12 @@ fn a_stale_selection_falls_back_to_the_first_row() {
     );
 }
 
-// An ended track with no active queue entry replays from the selection, the
-// same as before anything loaded.
+// An ended track with no active queue entry starts the playlist over from
+// its first entry in playback order, the same as before anything loaded.
+// M8 §7: the selected row is Enter's alone.
 
 #[test]
-fn ended_with_no_active_entry_loads_the_selection_on_space() {
+fn ended_with_no_active_entry_loads_the_first_row_on_space() {
     let (queue, ids) = without_active();
     assert_eq!(
         run(
@@ -540,7 +561,7 @@ fn ended_with_no_active_entry_loads_the_selection_on_space() {
             None,
             TransportInput::Space
         ),
-        TransportDecision::Load(ids[1])
+        TransportDecision::Load(ids[0])
     );
 }
 
@@ -589,13 +610,15 @@ fn playing_with_no_active_entry_does_not_navigate() {
 // timeline to move around in.
 
 fn live(queue: &Queue, phase: PlaybackPhase, input: TransportInput) -> TransportDecision {
+    let playlist = only(queue);
     decide(
         input,
         &TransportSituation {
-            queue,
+            navigation: &playlist,
+            viewed: &playlist,
             selected: None,
             phase,
-            last_requested: None,
+            retry: None,
             live: true,
         },
     )
