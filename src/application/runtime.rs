@@ -1008,8 +1008,14 @@ impl PlayerRuntime {
             workers.cancel_all();
         }
         let progress = self.latest_progress();
-        let removal = self.session.clear_queue(&progress, self.clock.sample());
-        self.apply_removal(removal);
+        let playing = self.session.state().playing();
+        match self
+            .session
+            .clear_playlist(playing, &progress, self.clock.sample())
+        {
+            Ok(removal) => self.apply_removal(removal),
+            Err(error) => self.status = Some(error.to_string()),
+        }
     }
 
     /// Asks the metadata workers about each of `ids` that is a local file

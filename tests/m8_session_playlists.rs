@@ -11,6 +11,7 @@ use tenuto::persistence::model::PersistedState;
 use tenuto::playback::command::LoadRequestId;
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::provenance::PositionProvenance;
+use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
 use tenuto::playlist::{PlaylistId, Shuffle};
 use tenuto::queue::{
@@ -45,7 +46,6 @@ fn loaded(request: LoadRequestId, rev: u64, name: &str) -> PlaybackEvent {
     }
 }
 
-#[allow(dead_code)]
 fn progress(rev: u64, name: &str, load: Option<LoadRequestId>) -> Progress {
     Progress {
         session_rev: rev,
@@ -184,6 +184,16 @@ fn a_display_update_reaches_every_occurrence_in_every_playlist() {
     }
 }
 
+/// The `Playing` that establishes a timeline, so a later capture is allowed
+/// to write a checkpoint at all.
+fn started(rev: u64) -> PlaybackEvent {
+    PlaybackEvent::StateChanged {
+        session_rev: rev,
+        state: PlaybackState::Playing,
+        request: None,
+    }
+}
+
 fn end(rev: u64) -> PlaybackEvent {
     PlaybackEvent::EndOfTrack {
         session_rev: rev,
@@ -289,4 +299,136 @@ fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
         Some(LoadTarget::Queue(two.in_a[0])),
         "no release"
     );
+}
+
+#[test]
+fn removing_a_cursor_nothing_adopted_only_clears_it() {
+    // B's cursor exists because B played earlier; A plays now.
+    let mut two = two();
+    adopt(&mut two.session, two.in_b[0], "b1", 1);
+    let playing = adopt(&mut two.session, two.in_a[0], "a1", 2);
+    assert_eq!(two.session.state().playing(), two.a);
+
+    let removal = two
+        .session
+        .remove_entry(
+            two.in_b[0],
+            &progress(2, "a1", Some(playing)),
+            FakeClock::new().sample(),
+        )
+        .expect("queued");
+
+    assert!(
+        !removal.stop_playback,
+        "an inactive playlist's cursor is not ownership (P3)"
+    );
+    assert_eq!(two.session.adopted().map(|a| a.request), Some(playing));
+    assert_eq!(
+        two.session
+            .state()
+            .playlist(two.b)
+            .expect("B")
+            .queue()
+            .active(),
+        None
+    );
+}
+
+#[test]
+fn with_a_playing_and_b_loading_removing_as_entry_cannot_touch_bs_load() {
+    let mut two = two();
+    let playing = adopt(&mut two.session, two.in_a[0], "a1", 1);
+    let pending = two
+        .session
+        .register_load(LoadTarget::Queue(two.in_b[0]), &media("b1"))
+        .expect("registered");
+
+    let removal = two
+        .session
+        .remove_entry(
+            two.in_a[0],
+            &progress(1, "a1", Some(playing)),
+            FakeClock::new().sample(),
+        )
+        .expect("queued");
+    assert!(removal.stop_playback, "the adopted entry is owned");
+    assert_eq!(two.session.adopted(), None);
+
+    two.session
+        .observe(&loaded(pending, 2, "b1"), FakeClock::new().sample());
+    assert_eq!(
+        two.session.adopted().map(|a| a.request),
+        Some(pending),
+        "B's load is still valid"
+    );
+    assert_eq!(two.session.state().playing(), two.b);
+}
+
+#[test]
+fn clearing_a_playlist_invalidates_only_its_own_pending_loads() {
+    let mut two = two();
+    let for_a = two
+        .session
+        .register_load(LoadTarget::Queue(two.in_a[0]), &media("a1"))
+        .expect("registered");
+    let for_b = two
+        .session
+        .register_load(LoadTarget::Queue(two.in_b[0]), &media("b1"))
+        .expect("registered");
+
+    let removal = two
+        .session
+        .clear_playlist(two.b, &progress(0, "a1", None), FakeClock::new().sample())
+        .expect("B exists");
+    assert!(!removal.stop_playback);
+
+    two.session
+        .observe(&loaded(for_b, 1, "b1"), FakeClock::new().sample());
+    assert_eq!(
+        two.session.adopted(),
+        None,
+        "a load into the cleared playlist is never adopted"
+    );
+    two.session
+        .observe(&loaded(for_a, 2, "a1"), FakeClock::new().sample());
+    assert_eq!(two.session.adopted().map(|a| a.request), Some(for_a));
+}
+
+#[test]
+fn deleting_the_owning_playlist_releases_and_moves_playing() {
+    let mut two = two();
+    let playing = adopt(&mut two.session, two.in_a[0], "a1", 1);
+    two.session.observe(&started(1), FakeClock::new().sample());
+    let removal = two
+        .session
+        .delete_playlist(
+            two.a,
+            &progress(1, "a1", Some(playing)),
+            FakeClock::new().sample(),
+        )
+        .expect("another exists");
+    assert!(removal.stop_playback);
+    assert_eq!(two.session.adopted(), None);
+    assert_eq!(two.session.state().playing(), two.b);
+    assert!(
+        two.session.state().entry_for(&media("a1")).is_some(),
+        "the outgoing checkpoint was captured"
+    );
+}
+
+#[test]
+fn deleting_another_playlist_leaves_playback_alone() {
+    let mut two = two();
+    let playing = adopt(&mut two.session, two.in_a[0], "a1", 1);
+    let removal = two
+        .session
+        .delete_playlist(
+            two.b,
+            &progress(1, "a1", Some(playing)),
+            FakeClock::new().sample(),
+        )
+        .expect("another exists");
+    assert!(!removal.stop_playback);
+    assert_eq!(two.session.adopted().map(|a| a.request), Some(playing));
+    assert_eq!(two.session.state().playing(), two.a);
 }

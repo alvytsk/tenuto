@@ -485,61 +485,128 @@ impl Session {
         })
     }
 
-    /// Removes one entry. Unknown `id` is an error raised before anything
-    /// changes. Every pending load targeting `id` is invalidated first, so a
-    /// `Loaded` already in flight for it can never resurrect it (M5 §6). If
-    /// `id` is the active entry, its checkpoint is captured through the same
-    /// gated path `shutdown_snapshot` uses (`capture_current`) before
-    /// adoption is cleared — `current_media` and the checkpoints already on
-    /// record are left exactly as they are.
+    /// Whether the adopted load is for `id` (M8 §5). A cursor is only a
+    /// remembered entry; this is what ownership means.
+    pub fn owns_entry(&self, id: QueueEntryId) -> bool {
+        self.adopted
+            .is_some_and(|adopted| adopted.target == LoadTarget::Queue(id))
+    }
+
+    /// Whether `id` is the playlist that owns the adopted entry (M8 §5).
+    pub fn owns_playlist(&self, id: PlaylistId) -> bool {
+        match self.adopted.map(|adopted| adopted.target) {
+            Some(LoadTarget::Queue(entry)) => self.state.owner_of(entry) == Some(id),
+            _ => false,
+        }
+    }
+
+    /// Removes one entry, wherever it is queued. Unknown `id` is an error
+    /// raised before anything changes. Every pending load targeting `id` is
+    /// invalidated first, so a `Loaded` already in flight for it can never
+    /// resurrect it (M5 §6). Playback is released only when `id` is the
+    /// *owned* entry — a cursor alone is not ownership (M8 §5) — and its
+    /// checkpoint is then captured through the same gated path
+    /// `shutdown_snapshot` uses (`capture_current`); `current_media` and the
+    /// checkpoints already on record are left exactly as they are.
     pub fn remove_entry(
         &mut self,
         id: QueueEntryId,
         progress: &Progress,
         now: ClockSample,
     ) -> Result<Removal, QueueError> {
-        if self.state.queue().get(id).is_none() {
+        if self.state.find_entry(id).is_none() {
             return Err(QueueError::UnknownEntry(id));
         }
         self.invalidate_pending(|target| target == LoadTarget::Queue(id));
-        let was_active = self.state.queue().active() == Some(id);
-        if was_active {
+        let owned = self.owns_entry(id);
+        if owned {
             self.release_active(progress, now);
         }
-        let removed = self.state.queue_mut().remove(id)?;
+        // `Queue::remove` clears the cursor itself when `id` was the cursor.
+        let removed = self
+            .owner_queue_mut(id)
+            .ok_or(QueueError::UnknownEntry(id))?
+            .remove(id)?;
         Ok(Removal {
             action: self.submit(Urgency::Forced),
-            stop_playback: was_active,
+            stop_playback: owned,
             selection: removed.selection,
         })
     }
 
-    /// Clears the whole queue. Same active-entry capture as `remove_entry`
-    /// (`release_active`); every pending load still targeting a queue entry
-    /// is invalidated first, so none of them can resurrect an entry that no
-    /// longer exists (M5 §6). `current_media` and every checkpoint already on
-    /// record are left exactly as they are — queue membership does not pin a
-    /// checkpoint.
-    pub fn clear_queue(&mut self, progress: &Progress, now: ClockSample) -> Removal {
-        self.invalidate_pending(|target| matches!(target, LoadTarget::Queue(_)));
-        let was_active = self.state.queue().active().is_some();
-        if was_active {
+    /// Invalidates the pending loads into `id`, before its entries go, and
+    /// releases playback only if `id` owns it (M8 §5). Loads for other
+    /// playlists are untouched.
+    fn vacate(&mut self, id: PlaylistId, progress: &Progress, now: ClockSample) -> bool {
+        let entries: Vec<QueueEntryId> = self
+            .state
+            .playlist(id)
+            .map(|playlist| playlist.queue().entries().iter().map(|e| e.id()).collect())
+            .unwrap_or_default();
+        self.invalidate_pending(
+            |target| matches!(target, LoadTarget::Queue(entry) if entries.contains(&entry)),
+        );
+        let owning = self.owns_playlist(id);
+        if owning {
             self.release_active(progress, now);
         }
-        self.state.queue_mut().clear();
-        Removal {
-            action: self.submit(Urgency::Forced),
-            stop_playback: was_active,
-            selection: None,
+        owning
+    }
+
+    /// Empties one playlist, keeping it. `current_media` and every checkpoint
+    /// already on record are left exactly as they are — queue membership does
+    /// not pin a checkpoint.
+    pub fn clear_playlist(
+        &mut self,
+        id: PlaylistId,
+        progress: &Progress,
+        now: ClockSample,
+    ) -> Result<Removal, PlaylistError> {
+        if self.state.playlist(id).is_none() {
+            return Err(PlaylistError::Unknown(id));
         }
+        let owning = self.vacate(id, progress, now);
+        if let Some(playlist) = self.state.playlist_mut(id) {
+            playlist.queue_mut().clear();
+        }
+        Ok(Removal {
+            action: self.submit(Urgency::Forced),
+            stop_playback: owning,
+            selection: None,
+        })
+    }
+
+    /// Deletes one playlist. The `LastPlaylist` refusal (P1) precedes
+    /// `vacate`, so a refused delete releases nothing. Deleting the playing
+    /// playlist moves `playing` to the adjacent one and re-points
+    /// `current_media` at its cursor (M8 §5).
+    pub fn delete_playlist(
+        &mut self,
+        id: PlaylistId,
+        progress: &Progress,
+        now: ClockSample,
+    ) -> Result<Removal, PlaylistError> {
+        if self.state.playlist(id).is_none() {
+            return Err(PlaylistError::Unknown(id));
+        }
+        if self.state.playlists().len() == 1 {
+            return Err(PlaylistError::LastPlaylist);
+        }
+        let owning = self.vacate(id, progress, now);
+        self.state.remove_playlist(id)?;
+        Ok(Removal {
+            action: self.submit(Urgency::Forced),
+            stop_playback: owning,
+            selection: None,
+        })
     }
 
     /// Marks every pending load whose target satisfies `matches` as
     /// invalidated, so a `Loaded` that later arrives for it is never adopted
-    /// (M5 §6). Shared by `remove_entry` (one queue id) and `clear_queue`
-    /// (every queue target) — `LoadTarget::Legacy` never matches either
-    /// caller's predicate, so a legacy load is never invalidated by a queue
-    /// mutation.
+    /// (M5 §6). Shared by `remove_entry` (one queue id) and `vacate` (the
+    /// targeted playlist's entries) — `LoadTarget::Legacy` never matches
+    /// either caller's predicate, so a legacy load is never invalidated by a
+    /// queue mutation.
     fn invalidate_pending(&mut self, matches: impl Fn(LoadTarget) -> bool) {
         for pending in self.pending.values_mut() {
             if matches(pending.target) {
@@ -550,9 +617,9 @@ impl Session {
 
     /// Releases whatever this session currently has adopted: captures its
     /// checkpoint through the same gated path `shutdown_snapshot` uses
-    /// (`capture_current`), then clears `adopted` and `last_sample`. Shared
-    /// by `remove_entry` and `clear_queue` — both need exactly this release
-    /// when the entry they are acting on was active.
+    /// (`capture_current`), then clears `adopted` and `last_sample`. Called
+    /// only for an owned entry or an owning playlist — the ownership check
+    /// lives in its callers (M8 §5).
     fn release_active(&mut self, progress: &Progress, now: ClockSample) {
         self.capture_current(progress, now);
         self.adopted = None;

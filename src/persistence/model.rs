@@ -369,10 +369,6 @@ impl PersistedState {
     /// else the previous, and re-points `current_media` at that playlist's
     /// cursor — or clears it — so the cursor is never judged against the
     /// deleted playlist's media (M8 §5). Checkpoints are untouched.
-    ///
-    /// Wired up by the task that exposes playlist management through
-    /// `Session`; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn remove_playlist(&mut self, id: PlaylistId) -> Result<Playlist, PlaylistError> {
         let index = self.index_of(id).ok_or(PlaylistError::Unknown(id))?;
         if self.playlists.len() == 1 {
@@ -387,9 +383,9 @@ impl PersistedState {
         Ok(removed)
     }
 
-    /// Only reachable through `remove_playlist` today; unused in a build
-    /// that does not exercise it (this task's tests are the only caller).
-    #[allow(dead_code)]
+    /// Re-points `current_media` at the playing playlist's cursor, or clears
+    /// it when that playlist has none (M8 §5). Reached through
+    /// `remove_playlist` and by recovery.
     pub(super) fn repoint_current_media(&mut self) {
         let queue = self.queue();
         self.current_media = queue

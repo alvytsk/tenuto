@@ -157,7 +157,13 @@ fn clearing_stops_and_keeps_listening_history() {
         .expect("registered");
     session.observe(&loaded(request, 1, "b"), clock.sample());
     session.observe(&playing(1), clock.sample());
-    let removal = session.clear_queue(&progress(1, "b", 9, Some(request)), clock.sample());
+    let removal = session
+        .clear_playlist(
+            session.state().playing(),
+            &progress(1, "b", 9, Some(request)),
+            clock.sample(),
+        )
+        .expect("the playing playlist exists");
     assert!(removal.stop_playback);
     assert!(session.state().queue().is_empty());
     assert!(session.state().entry_for(&media("b")).is_some());
