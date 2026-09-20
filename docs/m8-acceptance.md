@@ -50,7 +50,7 @@ In-crate `#[cfg(test)]` modules that gained M8 tests (`git diff --stat aac0fa26.
 
 ## Known issues observed during implementation
 
-One full-suite run saw `tests/http_cancellation.rs::every_wait_wakes_and_stale_responses_cannot_repopulate` fail once on a timing assertion, then pass on every re-run. Nothing on this branch touches HTTP cancellation. Recorded as observed, not diagnosed — it appears pre-existing and load-sensitive, not a regression from M8.
+One full-suite run saw `tests/http_cancellation.rs::every_wait_wakes_and_stale_responses_cannot_repopulate` fail once, on a timing assertion. It passed on every re-run, including with this branch's test changes stashed. `git diff --stat aac0fa26..HEAD -- src/http tests/http_cancellation.rs tests/m7_cancellation.rs` is empty — this branch touches none of those files. Recorded as observed; the diagnosis is left to the reader.
 
 ## Snapshot cost at the 4,096-entry cap
 
@@ -58,42 +58,55 @@ Measured by an automated agent during implementation on 2026-09-20, on:
 
 - `uname -srm`: `Linux 7.0.0-31-generic x86_64`
 - CPU: AMD Ryzen 7 7800X3D 8-Core Processor
-- Temp directory filesystem (`tempfile::tempdir()`, under `/tmp`): `tmpfs`
 - Build profile: `--release`
+- Filesystems (`df -T`): `/tmp` is `tmpfs`; the crate's own `target/` directory (`/dev/nvme1n1p4`, mounted at `/`) is `ext4` — the same disk `$XDG_STATE_HOME/state.json` lives on, since `$XDG_STATE_HOME` is unset on this machine and falls back under `$HOME`, also on `/`
+
+The fixture is a mix of all three `MediaId` kinds, as spec §12 asks for ("representative paths, URLs and tags"): local files with realistic album/artist/year tags, plain URLs with a path and a query string, and podcast episodes built the way the runtime builds them (`MediaId::PodcastEpisode { feed, episode }`, `QueueSource::Podcast { fallback }`). Roughly 80% local, 10% URL, 10% podcast — **entries: local=3,277 url=410 podcast=409** (out of 4,096). The 512-entry checkpoint map draws from all three kinds too — **checkpoints: local=306 url=103 podcast=103** — with a varied position, timestamp and completion flag per entry rather than one constant for all of them.
+
+The atomic write is measured twice: once against `/tmp` (kept as a labelled comparison — `tmpfs` never touches a physical block device, so its `fsync` is close to free) and once against a temp directory created under this crate's own `target/` (`ext4`, real disk) — that second number is the headline.
 
 Command: `cargo test --release --test m8_snapshot_size -- --ignored --nocapture`, run three times in a row, output pasted verbatim (not averaged or rounded):
 
 ```
 Run 1:
-entries            4096
-checkpoints        512
-bytes on disk      3400329
-clone (app thread) 2.345733ms
-serialize          8.260977ms
-atomic write       7.647533ms  (serialize + write-temp-file + fsync + rename + best-effort parent fsync, as StateStore::write does it)
+entries                        4096
+entries by kind                local=3277 url=410 podcast=409
+checkpoints                    512
+checkpoints by kind            local=306 url=103 podcast=103
+bytes on disk                  3226621
+clone (app thread)             2.189623ms
+serialize                      8.042946ms
+atomic write, tmpfs (/tmp)     7.442192ms  fstype=tmpfs  (comparison only)
+atomic write, on-disk (target) 11.540636ms  fstype=ext4  path=/home/alvy/projects/tenuto/target/.tmplxeX9i
 
 Run 2:
-entries            4096
-checkpoints        512
-bytes on disk      3400329
-clone (app thread) 2.361083ms
-serialize          8.197987ms
-atomic write       7.673883ms  (serialize + write-temp-file + fsync + rename + best-effort parent fsync, as StateStore::write does it)
+entries                        4096
+entries by kind                local=3277 url=410 podcast=409
+checkpoints                    512
+checkpoints by kind            local=306 url=103 podcast=103
+bytes on disk                  3226621
+clone (app thread)             2.288873ms
+serialize                      8.001535ms
+atomic write, tmpfs (/tmp)     7.463563ms  fstype=tmpfs  (comparison only)
+atomic write, on-disk (target) 11.729976ms  fstype=ext4  path=/home/alvy/projects/tenuto/target/.tmpVKzQch
 
 Run 3:
-entries            4096
-checkpoints        512
-bytes on disk      3400329
-clone (app thread) 2.322963ms
-serialize          8.317557ms
-atomic write       7.589054ms  (serialize + write-temp-file + fsync + rename + best-effort parent fsync, as StateStore::write does it)
+entries                        4096
+entries by kind                local=3277 url=410 podcast=409
+checkpoints                    512
+checkpoints by kind            local=306 url=103 podcast=103
+bytes on disk                  3226621
+clone (app thread)             2.271233ms
+serialize                      8.098536ms
+atomic write, tmpfs (/tmp)     7.265611ms  fstype=tmpfs  (comparison only)
+atomic write, on-disk (target) 11.560266ms  fstype=ext4  path=/home/alvy/projects/tenuto/target/.tmpsObzuH
 ```
 
 `checkpoints` reads 512, not 1,024 (one in four of 4,096 tracks): `persistence::model::MAX_ENTRIES`, the checkpoint cap, is currently 512, and recording more than that evicts. The test steps by 8 rather than 4 to land exactly on what the cap allows, and says so in its own comment.
 
-The "about 1 MB" figure used while designing was an estimate. The measurement lands at roughly 3.24 MiB of pretty-printed JSON — about 3.2× that estimate, which the design conversation's own hedge ("pretty-printed JSON and variable-length fields make it uncertain") anticipated.
+The "about 1 MB" figure used while designing was an estimate. The mixed-kind snapshot lands at 3,226,621 bytes — 3.077 MiB, about 3.23× that estimate. (This is smaller than round 1's all-local 3,400,329 bytes: the URL and podcast entries here carry shorter paths and fewer tags — no album for a plain URL, for instance — than every entry being the same long local path.)
 
-Reading of these numbers: cloning the state on the application thread costs about 2.3 ms, serializing it to pretty JSON about 8.2–8.3 ms, and the atomic write (serialize + write the temp file + `fsync` + rename + best-effort parent `fsync`, measured inside `StateStore::write` itself, separately from the serialize step timed just before it) about 7.6–7.7 ms. All three are stable across three consecutive runs. Summed, the whole path — clone, serialize, atomic write — costs on the order of 18 ms, roughly 270× faster than the 5-second `CAPTURE_INTERVAL` that gates how often a submission is even attempted. That is comfortable: even a slower disk than this measurement's `tmpfs` temp directory (which never touches a physical block device, so its `fsync` is effectively free) would need to be two to three orders of magnitude slower than typical SSD write latency before it approached the 5-second cadence. No follow-up design (§11, §12) is warranted at the 4,096-entry cap; the numbers do not call the cap into question.
+Reading of these numbers: cloning the state on the application thread costs about 2.2–2.3 ms, serializing it to pretty JSON about 8.0–8.1 ms, and the atomic write on the real filesystem (`ext4`, under `target/`; serialize + write the temp file + `fsync` + rename + best-effort parent `fsync`, measured inside `StateStore::write` itself) costs 11.5–11.7 ms — noticeably slower than the `tmpfs` comparison's 7.3–7.5 ms, which is the point of measuring it separately. Summed on the real filesystem, the whole path — clone, serialize, atomic write — costs about 21.8–22.0 ms per run, roughly 227–230× faster than the 5-second `CAPTURE_INTERVAL` that gates how often a submission is even attempted. That margin is comfortable even after moving off `tmpfs` onto the disk the real state file lives on: `ext4` on this NVMe drive would need to be two orders of magnitude slower before it approached the 5-second cadence. No follow-up design (§11, §12) is warranted at the 4,096-entry cap; the numbers, now measured on the real filesystem and across a representative mix of media kinds, do not call the cap into question.
 
 ## Manual pass in Ghostty — PENDING
 
