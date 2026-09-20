@@ -19,6 +19,7 @@ use crate::application::runtime::EnqueueItem;
 use crate::application::view::QueueRow;
 use crate::library::{EpisodeCandidate, FeedSummary, StationRow};
 use crate::media::id::MediaId;
+use crate::playlist::PlaylistId;
 use crate::queue::QueueEntryId;
 use crate::tui::input::blocks_ordinary_bindings;
 
@@ -60,8 +61,12 @@ pub struct BrowserState {
     pub stations: Vec<StationRow>,
     /// An index into the visible list.
     pub cursor: usize,
-    /// Indices into the visible list, only ever of enqueueable rows.
+    /// Indices into the visible list, only ever of markable rows.
     pub marked: BTreeSet<usize>,
+    /// The playlist every add from this browser lands in, captured once when
+    /// it opened: one destination for the whole session, however many adds
+    /// it makes (M8 §8, "One destination rule").
+    pub dest: PlaylistId,
     /// Whether the visible list still waits on its request.
     pub loading: bool,
     /// Why the visible list could not be read.
@@ -83,7 +88,10 @@ pub struct BrowserState {
 #[derive(Clone, Debug)]
 pub enum BrowserEffect {
     Request(BrowseRequest),
-    Enqueue(Vec<EnqueueItem>),
+    Enqueue {
+        dest: PlaylistId,
+        items: Vec<EnqueueItem>,
+    },
     /// Enter on a row already in the queue takes it out again.
     Remove(QueueEntryId),
     Close,
@@ -91,8 +99,10 @@ pub enum BrowserEffect {
 
 impl BrowserState {
     /// A Files tab at `cwd`, loading: the caller issues
-    /// `BrowseRequest::Directory(cwd)` alongside.
-    pub fn new(cwd: PathBuf) -> Self {
+    /// `BrowseRequest::Directory(cwd)` alongside. `dest` is captured for the
+    /// life of this browser: every add it makes, files or a folder walk
+    /// alike, lands there (M8 §8).
+    pub fn new(cwd: PathBuf, dest: PlaylistId) -> Self {
         Self {
             tab: BrowserTab::Files,
             cwd,
@@ -102,6 +112,7 @@ impl BrowserState {
             stations: Vec::new(),
             cursor: 0,
             marked: BTreeSet::new(),
+            dest,
             loading: true,
             error: None,
             prompt: None,
@@ -229,8 +240,10 @@ impl BrowserState {
     }
 
     /// Up/Down/`j`/`k` move, Tab switches tabs, Enter opens or enqueues,
-    /// Space marks, Backspace/Left goes back, `b`/Esc closes. On the
-    /// Podcasts tab `a` prompts for a feed URL, `r`/`R` refresh one/all and
+    /// Space marks (a directory too, on the Files tab), Backspace/Left goes
+    /// back, `b`/Esc closes. On the Files tab `a` adds the marked rows, or
+    /// the cursor row, recursively and additively (M8 §8). On the Podcasts
+    /// tab `a` prompts for a feed URL, `r`/`R` refresh one/all and
     /// `d` asks before removing (M6 §4). The Radio tab's `a`/`r`/`d` mirror
     /// this exactly, sending `AddStation`/`ReprobeStation`/`RemoveStation`
     /// instead (M7.1 §7); `R` stays Podcasts-only, since refreshing every feed
@@ -272,11 +285,14 @@ impl BrowserState {
             KeyCode::Tab | KeyCode::BackTab => self.switch_tab(),
             KeyCode::Enter => self.activate(),
             KeyCode::Char(' ') => {
-                if self.enqueueable(self.cursor) && !self.marked.remove(&self.cursor) {
+                if self.markable(self.cursor) && !self.marked.remove(&self.cursor) {
                     self.marked.insert(self.cursor);
                 }
                 Vec::new()
             }
+            // Scoped to the Files tab so it cannot shadow the Podcasts/Radio
+            // `a` below, which prompts for a URL instead (M8 §8).
+            KeyCode::Char('a') if self.tab == BrowserTab::Files => self.add_selection(),
             KeyCode::Backspace | KeyCode::Left => self.back(),
             KeyCode::Char('b') | KeyCode::Esc => vec![BrowserEffect::Close],
             KeyCode::Char('a') if self.can_manage() => {
@@ -342,6 +358,17 @@ impl BrowserState {
         }
     }
 
+    /// Whether Space may mark row `index`: anything enqueueable, and on the
+    /// Files tab a directory too, which `a` adds recursively (M8 §8).
+    pub fn markable(&self, index: usize) -> bool {
+        self.enqueueable(index)
+            || (self.tab == BrowserTab::Files
+                && self
+                    .entries
+                    .get(index)
+                    .is_some_and(|entry| entry.kind == EntryKind::Directory))
+    }
+
     /// Whether a management key may act: the Podcasts or Radio tab, nothing
     /// loading, no mutation in flight.
     fn can_manage(&self) -> bool {
@@ -372,9 +399,14 @@ impl BrowserState {
             BrowseRequest::AddStation { .. } => "Adding…",
             BrowseRequest::RemoveStation { .. } => "Removing…",
             BrowseRequest::ReprobeStation { .. } => "Re-probing…",
-            // Not yet sent from here (Task 13 wires the Files-tab `a` key);
-            // an arm is required for `submit` to compile against the wider
-            // `BrowseRequest` enum.
+            // Never actually reaches `submit`: `add_selection` (the Files-tab
+            // `a` key, M8 §8) emits `CollectTree` straight through
+            // `BrowserEffect::Request`, bypassing `submit`, because its
+            // answer is `BrowseResult::TreeCollected`, which `Browsing::poll`
+            // (src/tui/mod.rs) diverts to the application before it ever
+            // reaches `BrowserState::apply` — so `submit`'s `pending` guard
+            // would never be cleared for it. This arm exists only so the
+            // match stays exhaustive over the wider `BrowseRequest` enum.
             BrowseRequest::CollectTree { .. } => "Adding…",
             BrowseRequest::Directory(_)
             | BrowseRequest::Feeds
@@ -482,7 +514,13 @@ impl BrowserState {
                     let path = entry.path.clone();
                     self.open_directory(path)
                 }
-                Some(entry) if entry.kind == EntryKind::Audio => self.enqueue_selection(),
+                Some(entry) if entry.kind == EntryKind::Audio => {
+                    if self.marked.is_empty() {
+                        self.enqueue_selection()
+                    } else {
+                        self.add_selection()
+                    }
+                }
                 _ => Vec::new(),
             },
             BrowserTab::Podcasts => match &self.episodes {
@@ -559,8 +597,49 @@ impl BrowserState {
         if items.is_empty() {
             Vec::new()
         } else {
-            vec![BrowserEffect::Enqueue(items)]
+            vec![BrowserEffect::Enqueue {
+                dest: self.dest,
+                items,
+            }]
         }
+    }
+
+    /// `a` on the Files tab: the marked rows, or the cursor row when nothing
+    /// is marked; files and directories alike; strictly additive. Any
+    /// directory makes it a worker walk, which also dedupes overlapping
+    /// picks; files alone enqueue directly, as Enter does.
+    fn add_selection(&mut self) -> Vec<BrowserEffect> {
+        let indices: Vec<usize> = if self.marked.is_empty() {
+            vec![self.cursor]
+        } else {
+            std::mem::take(&mut self.marked).into_iter().collect()
+        };
+        let picked: Vec<&DirEntry> = indices
+            .into_iter()
+            .filter(|index| self.markable(*index) && self.queued_at(*index).is_none())
+            .filter_map(|index| self.entries.get(index))
+            .collect();
+        if picked.is_empty() {
+            return Vec::new();
+        }
+        if picked
+            .iter()
+            .any(|entry| entry.kind == EntryKind::Directory)
+        {
+            let roots = picked.iter().map(|entry| entry.path.clone()).collect();
+            return vec![BrowserEffect::Request(BrowseRequest::CollectTree {
+                roots,
+                dest: self.dest,
+            })];
+        }
+        let items = picked
+            .iter()
+            .map(|entry| EnqueueItem::Path(entry.path.clone()))
+            .collect();
+        vec![BrowserEffect::Enqueue {
+            dest: self.dest,
+            items,
+        }]
     }
 
     fn back(&mut self) -> Vec<BrowserEffect> {

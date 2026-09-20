@@ -16,6 +16,7 @@ use tenuto::application::view::QueueRow;
 use tenuto::http::source::StationIdentity;
 use tenuto::library::{EpisodeCandidate, FeedSummary, StationRow};
 use tenuto::media::id::{AbsolutePath, EpisodeKey, FeedId, MediaId, NormalizedUrl};
+use tenuto::playlist::PlaylistId;
 use tenuto::queue::QueueEntryId;
 use tenuto::tui::browser::{BrowserEffect, BrowserState, BrowserTab, NoticeKind};
 use tenuto::tui::render::{Visuals, draw};
@@ -24,6 +25,15 @@ use time::OffsetDateTime;
 
 #[path = "support/views.rs"]
 mod views;
+
+/// The destination every `BrowserState` in this file is built with; no test
+/// here exercises a second playlist, so one captured value stands for all of
+/// them (M8 §8).
+const DEST: u64 = 1;
+
+fn dest() -> PlaylistId {
+    PlaylistId::from_raw_for_tests(DEST)
+}
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -50,7 +60,7 @@ fn sample_dir() -> (tempfile::TempDir, PathBuf) {
 
 fn listed(root: &Path) -> BrowserState {
     let entries = list_directory(root).unwrap_or_else(|error| panic!("list: {error}"));
-    let mut state = BrowserState::new(root.to_path_buf());
+    let mut state = BrowserState::new(root.to_path_buf(), dest());
     state.apply(BrowseResult::Directory {
         path: root.to_path_buf(),
         entries: Ok(entries),
@@ -118,7 +128,7 @@ fn marked_files_enqueue_together_in_listing_order() {
     assert!(
         matches!(
             &effects[..],
-            [BrowserEffect::Enqueue(items)] if matches!(
+            [BrowserEffect::Enqueue { items, .. }] if matches!(
                 &items[..],
                 [EnqueueItem::Path(first), EnqueueItem::Path(second)]
                     if *first == a && *second == b
@@ -133,8 +143,8 @@ fn marked_files_enqueue_together_in_listing_order() {
 fn enter_on_the_cursor_file_enqueues_it_alone_and_marks_skip_other_rows() {
     let (_dir, root) = sample_dir();
     let mut state = listed(&root);
-    // A directory and a non-audio file cannot be marked.
-    press(&mut state, &[KeyCode::Char(' ')]);
+    // A non-audio, non-directory file cannot be marked (a directory can,
+    // M8 §8 — covered by tests/m8_browser.rs instead).
     press(
         &mut state,
         &[
@@ -150,7 +160,7 @@ fn enter_on_the_cursor_file_enqueues_it_alone_and_marks_skip_other_rows() {
     assert!(
         matches!(
             &effects[..],
-            [BrowserEffect::Enqueue(items)]
+            [BrowserEffect::Enqueue { items, .. }]
                 if matches!(&items[..], [EnqueueItem::Path(only)] if *only == b)
         ),
         "{effects:?}"
@@ -225,7 +235,7 @@ fn b_and_esc_close_and_ctrl_or_alt_chords_do_nothing() {
 #[test]
 fn an_error_listing_is_shown_as_a_value() {
     let root = PathBuf::from("/nonexistent/m5-browser");
-    let mut state = BrowserState::new(root.clone());
+    let mut state = BrowserState::new(root.clone(), dest());
     state.apply(BrowseResult::Directory {
         path: root,
         entries: Err("No such file or directory".to_owned()),
@@ -345,7 +355,7 @@ fn podcasts_tab_lists_feeds_then_episodes_and_skips_unplayable_marks() {
     assert!(
         matches!(
             &effects[..],
-            [BrowserEffect::Enqueue(items)] if matches!(
+            [BrowserEffect::Enqueue { items, .. }] if matches!(
                 &items[..],
                 [EnqueueItem::Episode(first), EnqueueItem::Episode(second)]
                     if guid_of(first) == Some("e1") && guid_of(second) == Some("e3")
@@ -408,7 +418,7 @@ fn screen(state: &BrowserState) -> (String, ratatui::buffer::Buffer) {
 #[test]
 fn the_overlay_draws_safe_names_marks_and_dimmed_unplayable_episodes() {
     let root = PathBuf::from("/music");
-    let mut state = BrowserState::new(root.clone());
+    let mut state = BrowserState::new(root.clone(), dest());
     let (text, _) = screen(&state);
     assert!(text.contains("Loading"), "{text}");
 
@@ -500,7 +510,7 @@ fn the_worker_reports_failures_as_error_values() {
 
 /// A Podcasts tab showing `feeds`.
 fn podcasts(feeds: Vec<FeedSummary>) -> BrowserState {
-    let mut state = BrowserState::new(PathBuf::from("/music"));
+    let mut state = BrowserState::new(PathBuf::from("/music"), dest());
     press(&mut state, &[KeyCode::Tab]);
     state.apply(BrowseResult::Feeds(Ok(feeds)));
     state
@@ -508,7 +518,7 @@ fn podcasts(feeds: Vec<FeedSummary>) -> BrowserState {
 
 /// A Radio tab showing `stations`.
 fn radio(stations: Vec<StationRow>) -> BrowserState {
-    let mut state = BrowserState::new(PathBuf::from("/music"));
+    let mut state = BrowserState::new(PathBuf::from("/music"), dest());
     press(&mut state, &[KeyCode::Tab, KeyCode::Tab]);
     assert_eq!(state.tab, BrowserTab::Radio);
     state.apply(BrowseResult::Stations(Ok(stations)));
@@ -914,7 +924,7 @@ fn enter_on_a_queued_row_removes_it_and_marks_skip_queued_rows() {
     );
     let effects = press(&mut state, &[KeyCode::Enter]);
     match &effects[..] {
-        [BrowserEffect::Enqueue(items)] => {
+        [BrowserEffect::Enqueue { items, .. }] => {
             assert_eq!(items.len(), 1, "{items:?}");
             assert!(
                 matches!(&items[0], EnqueueItem::Path(path) if path.ends_with("b.MP3")),
@@ -929,7 +939,7 @@ fn enter_on_a_queued_row_removes_it_and_marks_skip_queued_rows() {
     press(&mut state, &[KeyCode::Up]);
     let effects = press(&mut state, &[KeyCode::Enter]);
     assert!(
-        matches!(&effects[..], [BrowserEffect::Enqueue(_)]),
+        matches!(&effects[..], [BrowserEffect::Enqueue { .. }]),
         "{effects:?}"
     );
 }
@@ -1119,7 +1129,7 @@ fn enter_on_a_station_enqueues_and_enter_again_removes_it() {
     assert!(
         matches!(
             &effects[..],
-            [BrowserEffect::Enqueue(items)] if matches!(
+            [BrowserEffect::Enqueue { items, .. }] if matches!(
                 &items[..],
                 [EnqueueItem::Station { url: enqueued, .. }] if enqueued == url
             )
@@ -1518,7 +1528,7 @@ fn a_station_enqueues_under_its_icy_name_or_else_its_slug() {
         assert!(
             matches!(
                 &effects[..],
-                [BrowserEffect::Enqueue(items)] if matches!(
+                [BrowserEffect::Enqueue { items, .. }] if matches!(
                     &items[..],
                     [EnqueueItem::Station { title, .. }] if title == expected
                 )
@@ -1536,7 +1546,7 @@ fn enter_on_an_unqueued_station_enqueues_it() {
 
     let effects = press(&mut state, &[KeyCode::Enter]);
     let items = match &effects[..] {
-        [BrowserEffect::Enqueue(items)] => items,
+        [BrowserEffect::Enqueue { items, .. }] => items,
         other => panic!("{other:?}"),
     };
     assert_eq!(items.len(), 1, "{items:?}");

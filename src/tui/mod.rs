@@ -621,13 +621,15 @@ struct Browsing {
 
 impl Browsing {
     /// Opens the browser at the active local entry's directory, else the
-    /// current working directory, and asks for its listing.
+    /// current working directory, and asks for its listing. Captures the
+    /// viewed playlist as the destination every add from this browser lands
+    /// in, for as long as it stays open (M8 §8).
     fn open(&mut self, runtime: &PlayerRuntime, ui: &mut UiState) {
         let cwd = runtime
             .active_local_dir()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        self.state = Some(BrowserState::new(cwd.clone()));
+        self.state = Some(BrowserState::new(cwd.clone(), runtime.viewed()));
         ui.overlay = Overlay::Browser;
         self.request(BrowseRequest::Directory(cwd));
     }
@@ -771,7 +773,10 @@ fn handle_event(front: &mut Front<'_>, hits: &HitMap, event: Event) -> io::Resul
                 front.browsing.close(front.ui);
                 return Ok(());
             };
-            browser.sync_queue(&view.rows);
+            // The destination's rows, not the viewed playlist's: while the
+            // two usually agree, the browser's ticks and Enter-to-remove
+            // must always follow where its own adds land (M8 §8).
+            browser.sync_queue(&front.runtime.rows_of(browser.dest));
             let effects = browser.handle_key(key);
             for effect in effects {
                 apply_browser_effect(effect, front)?;
@@ -802,8 +807,7 @@ fn apply_browser_effect(effect: BrowserEffect, front: &mut Front<'_>) -> io::Res
             front.browsing.request(request);
             Ok(())
         }
-        BrowserEffect::Enqueue(items) => {
-            let dest = front.runtime.viewed();
+        BrowserEffect::Enqueue { dest, items } => {
             apply_effect(Effect::App(AppCommand::Enqueue { dest, items }), front)
         }
         BrowserEffect::Remove(id) => apply_effect(Effect::App(AppCommand::Remove(id)), front),
@@ -1048,7 +1052,7 @@ mod tests {
         let dest = PlaylistId::from_raw_for_tests(1);
 
         let mut browsing = Browsing {
-            state: Some(BrowserState::new(dir.path().to_path_buf())),
+            state: Some(BrowserState::new(dir.path().to_path_buf(), dest)),
             worker: None,
         };
         browsing.request(BrowseRequest::CollectTree {
@@ -1081,7 +1085,7 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
 
         let mut browsing = Browsing {
-            state: Some(BrowserState::new(asked_dir.path().to_path_buf())),
+            state: Some(BrowserState::new(asked_dir.path().to_path_buf(), dest)),
             worker: None,
         };
         browsing.request(BrowseRequest::CollectTree {
@@ -1089,8 +1093,14 @@ mod tests {
             dest,
         });
         // Moved to a different directory rather than closed: the captured
-        // destination must not follow the browser there.
-        browsing.state = Some(BrowserState::new(elsewhere.path().to_path_buf()));
+        // destination must not follow the browser there. A different
+        // destination proves the point: even the new browser's own capture
+        // does not retroactively touch the tree already in flight.
+        let elsewhere_dest = PlaylistId::from_raw_for_tests(9);
+        browsing.state = Some(BrowserState::new(
+            elsewhere.path().to_path_buf(),
+            elsewhere_dest,
+        ));
 
         let trees = poll_for_a_tree(&mut browsing);
         assert_eq!(trees.len(), 1, "{trees:?}");

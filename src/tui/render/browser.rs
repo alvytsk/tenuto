@@ -17,8 +17,8 @@ use crate::tui::browser::{BrowserState, BrowserTab, NoticeKind};
 use crate::tui::layout::{inset, take_left, take_right, visible_rows};
 use crate::tui::theme::Theme;
 
-const HINTS: &str =
-    "enter open/add/remove · space mark · tab files/podcasts/radio · ⌫ back · b close";
+const HINTS: &str = "enter open/add/remove · space mark · tab files/podcasts/radio · \
+    a add · ⌫ back · b close";
 const PODCAST_HINTS: &str = "enter open/add/remove · space mark · tab files/podcasts/radio · \
     a subscribe · r/R refresh · d remove · ⌫ back · b close";
 const NO_FEEDS: &str = "No subscriptions — press a to add a feed URL";
