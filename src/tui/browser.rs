@@ -202,6 +202,9 @@ impl BrowserState {
                     BrowserTab::Files => {}
                 }
             }
+            // Routed through the application, not `BrowserState` (M8 §8):
+            // Task 13 gives this its own handling.
+            BrowseResult::TreeCollected(_) => return None,
         }
         self.cursor = self.cursor.min(self.len().saturating_sub(1));
         follow_up
@@ -367,6 +370,10 @@ impl BrowserState {
             BrowseRequest::AddStation { .. } => "Adding…",
             BrowseRequest::RemoveStation { .. } => "Removing…",
             BrowseRequest::ReprobeStation { .. } => "Re-probing…",
+            // Not yet sent from here (Task 13 wires the Files-tab `a` key);
+            // an arm is required for `submit` to compile against the wider
+            // `BrowseRequest` enum.
+            BrowseRequest::CollectTree { .. } => "Adding…",
             BrowseRequest::Directory(_)
             | BrowseRequest::Feeds
             | BrowseRequest::Episodes { .. }
