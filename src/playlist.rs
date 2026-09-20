@@ -115,8 +115,6 @@ impl Playlist {
     pub(crate) fn set_name(&mut self, name: String) {
         self.name = name;
     }
-    /// Wired up by the task that toggles shuffle; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn set_shuffle(&mut self, shuffle: Option<Shuffle>) {
         self.shuffle = shuffle;
     }

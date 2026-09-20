@@ -398,9 +398,6 @@ impl PersistedState {
             .map(|entry| entry.media().clone());
     }
 
-    /// Wired up by the task that exposes playlist management through
-    /// `Session`; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn set_playing(&mut self, id: PlaylistId) {
         if self.index_of(id).is_some() {
             self.playing = id;

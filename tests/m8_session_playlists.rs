@@ -12,11 +12,10 @@ use tenuto::playback::command::LoadRequestId;
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::playlist::PlaylistId;
+use tenuto::playlist::{PlaylistId, Shuffle};
 use tenuto::queue::{
     Direction, DisplayMetadata, NewQueueEntry, QueueEntryId, QueueError, QueueSource,
 };
-#[allow(unused_imports)]
 use tenuto::session::{Advance, DisplayUpdate, LoadTarget, Session};
 
 fn entry(name: &str) -> NewQueueEntry {
@@ -60,7 +59,6 @@ fn progress(rev: u64, name: &str, load: Option<LoadRequestId>) -> Progress {
 }
 
 /// Playlist A (the default, playing) holds a1 a2; playlist B holds b1 b2.
-#[allow(dead_code)]
 struct Two {
     session: Session,
     a: PlaylistId,
@@ -184,4 +182,111 @@ fn a_display_update_reaches_every_occurrence_in_every_playlist() {
             Some("Artist")
         );
     }
+}
+
+fn end(rev: u64) -> PlaybackEvent {
+    PlaybackEvent::EndOfTrack {
+        session_rev: rev,
+        position: Duration::from_millis(500),
+        provenance: PositionProvenance::Established,
+    }
+}
+
+#[test]
+fn playing_changes_at_adoption_and_the_old_playlist_keeps_its_cursor() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[1], "a2", 1);
+    let pending = two
+        .session
+        .register_load(LoadTarget::Queue(two.in_b[0]), &media("b1"))
+        .expect("registered");
+    assert_eq!(
+        two.session.state().playing(),
+        two.a,
+        "a request alone changes nothing (P4)"
+    );
+
+    two.session
+        .observe(&loaded(pending, 2, "b1"), FakeClock::new().sample());
+    let state = two.session.state();
+    assert_eq!(state.playing(), two.b);
+    assert_eq!(state.queue().active(), Some(two.in_b[0]));
+    assert_eq!(
+        state.playlist(two.a).expect("A").queue().active(),
+        Some(two.in_a[1])
+    );
+}
+
+#[test]
+fn a_failed_cross_playlist_load_changes_neither_playing_nor_any_cursor() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[0], "a1", 1);
+    let pending = two
+        .session
+        .register_load(LoadTarget::Queue(two.in_b[0]), &media("b1"))
+        .expect("registered");
+    two.session.retract_load(pending);
+    let state = two.session.state();
+    assert_eq!(state.playing(), two.a);
+    assert_eq!(state.queue().active(), Some(two.in_a[0]));
+    assert_eq!(state.playlist(two.b).expect("B").queue().active(), None);
+}
+
+#[test]
+fn automatic_advance_follows_the_same_shuffled_order_as_neighbor() {
+    let mut two = two();
+    let (more, _) = two
+        .session
+        .enqueue(two.a, vec![entry("a3"), entry("a4"), entry("a5")])
+        .expect("fits");
+    let all = [two.in_a[0], two.in_a[1], more[0], more[1], more[2]];
+    adopt(&mut two.session, all[2], "a3", 1);
+    // Seed 42 (the brief's default) happens to put this fixture's a4 right
+    // after the pinned a3 — indistinguishable from list order, which is the
+    // one thing this test must rule out. 99 does not.
+    two.session.set_shuffle(two.a, Some(99)).expect("A exists");
+
+    let playlist = two.session.state().playlist(two.a).expect("A").clone();
+    assert_eq!(
+        playlist.shuffle(),
+        Some(Shuffle {
+            seed: 99,
+            first: Some(all[2])
+        })
+    );
+    let expected = playlist
+        .neighbor(all[2], Direction::Down)
+        .expect("the rest lies ahead of `first`");
+    assert_ne!(
+        expected, all[3],
+        "the fixture must actually differ from list order"
+    );
+
+    two.session.observe(&end(1), FakeClock::new().sample());
+    assert_eq!(two.session.take_advance(), Some(Advance::Next(expected)));
+}
+
+#[test]
+fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[0], "a1", 1);
+    two.session.set_shuffle(two.b, Some(7)).expect("B exists");
+    assert_eq!(
+        two.session.state().playlist(two.b).expect("B").shuffle(),
+        Some(Shuffle {
+            seed: 7,
+            first: None
+        }),
+        "never another playlist's track"
+    );
+    two.session.set_shuffle(two.b, None).expect("B exists");
+    assert_eq!(
+        two.session.state().playlist(two.b).expect("B").shuffle(),
+        None
+    );
+    assert_eq!(
+        two.session.adopted().map(|a| a.target),
+        Some(LoadTarget::Queue(two.in_a[0])),
+        "no release"
+    );
 }

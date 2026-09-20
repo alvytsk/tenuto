@@ -32,7 +32,7 @@ use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDispo
 use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
-use crate::playlist::{Playlist, PlaylistError, PlaylistId};
+use crate::playlist::{Playlist, PlaylistError, PlaylistId, Shuffle};
 use crate::queue::{
     Direction, DisplayDuration, DurationSource, NewQueueEntry, Queue, QueueEntryId, QueueError,
     QueueSource,
@@ -438,6 +438,23 @@ impl Session {
     /// submitted on failure.
     pub fn rename_playlist(&mut self, id: PlaylistId, name: &str) -> Result<Action, PlaylistError> {
         self.state.rename_playlist(id, name)?;
+        Ok(self.submit(Urgency::Ordinary))
+    }
+
+    /// `Some(seed)` turns shuffle on, pinning the playlist's *own* cursor
+    /// first; `None` turns it off. No engine command either way, so a
+    /// playing track keeps playing (M8 §7).
+    pub fn set_shuffle(
+        &mut self,
+        id: PlaylistId,
+        seed: Option<u64>,
+    ) -> Result<Action, PlaylistError> {
+        let playlist = self
+            .state
+            .playlist_mut(id)
+            .ok_or(PlaylistError::Unknown(id))?;
+        let first = playlist.queue().active();
+        playlist.set_shuffle(seed.map(|seed| Shuffle { seed, first }));
         Ok(self.submit(Urgency::Ordinary))
     }
 
@@ -922,10 +939,12 @@ impl Session {
                 // Both provenances advance (§6); only a queue target has
                 // anywhere to advance to.
                 if let LoadTarget::Queue(id) = adopted.target {
-                    self.advance = Some(match self.state.queue().neighbor(id, Direction::Down) {
-                        Some(next) => Advance::Next(next),
-                        None => Advance::EndOfQueue,
-                    });
+                    let next = self
+                        .state
+                        .owner_of(id)
+                        .and_then(|owner| self.state.playlist(owner))
+                        .and_then(|playlist| playlist.neighbor(id, Direction::Down));
+                    self.advance = Some(next.map_or(Advance::EndOfQueue, Advance::Next));
                 }
                 self.submit(Urgency::Forced)
             }
@@ -969,21 +988,27 @@ impl Session {
         capabilities: &MediaCapabilities,
         now: ClockSample,
     ) -> Action {
-        let previous_active = self.state.queue().active();
+        let previous = (self.state.playing(), self.state.queue().active());
         let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
-        let active = match target {
-            LoadTarget::Queue(id) => Some(id),
-            LoadTarget::Legacy => None,
-        };
-        // The registration was validated against the queue a moment ago in
-        // `observe`.
-        let _ = self.state.queue_mut().set_active(active);
-        if let LoadTarget::Queue(id) = target {
-            self.absorb_load_metadata(id, metadata);
+        match target {
+            LoadTarget::Queue(id) => {
+                // Validated against its owner a moment ago in `observe`.
+                if let Some(owner) = self.state.owner_of(id) {
+                    self.state.set_playing(owner);
+                }
+                let _ = self.state.queue_mut().set_active(Some(id));
+                self.absorb_load_metadata(id, metadata);
+            }
+            // A legacy load belongs to no playlist: it clears the playing
+            // playlist's cursor, as it cleared the one queue's before M8.
+            LoadTarget::Legacy => {
+                let _ = self.state.queue_mut().set_active(None);
+            }
         }
         self.adopted = Some(AdoptedLoad { request, target });
         self.adopted_rev_floor = self.session_rev;
-        if switched_media || previous_active != active {
+        let now_at = (self.state.playing(), self.state.queue().active());
+        if switched_media || previous != now_at {
             self.submit(Urgency::Forced)
         } else {
             Action::None
