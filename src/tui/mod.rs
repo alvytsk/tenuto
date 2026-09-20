@@ -1015,4 +1015,91 @@ mod tests {
         assert_eq!(pass(&mut idle, &mut waits, |_| Drain::Continue), 0);
         assert_eq!(waits, vec![INPUT_POLL]);
     }
+
+    // ---------------------------------------------------- Browsing::poll
+
+    use crate::playlist::PlaylistId;
+
+    fn one_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"").unwrap_or_else(|error| panic!("write: {error}"));
+        path
+    }
+
+    /// Polls `browsing` until it returns at least one tree, or panics past a
+    /// generous deadline — the same bounded-wait shape `tests/m5_browser.rs`
+    /// uses for `BrowseWorker::try_result`.
+    fn poll_for_a_tree(browsing: &mut Browsing) -> Vec<TreeCollected> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let trees = browsing.poll();
+            if !trees.is_empty() {
+                return trees;
+            }
+            assert!(Instant::now() < deadline, "no tree ever arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_tree_lands_once_the_browser_that_asked_for_it_has_closed() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let file = one_file(dir.path(), "track.mp3");
+        let dest = PlaylistId::from_raw_for_tests(1);
+
+        let mut browsing = Browsing {
+            state: Some(BrowserState::new(dir.path().to_path_buf())),
+            worker: None,
+        };
+        browsing.request(BrowseRequest::CollectTree {
+            roots: vec![dir.path().to_path_buf()],
+            dest,
+        });
+        // Closed before the worker has necessarily answered: the request was
+        // already in flight, and its answer must still reach the caller.
+        browsing.close(&mut UiState::new(false));
+        assert!(
+            browsing.state.is_none(),
+            "precondition: the browser is closed before the tree is drained"
+        );
+
+        let trees = poll_for_a_tree(&mut browsing);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+        assert_eq!(trees[0].dest, dest);
+        assert_eq!(trees[0].items, vec![file]);
+        assert!(
+            browsing.state.is_none(),
+            "still closed once the tree has landed"
+        );
+    }
+
+    #[test]
+    fn a_tree_lands_in_its_captured_destination_though_the_browser_moved_elsewhere() {
+        let asked_dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let file = one_file(asked_dir.path(), "track.flac");
+        let dest = PlaylistId::from_raw_for_tests(7);
+        let elsewhere = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+
+        let mut browsing = Browsing {
+            state: Some(BrowserState::new(asked_dir.path().to_path_buf())),
+            worker: None,
+        };
+        browsing.request(BrowseRequest::CollectTree {
+            roots: vec![asked_dir.path().to_path_buf()],
+            dest,
+        });
+        // Moved to a different directory rather than closed: the captured
+        // destination must not follow the browser there.
+        browsing.state = Some(BrowserState::new(elsewhere.path().to_path_buf()));
+
+        let trees = poll_for_a_tree(&mut browsing);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+        assert_eq!(trees[0].dest, dest);
+        assert_eq!(trees[0].items, vec![file]);
+        assert_eq!(
+            browsing.state.as_ref().map(|state| &state.cwd),
+            Some(&elsewhere.path().to_path_buf()),
+            "the browser is still looking at the other directory"
+        );
+    }
 }
