@@ -58,15 +58,15 @@ pub struct Playlist {
 // PersistedState, schema 4
 playlists: Vec<Playlist>,   // never empty (P1)
 playing: PlaylistId,
-next_entry_id: u64,
-next_playlist_id: u64,
+next_entry_id: Option<u64>,     // None = exhausted
+next_playlist_id: Option<u64>,
 ```
 
 `Queue` keeps its type and its tests but stops allocating IDs: `enqueue` receives them. `PersistedState` is the sole allocator.
 
 **Limits.** `MAX_ENTRIES = 4096` across all playlists, replacing `MAX_QUEUE_ENTRIES`; there is no separate per-playlist number. `MAX_PLAYLISTS = 32`. A name is 1–40 characters after trimming; duplicate names are allowed, since `PlaylistId` is the identity.
 
-**Allocation.** Both counters are monotonic, advance by `checked_add`, and are never reused — a late asynchronous result for a deleted playlist can therefore never land in a newer one. A batch enqueue reserves all its IDs and checks global capacity first; on exhaustion (`QueueError::IdExhausted`) or lack of capacity (`QueueError::Capacity`) it changes nothing. On load, each counter is `max(stored, highest seen + 1)`, checked; a file whose highest ID is `u64::MAX` loads, and every later allocation is refused.
+**Allocation.** Both counters are monotonic, advance by `checked_add`, and are never reused — a late asynchronous result for a deleted playlist can therefore never land in a newer one. A batch enqueue reserves all its IDs and checks global capacity first; on exhaustion (`QueueError::IdExhausted`) or lack of capacity (`QueueError::Capacity`) it changes nothing. Each counter is an `Option<u64>` — the next ID to hand out, or `None` for an exhausted namespace — serialized as a number or `null`; a `u64` alone cannot represent "past `u64::MAX`". Handing out `u64::MAX` leaves `None`. On load, each counter is the larger of the stored value and `highest seen + 1`, where `highest seen` covers every well-formed ID in the file, including ones recovery will later repair; if `highest seen` is `u64::MAX`, or the stored value is `null`, the counter is `None`. Such a file loads, and every later allocation is refused.
 
 **Playlist operations** (all through `Session`): `create(name) -> PlaylistId`, `rename(id, name)`, `delete(id)`, `set_shuffle(id, on)`. Creating past `MAX_PLAYLISTS` and deleting the last playlist are errors that change nothing.
 
@@ -82,9 +82,17 @@ next_playlist_id: u64,
 | `queue_rows` | the viewed `PlaylistId` |
 | `update_display` | every occurrence of the media in every playlist |
 
-**Removing an entry.** Pending loads targeting it are invalidated first, as today. If its owner is the playing playlist and it is that playlist's `active`, the existing path runs unchanged: `release_active` — itself gated by `capture_current` and the adopted token — then `stop_playback`. If its owner is any other playlist, only that playlist's cursor clears.
+**The ownership check.** Today `release_active` clears `adopted` unconditionally — only the checkpoint capture inside it is gated — and its callers decide from the cursor (`queue.active() == id`). With several playlists a cursor is not ownership (P3), so every release decides from adoption instead:
 
-**Clearing or deleting playlist P.** Invalidate exactly the pending loads whose `LoadTarget::Queue(id)` has `owner(id) == P`, evaluated *before* the entries go. Loads for other playlists are untouched. If P is playing, release and stop as above. Deleting the playing playlist then moves `playing` to the adjacent playlist (the next one, else the previous).
+> An entry is *owned* when `adopted.target == LoadTarget::Queue(id)`. A playlist is *owning* when it owns the adopted entry.
+
+Release (`release_active`), `Removal::stop_playback`, and the runtime's pending-seek cancel (`router.cancel()`, today keyed on the cursor in `runtime::remove` and unconditional in `runtime::clear_queue`) happen only for an owned entry or an owning playlist. A cursor that is not owned — a restored cursor with nothing adopted, the old playlist's cursor while another playlist's load is pending, any inactive playlist's cursor — only clears. `apply_removal` keeps its existing guard: no `interrupt_stop` while a load is pending.
+
+**Removing an entry.** Pending loads targeting it are invalidated first, as today. Then the ownership check above; then the entry goes, and if it was its playlist's cursor the cursor clears. So with A's track still playing while B loads, removing A's entry releases A's adoption and cannot touch B's pending load; removing any other entry of A touches neither.
+
+**Clearing or deleting playlist P.** Invalidate exactly the pending loads whose `LoadTarget::Queue(id)` has `owner(id) == P`, evaluated *before* the entries go. Loads for other playlists are untouched. Release, stop and seek-cancel only if P is owning. Deleting the playing playlist then moves `playing` to the adjacent playlist (the next one, else the previous).
+
+**Metadata workers.** `MetadataWorkers` can only `cancel_all`. Clearing or deleting a playlist calls it, then re-requests enrichment for every remaining entry in every playlist that still lacks tags — `request_enrichment` already filters to those — so another playlist's pending probes are never lost. Removing a single entry cancels nothing, as today.
 
 **When `playing` changes without an adoption** — deletion here, or recovery in §6 — the new playlist's cursor is never validated against the old `current_media`. `current_media` is re-pointed to the media of the new playlist's cursor, or cleared when it has none. Checkpoints are untouched (P8).
 
@@ -102,8 +110,10 @@ Schema 4. Still one file, one atomic snapshot, one writer.
 
 1. `playlists` absent, null or not an array → one empty `Default`.
 2. Per playlist, `recover_queue`'s existing rules apply to its entries; a damaged playlist resets to empty and keeps its ID and name. A duplicate entry ID *within* one playlist keeps today's whole-queue reset, scoped to that playlist.
-3. A playlist whose ID is malformed or repeats an earlier one keeps its content and receives a fresh ID.
-4. An entry whose ID repeats one in an earlier playlist receives a fresh ID; if it was its playlist's cursor, the cursor clears.
+3. A playlist whose ID is malformed or repeats an earlier one keeps its content and receives a fresh ID. If the playlist counter is exhausted, that playlist is dropped instead, and reported.
+4. An entry whose ID repeats one in an earlier playlist receives a fresh ID; if it was its playlist's cursor, the cursor clears. If the entry counter is exhausted, that later occurrence is dropped instead, and reported.
+
+   Fresh IDs in steps 3 and 4 come from the counters of §4, which are computed over the whole file *before* any repair, so a repair can never mint an ID that appears later in the file. Repairs run in file order. The result is a fixed point: saving the repaired state and loading it again repairs nothing. The exhausted fallback loses queue data but never a checkpoint (P8); it needs a `u64::MAX` ID in the file, which ordinary use cannot produce.
 5. A name is trimmed and truncated to 40 characters; an empty result becomes `Playlist <id>`.
 6. Beyond `MAX_PLAYLISTS`, the first 32 are kept. Beyond `MAX_ENTRIES`, entries are kept in playlist order, then list order, up to 4,096. Both truncations are reported.
 7. An empty array after the steps above → one empty `Default`.
@@ -121,7 +131,19 @@ Schema 4. Still one file, one atomic snapshot, one writer.
 
 Known ceiling, marked with a `ponytail:` comment: an entry added while shuffle is on lands at its hash position, which may be behind the current track, so this pass can miss it. Toggling off and on reshuffles everything ahead of the current track.
 
-**Transport.** `TransportSituation` carries two `&Playlist`s: the *navigation* playlist and the *viewed* playlist. The navigation playlist is `playing`, except during `Loading`, when it is `owner(last_requested)` while that entry is still queued (P5). Emptiness is judged per command: Enter consults the viewed playlist, so an empty playing playlist never blocks Enter in a populated one; next/previous consult the navigation playlist. Enter plays the selected row of the viewed playlist. `p` never looks at the viewed tab: it controls current playback, else retries `last_requested`, else starts the playing playlist at its cursor — or, with no cursor, at the first entry in playback order. If the playing playlist is empty, `p` shows the existing empty-queue notice even when the viewed playlist has entries; Enter is the key that starts a different playlist.
+**Transport.** `TransportSituation` carries:
+
+- `navigation: &Playlist` — `playing`, except during `Loading`, when it is `owner(last_requested)` while that entry is still queued (P5);
+- `viewed: &Playlist` and the selected row in it;
+- `retry: Option<QueueEntryId>` — `last_requested`, already validated by the caller through the owner lookup across *all* playlists. It replaces `still_queued(queue, last_requested)`: after a failed request in B, navigation is A and the view may be C, so neither supplied playlist could validate B's entry.
+
+**Enter is the only command that reads the selection.** It plays the selected row of the viewed playlist, and its emptiness check is the viewed playlist's: an empty playing playlist never blocks Enter in a populated one.
+
+**Space and `p`** never follow the viewed tab. Where today's table falls back to `selection` (`Unloaded`, `Ended`, `LoadFailed`), the chain becomes: `retry` (in `LoadFailed` only, as today) → the navigation playlist's cursor → its first entry in playback order → the empty-queue notice. A valid `retry` therefore outranks the empty check: with A empty and a failed request in B, `p` retries B's entry. Where Space and `p` are engine commands today (`Playing`, `Paused`, `Reconnecting`, `Stopped`: toggle pause, play) they stay engine commands, including over an emptied playlist (`decide_engine_with_empty_queue`).
+
+**Next and previous** anchor on `retry` during `Loading`, else on the navigation playlist's cursor; with no anchor they do nothing. Seek, restart and the live-media rules are unchanged.
+
+This is a deliberate narrowing of today's table, where Space, `p`, next and previous fall back to the selected row: with one list that row was always in the playing queue; with several it may belong to another playlist, and one rule is simpler than a viewed-equals-navigation special case. Visible difference with a single playlist: on a playlist that has never played, `p` starts the first entry in playback order rather than the highlighted row, and next/previous wait for a cursor. Enter on the highlighted row is unchanged.
 
 **Start from zero.** `resume_intent_for(media, entry)` gains the identity: `MediaId::LocalFile` and `MediaId::RemoteUrl` yield no resume, so the load starts at zero; `MediaId::PodcastEpisode` is unchanged; live media already never resumes. Both callers (§2) pass the media, so `tenuto play song.mp3` starts from zero too. Checkpoints are still written, so the played marker keeps working. Pause and Stop → Play stay engine commands and continue mid-track.
 
@@ -133,7 +155,7 @@ Known ceiling, marked with a `ponytail:` comment: an entry added while shuffle i
 
 **Request.** `BrowseRequest::CollectTree { roots: Vec<PathBuf>, dest: PlaylistId }` on the existing browse worker.
 
-**Walk.** Recursive `std::fs::read_dir`; no new dependency. Each level uses `list_directory`'s order — files of a directory before its subdirectories' contents, each by case-insensitive name. That guarantees a deterministic filename order, not album track order. Only `AUDIO_EXTENSIONS` files are collected. A directory symlink is skipped (`symlink_metadata` before descending), which rules out cycles; a file symlink is followed as today. Candidates are deduplicated by resolved `MediaId` within the batch, which covers overlapping roots and file-symlink aliases. The walk stops once it holds `MAX_ENTRIES` candidates.
+**Walk.** Recursive `std::fs::read_dir`; no new dependency. Depth-first, visiting each level in exactly `list_directory`'s order: subdirectories first, by case-insensitive name, each walked to the bottom, then the directory's own audio files by case-insensitive name. So a root holding `z.mp3` and `a/1.mp3` yields `a/1.mp3`, then `z.mp3`. Reusing the listing order keeps the walk and the browser's display in agreement. It guarantees a deterministic filename order, not album track order, and it decides what survives truncation: the earliest candidates in this order. Several roots are walked in their listing order. Only `AUDIO_EXTENSIONS` files are collected. A directory symlink is skipped (`symlink_metadata` before descending), which rules out cycles; a file symlink is followed as today. Candidates are deduplicated by resolved `MediaId` within the batch, which covers overlapping roots and file-symlink aliases. The walk stops once it holds `MAX_ENTRIES` candidates.
 
 **Result.** `BrowseResult::TreeCollected { dest, items, unreadable: Vec<PathBuf>, scan_limit_reached: bool }`. It is routed through the application, not through `BrowserState`: closing the browser or changing its directory does not discard an explicitly requested addition. On apply: if `dest` no longer exists, the result is dropped with a notice; otherwise items already in the destination are skipped, global capacity is rechecked (P7), and the rest are enqueued in walk order up to the free capacity.
 
@@ -172,10 +194,11 @@ Repeat modes; a transient "play next" queue; M3U import or export; playlist CLI 
 Test-first, on the existing pure seams.
 
 - **Playlist and queue.** The `splitmix64` vector; `first` pinning; order stable under add, remove and move; boundaries return `None`; ID exhaustion and capacity refusal change nothing; the cap holds across playlists.
-- **Codec.** Migration 3 → 4; each recovery rule in §6, including both truncations and `current_media` re-pointing; every case keeps its checkpoints.
-- **Session.** Removing another playlist's cursor never stops playback; invalidation scoped to one playlist; `playing` changes only at adoption; a failed cross-playlist load does not change `playing` or any remembered cursor; `update_display` reaches every playlist.
-- **Transport.** A phase × command table with viewed ≠ playing, with an empty playing playlist, and with the `Loading` exception; shuffled manual navigation agrees with automatic advance.
-- **Browse.** Walk order; directory-symlink cycle fixture; unreadable directories reported; scan limit; overlapping roots and file-symlink aliases deduplicated; completion applied after the browser closed; completion dropped with a notice after the playlist was deleted; `a` additive where Enter toggles.
+- **Codec.** Migration 3 → 4; each recovery rule in §6, including both truncations and `current_media` re-pointing; every case keeps its checkpoints. Exhaustion together with duplicates: a file holding entry ID `u64::MAX` plus a cross-playlist duplicate, and the same for playlist IDs — the later occurrence is dropped, the counter is `null`, and saving then reopening the repaired state repairs nothing further. A repair never mints an ID that appears later in the file.
+- **Session.** Release follows adoption, not the cursor: removing an unowned cursor (restored with nothing adopted; an inactive playlist's; the playing playlist's while another playlist's load is pending) clears it and neither releases nor stops; with A playing and B loading, removing A's owned entry leaves B's pending load valid; invalidation scoped to one playlist; `playing` changes only at adoption; a failed cross-playlist load does not change `playing` or any remembered cursor; `update_display` reaches every playlist.
+- **Runtime.** Clearing an inactive playlist cancels no pending seek and loses no other playlist's enrichment request.
+- **Transport.** A phase × command table with viewed ≠ playing, with an empty playing playlist, and with the `Loading` exception; with A empty and a failed request in B, `p` and Space retry B's entry while the view is on C; Space and `p` never load the viewed playlist's selection; shuffled manual navigation agrees with automatic advance.
+- **Browse.** Walk order pinned by a fixture with root-level and nested audio (`a/1.mp3` before `z.mp3`), which also fixes what truncation keeps; directory-symlink cycle fixture; unreadable directories reported; scan limit; overlapping roots and file-symlink aliases deduplicated; completion applied after the browser closed; completion dropped with a notice after the playlist was deleted; `a` additive where Enter toggles.
 - **Resume.** Local file and URL start at zero with a checkpoint present; a podcast still resumes; Stop → Play continues mid-track.
 - **View and layout.** Row strings; tab-strip widths in columns, scrolling, one over-long name clipped; hostile names sanitized.
 
