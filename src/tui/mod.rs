@@ -31,6 +31,7 @@ pub mod layout;
 pub mod render;
 pub mod spectrum;
 pub mod state;
+pub mod tabs;
 pub mod theme;
 
 use std::any::Any;

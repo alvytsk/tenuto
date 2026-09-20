@@ -14,7 +14,7 @@ use tenuto::application::runtime::{AppCommand, EnqueueItem};
 use tenuto::application::transport::PlaybackPhase;
 use tenuto::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
 use tenuto::tui::render::{HitMap, TransportButton, Visuals, draw};
-use tenuto::tui::state::{Overlay, UiState};
+use tenuto::tui::state::{InputPurpose, Overlay, UiState};
 use views::{decoded, ids, playing, sample_view, view};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -114,7 +114,10 @@ fn typing_a_url_never_triggers_shortcuts_and_enter_enqueues_it() {
     let view = sample_view();
     let mut ui = UiState::new(true);
     handle_key(key(KeyCode::Char('a')), &mut ui, &view);
-    assert_eq!(ui.overlay, Overlay::Input);
+    assert_eq!(
+        ui.overlay,
+        Overlay::Input(InputPurpose::AddUrl(view.viewed))
+    );
     for c in "https://q.example/ p+.mp3".chars() {
         assert!(
             handle_key(key(KeyCode::Char(c)), &mut ui, &view).is_empty(),
@@ -447,8 +450,8 @@ fn ctrl_l_redraws_from_every_overlay_without_closing_it() {
     for overlay in [
         Overlay::None,
         Overlay::Help,
-        Overlay::Input,
-        Overlay::ConfirmClear,
+        Overlay::Input(InputPurpose::AddUrl(view.viewed)),
+        Overlay::ConfirmClear(view.viewed),
         Overlay::Browser,
     ] {
         let mut ui = UiState::new(true);
@@ -471,7 +474,7 @@ fn a_ctrl_chord_on_y_does_not_confirm_the_clear() {
     let view = sample_view();
     let mut ui = UiState::new(true);
     handle_key(key(KeyCode::Char('c')), &mut ui, &view);
-    assert_eq!(ui.overlay, Overlay::ConfirmClear);
+    assert_eq!(ui.overlay, Overlay::ConfirmClear(view.viewed));
     assert!(app(&handle_key(ctrl('y'), &mut ui, &view)).is_empty());
     assert_eq!(ui.overlay, Overlay::None, "any key closes the confirmation");
 }

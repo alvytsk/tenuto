@@ -12,6 +12,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::application::transport::PlaybackPhase;
 use crate::application::view::{NowPlaying, PersistenceStatus, PlayerView, QueueRow, format_saved};
@@ -22,7 +23,8 @@ use crate::tui::browser::BrowserState;
 use crate::tui::layout::{
     Regions, Tier, inset, queue_body, regions, take_left, take_right, tier_for, visible_rows,
 };
-use crate::tui::state::{Overlay, UiState};
+use crate::tui::state::{InputPurpose, Overlay, UiState};
+use crate::tui::tabs;
 use crate::tui::theme::Theme;
 
 /// What the frame shows beyond the view: prepared artwork, spectrum levels
@@ -87,7 +89,7 @@ const RESIZE_HINTS: &str = "space play · q quit";
 /// listening history.
 const CONFIRM_CLEAR_TEXT: &str = "Clear the queue? Listening history is kept. y to confirm";
 /// The §7 key table, one line per row.
-const HELP_LINES: [&str; 19] = [
+const HELP_LINES: [&str; 22] = [
     "Space           Pause/resume; unloaded/ended behavior follows §4",
     "Enter           Play selected queue entry",
     "Up/Down or j/k  Move selection",
@@ -101,7 +103,10 @@ const HELP_LINES: [&str; 19] = [
     "b               Open/close browser",
     "  in Podcasts   a subscribe · r/R refresh one/all · d unsubscribe",
     "a               Open path/URL input",
-    "c               Request queue clear with confirmation",
+    "c               Clear this playlist, with confirmation",
+    "Tab/Shift-Tab   Next / previous playlist",
+    "n / r / D       New / rename / delete playlist",
+    "z               Shuffle this playlist",
     "?               Show help",
     "m               Toggle mouse capture",
     "Ctrl-L          Redraw the whole view",
@@ -175,7 +180,7 @@ pub fn draw(
     let progress = draw_progress(buffer, &regions, view, tier, &theme);
     let rows = draw_queue(buffer, regions.queue, view, ui, tier, &theme);
     draw_footer(buffer, regions.footer, view, &theme);
-    draw_overlay(buffer, area, ui, visuals.browser, &theme);
+    draw_overlay(buffer, area, view, ui, visuals.browser, &theme);
     HitMap {
         rows,
         queue: regions.queue,
@@ -190,14 +195,28 @@ pub fn draw(
 fn draw_overlay(
     buffer: &mut Buffer,
     area: Rect,
+    view: &PlayerView,
     ui: &UiState,
     browser: Option<&BrowserState>,
     theme: &Theme,
 ) {
     match ui.overlay {
         Overlay::Help => draw_help_overlay(buffer, area, theme),
-        Overlay::ConfirmClear => draw_confirm_overlay(buffer, area, theme),
-        Overlay::Input => draw_input_overlay(buffer, area, &ui.input, theme),
+        Overlay::ConfirmClear(_) => draw_confirm_overlay(buffer, area, CONFIRM_CLEAR_TEXT, theme),
+        Overlay::ConfirmDelete(id) => {
+            let name = view
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .map_or("", |tab| tab.name.as_str());
+            draw_confirm_overlay(
+                buffer,
+                area,
+                &format!(r#"Delete playlist "{name}"? y to confirm"#),
+                theme,
+            );
+        }
+        Overlay::Input(purpose) => draw_input_overlay(buffer, area, purpose, &ui.input, theme),
         Overlay::Browser => {
             if let Some(browser) = browser {
                 browser::draw_browser(buffer, area, browser, theme);
@@ -220,8 +239,8 @@ fn centered_box(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn draw_confirm_overlay(buffer: &mut Buffer, area: Rect, theme: &Theme) {
-    let width = u16::try_from(CONFIRM_CLEAR_TEXT.len() + 4)
+fn draw_confirm_overlay(buffer: &mut Buffer, area: Rect, text: &str, theme: &Theme) {
+    let width = u16::try_from(text.width() + 4)
         .unwrap_or(u16::MAX)
         .min(area.width);
     let box_area = centered_box(area, width, 3);
@@ -230,7 +249,7 @@ fn draw_confirm_overlay(buffer: &mut Buffer, area: Rect, theme: &Theme) {
         .title(" confirm ")
         .border_style(Style::new().fg(theme.amber))
         .render(box_area, buffer);
-    Paragraph::new(CONFIRM_CLEAR_TEXT)
+    Paragraph::new(text)
         .style(Style::new().fg(theme.cream))
         .wrap(Wrap { trim: true })
         .render(inset(box_area), buffer);
@@ -258,12 +277,23 @@ fn draw_help_overlay(buffer: &mut Buffer, area: Rect, theme: &Theme) {
 /// Typed text reaches this overlay only through `tui::input`, which already
 /// drops raw control characters before they land in `ui.input`, so the
 /// string drawn here is always inert.
-fn draw_input_overlay(buffer: &mut Buffer, area: Rect, input: &str, theme: &Theme) {
+fn draw_input_overlay(
+    buffer: &mut Buffer,
+    area: Rect,
+    purpose: InputPurpose,
+    input: &str,
+    theme: &Theme,
+) {
+    let title = match purpose {
+        InputPurpose::AddUrl(_) => " add path or URL — Enter to add, Esc to cancel ",
+        InputPurpose::NewPlaylist => " new playlist — Enter to create, Esc to cancel ",
+        InputPurpose::Rename(_) => " rename playlist — Enter to rename, Esc to cancel ",
+    };
     let width = area.width.min(60);
     let box_area = centered_box(area, width, 3);
     Clear.render(box_area, buffer);
     Block::bordered()
-        .title(" add path or URL — Enter to add, Esc to cancel ")
+        .title(title)
         .border_style(Style::new().fg(theme.green))
         .render(box_area, buffer);
     Paragraph::new(format!("{input}▏"))
@@ -775,17 +805,26 @@ fn draw_queue(
     theme: &Theme,
 ) -> Vec<(Rect, QueueEntryId)> {
     let body = if tier == Tier::Minimal {
-        area
+        // No border to put the strip in: its first row carries the compact
+        // form and the listing takes the rest.
+        let head = row(area, area.y);
+        let strip = tabs::compact(&view.tabs, view.viewed, usize::from(area.width));
+        Line::styled(strip, Style::new().fg(theme.muted)).render(head, buffer);
+        Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        }
     } else {
         let count = match view.rows.len() {
             1 => " 1 track ".to_owned(),
             n => format!(" {n} tracks "),
         };
+        // The strip sits where ` QUEUE ` did: inside the corners, with a
+        // column of air at each end, and clear of the right-aligned count.
+        let room = usize::from(area.width).saturating_sub(4 + count.width());
         bordered(theme)
-            .title(Line::styled(
-                " QUEUE ",
-                Style::new().fg(theme.cream).add_modifier(Modifier::BOLD),
-            ))
+            .title(tab_strip(view, room, theme))
             .title(Line::styled(count, Style::new().fg(theme.muted)).right_aligned())
             .render(area, buffer);
         queue_body(area)
@@ -826,6 +865,30 @@ fn draw_queue(
         }
     }
     hits
+}
+
+/// The playlist tabs as a border title: the viewed one bold and cream, the
+/// playing one in the text colour, the rest muted (§10).
+fn tab_strip(view: &PlayerView, room: usize, theme: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (index, label) in tabs::strip(&view.tabs, view.viewed, room)
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw(tabs::GAP));
+        }
+        let style = if label.viewed {
+            Style::new().fg(theme.cream).add_modifier(Modifier::BOLD)
+        } else if label.playing {
+            Style::new().fg(theme.text)
+        } else {
+            Style::new().fg(theme.muted)
+        };
+        spans.push(Span::styled(label.text, style));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
 }
 
 /// One row: playing marker, number, title, duration, saved history. Narrow
