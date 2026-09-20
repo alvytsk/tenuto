@@ -1530,11 +1530,11 @@ impl Session {
             .record_estimated(media, position, now.wall, completed);
     }
 
-    /// `resume_intent_for(self.state.entry_for(media))`, defaulting to a
-    /// start of zero for a media with no stored entry at all — no entry is
+    /// `resume_intent_for(media, self.state.entry_for(media))`, defaulting to
+    /// a start of zero for a media with no stored entry at all — no entry is
     /// not itself a resume intent to resolve, it is the absence of one.
     pub fn resume_intent(&self, media: &MediaId) -> ResumeIntent {
-        resume_intent_for(self.state.entry_for(media))
+        resume_intent_for(media, self.state.entry_for(media))
             .unwrap_or(ResumeIntent::StartAt(Duration::ZERO))
     }
 
@@ -1569,7 +1569,21 @@ impl Session {
 /// position exactly as before wherever that path is actually taken — the
 /// `resume_candidate` branch below, reached whenever there is no estimate
 /// to prefer.
-pub fn resume_intent_for(entry: Option<&PersistedCheckpoint>) -> Option<ResumeIntent> {
+///
+/// M8 §7 ("Start from zero"): a local file or a plain URL never resumes on a
+/// fresh load, whatever the checkpoint says — the checkpoint is still
+/// written (the queue's "played" marker depends on it), only what a fresh
+/// load does with it changes. A fresh-load policy only: pause and Stop →
+/// Play are engine commands that never reach this function, so the position
+/// contract (docs/architecture.md §1) holds unweakened for them. A podcast
+/// episode is unaffected — it still resumes exactly as before.
+pub fn resume_intent_for(
+    media: &MediaId,
+    entry: Option<&PersistedCheckpoint>,
+) -> Option<ResumeIntent> {
+    if matches!(media, MediaId::LocalFile(_) | MediaId::RemoteUrl(_)) {
+        return None;
+    }
     let entry = entry?;
     if entry.completed {
         return resume_candidate(entry.position, entry.completed).map(ResumeIntent::Candidate);

@@ -634,7 +634,7 @@ fn open_persistence(store: StateStore, media: &MediaId, clock: &Arc<dyn Clock>) 
     // preference is resolved to `ResumeIntent::EstimatedCandidate` here
     // rather than the plain `Candidate` `resume_candidate` alone would
     // build.
-    let resume = resume_intent_for(state.entry_for(media));
+    let resume = resume_intent_for(media, state.entry_for(media));
     let volume = state.volume();
     let sink: Box<dyn StateSink> = if writable {
         Box::new(store)
@@ -1105,6 +1105,21 @@ mod tests {
         }
     }
 
+    /// A podcast episode identity, for the `open_persistence` tests that
+    /// exercise `resume_intent_for`'s decision to resume (Task 8: a local
+    /// file never does, on a fresh load, so those tests moved here).
+    fn episode(guid: &str) -> MediaId {
+        let feed = match FeedId::new("0123456789abcdef0123456789abcdef".to_string()) {
+            Ok(feed) => feed,
+            Err(error) => panic!("a literal feed ID must parse: {error}"),
+        };
+        let episode = match EpisodeKey::resolve(Some(guid), None, None) {
+            Ok(episode) => episode,
+            Err(error) => panic!("a literal key must resolve: {error}"),
+        };
+        MediaId::PodcastEpisode { feed, episode }
+    }
+
     /// The user-visible half of a resume: the listener sees the restored
     /// position the moment the track opens, not after the first progress tick.
     /// `Loaded` is the only event that carries it.
@@ -1192,7 +1207,7 @@ mod tests {
     fn a_stored_entry_becomes_the_resume_candidate_and_the_restored_volume() {
         let dir = tempfile::tempdir().unwrap();
         let (store, clock) = store_at(&dir.path().join("state.json"));
-        let media = local("/music/sonata.flac");
+        let media = episode("ep-1");
         let mut stored = PersistedState::default();
         stored.set_volume(Volume::new(0.25));
         stored.record(
@@ -1230,7 +1245,7 @@ mod tests {
     fn a_stored_estimate_and_its_established_fallback_resolve_to_an_estimated_candidate() {
         let dir = tempfile::tempdir().unwrap();
         let (store, clock) = store_at(&dir.path().join("state.json"));
-        let media = local("/music/sonata.flac");
+        let media = episode("ep-2");
         let mut stored = PersistedState::default();
         stored.record(
             &PlaybackCheckpoint {
@@ -1269,7 +1284,7 @@ mod tests {
     fn a_stored_estimate_with_no_established_position_resolves_with_no_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let (store, clock) = store_at(&dir.path().join("state.json"));
-        let media = local("/music/sonata.flac");
+        let media = episode("ep-3");
         let mut stored = PersistedState::default();
         stored.record_estimated(
             media.clone(),
@@ -1301,7 +1316,7 @@ mod tests {
     fn a_completed_entry_ignores_a_stray_estimate_and_stays_an_ordinary_candidate() {
         let dir = tempfile::tempdir().unwrap();
         let (store, clock) = store_at(&dir.path().join("state.json"));
-        let media = local("/music/sonata.flac");
+        let media = episode("ep-4");
         let mut stored = PersistedState::default();
         stored.record_estimated(
             media.clone(),

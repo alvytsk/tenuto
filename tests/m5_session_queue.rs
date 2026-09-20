@@ -6,7 +6,7 @@ use std::time::Duration;
 use support::media;
 use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
-use tenuto::media::id::MediaId;
+use tenuto::media::id::{EpisodeKey, FeedId, MediaId};
 use tenuto::media::metadata::MediaMetadata;
 use tenuto::persistence::PersistenceError;
 use tenuto::persistence::model::PersistedState;
@@ -169,28 +169,51 @@ fn clearing_stops_and_keeps_listening_history() {
     assert!(session.state().entry_for(&media("b")).is_some());
 }
 
+/// Podcast episodes, not local files (Task 8: a local file never resumes on
+/// a fresh load, whatever its checkpoint says — this test's point is the
+/// resume policy's handling of partial/completed/unseen entries, which still
+/// applies to a media kind that does resume).
+fn episode(guid: &str) -> MediaId {
+    let feed = FeedId::new("0123456789abcdef0123456789abcdef".to_string())
+        .unwrap_or_else(|error| panic!("a literal feed ID must parse: {error}"));
+    let episode = EpisodeKey::resolve(Some(guid), None, None)
+        .unwrap_or_else(|error| panic!("a literal key must resolve: {error}"));
+    MediaId::PodcastEpisode { feed, episode }
+}
+
 #[test]
 fn advancing_into_partial_and_completed_entries_uses_the_resume_policy() {
-    let file = serde_json::json!({ "schema_version": 3, "volume": 1.0, "checkpoints": {
-        "local:/music/half.flac": { "position": { "secs": 40, "nanos": 0 }, "completed": false, "touch_seq": 1, "updated_at": "2026-09-14T10:00:00Z" },
-        "local:/music/done.flac": { "position": { "secs": 90, "nanos": 0 }, "completed": true, "touch_seq": 2, "updated_at": "2026-09-14T10:00:00Z" } } });
+    let half = episode("half");
+    let done = episode("done");
+    let new = episode("new");
+    let mut checkpoints = serde_json::Map::new();
+    checkpoints.insert(
+        half.to_string(),
+        serde_json::json!({ "position": { "secs": 40, "nanos": 0 }, "completed": false, "touch_seq": 1, "updated_at": "2026-09-14T10:00:00Z" }),
+    );
+    checkpoints.insert(
+        done.to_string(),
+        serde_json::json!({ "position": { "secs": 90, "nanos": 0 }, "completed": true, "touch_seq": 2, "updated_at": "2026-09-14T10:00:00Z" }),
+    );
+    let file =
+        serde_json::json!({ "schema_version": 3, "volume": 1.0, "checkpoints": checkpoints });
     let session = Session::new(serde_json::from_value(file).expect("valid"));
     assert_eq!(
-        session.resume_intent(&media("half")),
+        session.resume_intent(&half),
         ResumeIntent::Candidate(ResumeCandidate {
             position: Duration::from_secs(40),
             completed: false
         })
     );
     assert!(matches!(
-        session.resume_intent(&media("done")),
+        session.resume_intent(&done),
         ResumeIntent::Candidate(ResumeCandidate {
             completed: true,
             ..
         })
     ));
     assert_eq!(
-        session.resume_intent(&media("new")),
+        session.resume_intent(&new),
         ResumeIntent::StartAt(Duration::ZERO)
     );
 }
