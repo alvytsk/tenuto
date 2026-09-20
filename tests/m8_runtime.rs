@@ -31,6 +31,14 @@ fn local_entry(path: &std::path::Path) -> NewQueueEntry {
     .unwrap_or_else(|error| panic!("entry: {error}"))
 }
 
+/// Where the display says playback is, or zero when nothing is playing.
+fn position(runtime: &PlayerRuntime) -> Duration {
+    runtime
+        .view()
+        .now_playing
+        .map_or(Duration::ZERO, |now| now.position)
+}
+
 fn tab_names(runtime: &PlayerRuntime) -> Vec<String> {
     runtime
         .view()
@@ -104,6 +112,60 @@ fn deleting_the_viewed_playlist_moves_the_view_and_the_last_one_is_refused() {
             .status
             .is_some_and(|status| status.contains("last playlist"))
     );
+}
+
+/// The reachable refusal is the common one: a single playlist is both the
+/// owner of playback and the last one, so `DeletePlaylist` is refused — and a
+/// refused delete must change nothing, the standing seek included (M8 §4).
+#[test]
+fn a_refused_delete_cancels_nothing() {
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(FIVE.into())],
+    });
+    let id = row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(id));
+    pump_until(&mut rig.runtime, "the only row is playing", |view| {
+        view.now_playing
+            .as_ref()
+            .is_some_and(|now| now.loaded && now.entry == Some(id) && now.duration.is_some())
+    });
+    assert!(rig.runtime.session().owns_entry(id), "playback is owned");
+
+    let before = position(&rig.runtime);
+    rig.runtime.handle(AppCommand::SeekBy(3));
+    // The burst stands: the display already shows the prediction, and says so.
+    let predicted = rig
+        .runtime
+        .view()
+        .now_playing
+        .expect("something is playing");
+    assert!(
+        predicted.estimated_position && predicted.position >= before + Duration::from_millis(2500),
+        "no seek is standing: {before:?} -> {predicted:?}"
+    );
+
+    rig.runtime.handle(AppCommand::DeletePlaylist(first));
+    assert!(
+        rig.runtime
+            .view()
+            .status
+            .is_some_and(|status| status.contains("last playlist")),
+        "the last playlist is not deletable"
+    );
+    assert_eq!(tab_names(&rig.runtime), ["Default"]);
+
+    // Past `KeyRouter`'s 250ms quiet window: a burst still standing has
+    // flushed and landed, and 400ms of playback cannot account for the jump.
+    pump_for(&mut rig.runtime, Duration::from_millis(400));
+    let landed = position(&rig.runtime);
+    assert!(
+        landed >= before + Duration::from_millis(2500),
+        "the refused delete cancelled the seek: {before:?} -> {landed:?}"
+    );
+    let _ = rig.runtime.shutdown();
 }
 
 #[test]
@@ -201,12 +263,7 @@ fn neither_an_unowned_removal_nor_another_playlists_clear_cancels_a_standing_see
         items: vec![EnqueueItem::Path(SHORT.into())],
     });
 
-    let before = rig
-        .runtime
-        .view()
-        .now_playing
-        .map(|now| now.position)
-        .unwrap_or_default();
+    let before = position(&rig.runtime);
     rig.runtime.handle(AppCommand::SeekBy(3));
     // Neither touches the playback the burst belongs to (M8 §5).
     rig.runtime.handle(AppCommand::Remove(ids[1]));
@@ -215,15 +272,10 @@ fn neither_an_unowned_removal_nor_another_playlists_clear_cancels_a_standing_see
     // flushed; a cancelled one never will, and 400ms of playback cannot
     // account for a three-second jump.
     pump_for(&mut rig.runtime, Duration::from_millis(400));
-    let position = rig
-        .runtime
-        .view()
-        .now_playing
-        .map(|now| now.position)
-        .unwrap_or_default();
+    let landed = position(&rig.runtime);
     assert!(
-        position >= before + Duration::from_millis(2500),
-        "the seek was cancelled: {before:?} -> {position:?}"
+        landed >= before + Duration::from_millis(2500),
+        "the seek was cancelled: {before:?} -> {landed:?}"
     );
     let _ = rig.runtime.shutdown();
 }

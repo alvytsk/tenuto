@@ -1080,11 +1080,13 @@ impl PlayerRuntime {
     /// Clears or deletes one playlist. Side effects are scoped (M8 §5): a
     /// pending seek is cancelled only if the playlist owns playback, and the
     /// metadata workers — which can only cancel everything — are re-asked
-    /// for every entry that still lacks tags.
+    /// for every entry that still lacks tags. Every one of them waits for the
+    /// session to accept the change, because a refusal — a playlist that is
+    /// gone, or the last one, which cannot be deleted — changes nothing (§4).
+    /// Ownership is read before the call and used after it: once the entries
+    /// are gone, nothing owns playback any more.
     fn vacate(&mut self, id: PlaylistId, delete: bool) {
-        if self.session.owns_playlist(id) {
-            self.router.cancel();
-        }
+        let owning = self.session.owns_playlist(id);
         let index = self
             .session
             .state()
@@ -1100,6 +1102,9 @@ impl PlayerRuntime {
         };
         match result {
             Ok(removal) => {
+                if owning {
+                    self.router.cancel();
+                }
                 if let Some(workers) = &self.metadata {
                     workers.cancel_all();
                 }
