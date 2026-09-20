@@ -3,7 +3,10 @@ mod support;
 use support::media;
 use tenuto::media::id::MediaId;
 use tenuto::playlist::{Playlist, PlaylistId, Shuffle, clean_name, splitmix64};
-use tenuto::queue::{Direction, DisplayMetadata, NewQueueEntry, Queue, QueueEntryId, QueueSource};
+use tenuto::queue::{
+    Direction, DisplayMetadata, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueError,
+    QueueSource,
+};
 
 fn entry(name: &str) -> NewQueueEntry {
     let MediaId::LocalFile(path) = media(name) else {
@@ -20,8 +23,12 @@ fn entry(name: &str) -> NewQueueEntry {
 /// A playlist of five entries whose IDs are 1..=5.
 fn five(shuffle: Option<Shuffle>) -> (Playlist, Vec<QueueEntryId>) {
     let mut queue = Queue::default();
+    let mut ids_alloc = IdAllocator::default();
     let ids = queue
-        .enqueue(["a", "b", "c", "d", "e"].map(entry).to_vec())
+        .enqueue(
+            ["a", "b", "c", "d", "e"].map(entry).to_vec(),
+            &mut ids_alloc,
+        )
         .unwrap_or_else(|error| panic!("fits: {error}"));
     let playlist = Playlist::from_parts(
         PlaylistId::from_raw_for_tests(1),
@@ -142,4 +149,49 @@ fn names_are_trimmed_truncated_to_forty_chars_and_never_empty() {
     assert_eq!(clean_name("   "), None);
     let long = "é".repeat(50);
     assert_eq!(clean_name(&long).map(|name| name.chars().count()), Some(40));
+}
+
+#[test]
+fn an_allocator_reserves_a_contiguous_range_or_nothing() {
+    let mut ids = IdAllocator::default();
+    assert_eq!(ids.reserve(3).expect("room"), 1..=3);
+    assert_eq!(ids.next(), Some(4));
+
+    let mut last = IdAllocator::starting_at(Some(u64::MAX));
+    assert_eq!(last.reserve(2), Err(QueueError::IdExhausted));
+    assert_eq!(
+        last.next(),
+        Some(u64::MAX),
+        "a refused batch changes nothing"
+    );
+    assert_eq!(last.reserve(1).expect("the last ID"), u64::MAX..=u64::MAX);
+    assert_eq!(
+        last.next(),
+        None,
+        "handing out u64::MAX exhausts the namespace"
+    );
+    assert_eq!(last.reserve(1), Err(QueueError::IdExhausted));
+}
+
+#[test]
+fn observing_an_id_never_lowers_the_counter_and_max_exhausts_it() {
+    let mut ids = IdAllocator::default();
+    ids.observe(9);
+    assert_eq!(ids.next(), Some(10));
+    ids.observe(3);
+    assert_eq!(ids.next(), Some(10));
+    ids.observe(u64::MAX);
+    assert_eq!(ids.next(), None);
+}
+
+#[test]
+fn two_queues_sharing_an_allocator_never_share_an_id() {
+    let mut ids = IdAllocator::default();
+    let (mut a, mut b) = (Queue::default(), Queue::default());
+    let first = a
+        .enqueue(vec![entry("a"), entry("b")], &mut ids)
+        .expect("ids");
+    let second = b.enqueue(vec![entry("a")], &mut ids).expect("ids");
+    assert_eq!(first.iter().map(|id| id.get()).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(second[0].get(), 3);
 }

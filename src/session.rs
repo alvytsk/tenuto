@@ -422,7 +422,7 @@ impl Session {
         &mut self,
         batch: Vec<NewQueueEntry>,
     ) -> Result<(Vec<QueueEntryId>, Action), QueueError> {
-        let ids = self.state.queue_mut().enqueue(batch)?;
+        let ids = self.state.enqueue(batch)?;
         Ok((ids, self.submit(Urgency::Ordinary)))
     }
 

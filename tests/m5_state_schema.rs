@@ -73,8 +73,8 @@ fn every_whole_queue_problem_is_classified() {
             QueueProblem::SourceMismatch,
         ),
         (
-            serde_json::Value::Array((1..=257).map(|i| entry(i, &format!("t{i}"))).collect()),
-            QueueProblem::OverCapacity { found: 257 },
+            serde_json::Value::Array((1..=4097).map(|i| entry(i, &format!("t{i}"))).collect()),
+            QueueProblem::OverCapacity { found: 4097 },
         ),
     ];
     for (queue, problem) in cases {
@@ -123,7 +123,7 @@ fn a_duplicate_occurrence_is_never_inferred_active_from_media() {
 #[test]
 fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
     use tenuto::media::id::MediaId;
-    use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueError, QueueSource};
+    use tenuto::queue::{DisplayMetadata, IdAllocator, NewQueueEntry, QueueError, QueueSource};
     let file = json!({ "schema_version": 3, "queue": [entry(u64::MAX, "a")] });
     let state: PersistedState = serde_json::from_value(file).expect("valid maximum ID");
     let mut queue = state.queue().clone();
@@ -137,7 +137,14 @@ fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
         DisplayMetadata::default(),
     )
     .expect("entry");
-    assert_eq!(queue.enqueue(vec![item]), Err(QueueError::IdExhausted));
+    // Mirrors `RawState::into_state`, which raises the shared allocator past
+    // every recovered entry's ID: the maximum has already been observed.
+    let mut ids = IdAllocator::default();
+    ids.observe(u64::MAX);
+    assert_eq!(
+        queue.enqueue(vec![item], &mut ids),
+        Err(QueueError::IdExhausted)
+    );
     assert_eq!(queue, before);
     assert_eq!(queue.entries()[0].id().get(), u64::MAX);
 }

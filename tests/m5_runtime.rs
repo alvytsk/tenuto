@@ -270,12 +270,12 @@ fn loading_a_tagged_file_fills_artist_and_album_from_the_decoder() {
 fn an_oversized_enqueue_is_rejected_whole_with_a_visible_message() {
     let mut rig = rig_with(PersistedState::default());
     rig.runtime.handle(AppCommand::Enqueue(
-        (0..257).map(|_| EnqueueItem::Path(SHORT.into())).collect(),
+        (0..4097).map(|_| EnqueueItem::Path(SHORT.into())).collect(),
     ));
     assert!(rig.runtime.view().rows.is_empty());
     assert_eq!(
         rig.runtime.view().status.as_deref(),
-        Some("Queue is full (256 entries)")
+        Some("Queue is full (4096 entries)")
     );
 }
 

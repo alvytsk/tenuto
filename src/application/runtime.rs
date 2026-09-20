@@ -49,8 +49,8 @@ use crate::playback::state::PlaybackState;
 use crate::playback::timeline::PositionQuality;
 use crate::playback::volume::Volume;
 use crate::queue::{
-    Direction, DisplayDuration, DisplayMetadata, DurationSource, MAX_QUEUE_ENTRIES, NewQueueEntry,
-    QueueEntry, QueueEntryId, QueueError, QueueSource,
+    Direction, DisplayDuration, DisplayMetadata, DurationSource, MAX_PLAYLIST_ENTRIES,
+    NewQueueEntry, QueueEntry, QueueEntryId, QueueError, QueueSource,
 };
 use crate::session::{
     Action, Advance, DisplayUpdate, LoadTarget, RegisterLoadError, Removal, Session,
@@ -982,7 +982,7 @@ impl PlayerRuntime {
                 self.request_enrichment(&ids);
             }
             Err(QueueError::Capacity { .. }) => {
-                self.status = Some(format!("Queue is full ({MAX_QUEUE_ENTRIES} entries)"));
+                self.status = Some(format!("Queue is full ({MAX_PLAYLIST_ENTRIES} entries)"));
             }
             Err(error) => self.status = Some(error.to_string()),
         }

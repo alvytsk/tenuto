@@ -6,7 +6,9 @@ use support::media;
 use tenuto::application::transport::*;
 use tenuto::media::id::MediaId;
 use tenuto::persistence::model::PersistedState;
-use tenuto::queue::{DisplayMetadata, NewQueueEntry, Queue, QueueEntryId, QueueSource};
+use tenuto::queue::{
+    DisplayMetadata, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueSource,
+};
 use tenuto::session::{LoadTarget, Session};
 
 fn entry(name: &str) -> NewQueueEntry {
@@ -55,7 +57,10 @@ fn with_active() -> (Queue, Vec<QueueEntryId>) {
 fn without_active() -> (Queue, Vec<QueueEntryId>) {
     let mut queue = Queue::default();
     let ids = queue
-        .enqueue(vec![entry("a"), entry("b"), entry("c")])
+        .enqueue(
+            vec![entry("a"), entry("b"), entry("c")],
+            &mut IdAllocator::default(),
+        )
         .unwrap_or_else(|error| panic!("fits: {error}"));
     (queue, ids)
 }

@@ -15,7 +15,7 @@ use tenuto::media::id::{AbsolutePath, MediaId};
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::volume::Volume;
 use tenuto::queue::{
-    DisplayDuration, DurationSource, NewQueueEntry, Queue, QueueEntryId, QueueSource,
+    DisplayDuration, DurationSource, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueSource,
 };
 
 /// The ids a fresh queue assigns to three entries; the same on every call.
@@ -35,7 +35,7 @@ pub fn ids() -> Vec<QueueEntryId> {
         })
         .collect();
     queue
-        .enqueue(entries)
+        .enqueue(entries, &mut IdAllocator::default())
         .unwrap_or_else(|error| panic!("three entries fit: {error}"))
 }
 

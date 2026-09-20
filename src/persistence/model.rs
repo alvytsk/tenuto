@@ -11,7 +11,9 @@ use super::queue_codec::{self, QueueReset};
 use crate::media::id::MediaId;
 use crate::playback::checkpoint::PlaybackCheckpoint;
 use crate::playback::volume::Volume;
-use crate::queue::{Queue, QueueEntryId};
+use crate::queue::{
+    IdAllocator, MAX_PLAYLIST_ENTRIES, NewQueueEntry, Queue, QueueEntryId, QueueError,
+};
 
 pub const SCHEMA_VERSION: u32 = 3;
 
@@ -61,6 +63,11 @@ pub struct PersistedState {
     checkpoints: BTreeMap<MediaId, PersistedCheckpoint>,
     queue: Queue,
     next_seq: u64,
+    /// The one allocator for every queue entry ID (M8 §4): outside `Queue`
+    /// so a future playlist can share it. Never (de)serialized directly —
+    /// `into_state` rebuilds it by observing every entry ID a recovered
+    /// queue actually holds.
+    entry_ids: IdAllocator,
 }
 
 /// The state file's shape before the queue is validated: `queue` and
@@ -105,6 +112,10 @@ impl RawState {
         } else {
             (Queue::default(), None)
         };
+        let mut entry_ids = IdAllocator::default();
+        for entry in queue.entries() {
+            entry_ids.observe(entry.id().get());
+        }
         (
             PersistedState {
                 schema_version: self.schema_version,
@@ -113,6 +124,7 @@ impl RawState {
                 checkpoints: self.checkpoints,
                 queue,
                 next_seq,
+                entry_ids,
             },
             reset,
         )
@@ -157,6 +169,7 @@ impl Default for PersistedState {
             checkpoints: BTreeMap::new(),
             queue: Queue::default(),
             next_seq: 1,
+            entry_ids: IdAllocator::default(),
         }
     }
 }
@@ -205,6 +218,23 @@ impl PersistedState {
     /// change what is queued (§3).
     pub(crate) fn queue_mut(&mut self) -> &mut Queue {
         &mut self.queue
+    }
+
+    /// Enqueues `batch` all-or-nothing, checking the global cap here — the
+    /// one place IDs are allocated — since a `Queue` can no longer see it
+    /// (M8 §4).
+    pub(crate) fn enqueue(
+        &mut self,
+        batch: Vec<NewQueueEntry>,
+    ) -> Result<Vec<QueueEntryId>, QueueError> {
+        let available = MAX_PLAYLIST_ENTRIES.saturating_sub(self.queue.len());
+        if batch.len() > available {
+            return Err(QueueError::Capacity {
+                requested: batch.len(),
+                available,
+            });
+        }
+        self.queue.enqueue(batch, &mut self.entry_ids)
     }
 
     pub fn current_media(&self) -> Option<&MediaId> {

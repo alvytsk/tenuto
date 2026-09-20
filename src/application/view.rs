@@ -227,7 +227,7 @@ mod tests {
         )
         .expect("entry");
         let mut state = PersistedState::default();
-        state.queue_mut().enqueue(vec![entry]).expect("fits");
+        state.enqueue(vec![entry]).expect("fits");
         state.record(
             &PlaybackCheckpoint {
                 media,

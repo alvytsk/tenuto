@@ -8,7 +8,52 @@ use url::Url;
 use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use crate::playback::provenance::PositionProvenance;
 
-pub const MAX_QUEUE_ENTRIES: usize = 256;
+/// The cap on entries across *all* playlists (M8 §4). Enforced by
+/// `PersistedState`, the one place IDs are allocated, never by a `Queue`.
+pub const MAX_PLAYLIST_ENTRIES: usize = 4096;
+
+/// The next ID to hand out, or `None` once `u64::MAX` has been handed out:
+/// a `u64` alone cannot say "past the end" (M8 §4). Monotonic, never reused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdAllocator {
+    next: Option<u64>,
+}
+
+impl Default for IdAllocator {
+    fn default() -> Self {
+        Self { next: Some(1) }
+    }
+}
+
+impl IdAllocator {
+    pub fn starting_at(next: Option<u64>) -> Self {
+        Self { next }
+    }
+
+    pub fn next(self) -> Option<u64> {
+        self.next
+    }
+
+    /// `count` contiguous IDs, all or nothing. `count` must be nonzero.
+    pub fn reserve(&mut self, count: usize) -> Result<std::ops::RangeInclusive<u64>, QueueError> {
+        let count = u64::try_from(count).map_err(|_| QueueError::IdExhausted)?;
+        let first = self.next.ok_or(QueueError::IdExhausted)?;
+        let last = count
+            .checked_sub(1)
+            .and_then(|span| first.checked_add(span))
+            .ok_or(QueueError::IdExhausted)?;
+        self.next = last.checked_add(1);
+        Ok(first..=last)
+    }
+
+    /// Raises the counter past an ID found in a file.
+    pub fn observe(&mut self, seen: u64) {
+        self.next = match (self.next, seen.checked_add(1)) {
+            (Some(next), Some(after)) => Some(next.max(after)),
+            _ => None,
+        };
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct QueueEntryId(u64);
@@ -57,7 +102,7 @@ pub struct DisplayMetadata {
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum QueueError {
     #[error(
-        "the queue holds at most {MAX_QUEUE_ENTRIES} entries; {requested} requested, {available} free"
+        "at most {MAX_PLAYLIST_ENTRIES} entries across all playlists; {requested} requested, {available} free"
     )]
     Capacity { requested: usize, available: usize },
     #[error("queue entry IDs are exhausted; cannot enqueue more entries in this session")]
@@ -66,6 +111,8 @@ pub enum QueueError {
     SourceMismatch,
     #[error("queue entry {} is no longer queued", .0.get())]
     UnknownEntry(QueueEntryId),
+    #[error("playlist {0} no longer exists")]
+    UnknownPlaylist(u64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,21 +196,10 @@ pub struct Removed {
     pub selection: Option<QueueEntryId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Queue {
     entries: Vec<QueueEntry>,
     active: Option<QueueEntryId>,
-    next_id: Option<u64>,
-}
-
-impl Default for Queue {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            active: None,
-            next_id: Some(1),
-        }
-    }
 }
 
 impl Queue {
@@ -192,23 +228,18 @@ impl Queue {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
-    pub fn enqueue(&mut self, batch: Vec<NewQueueEntry>) -> Result<Vec<QueueEntryId>, QueueError> {
-        let available = MAX_QUEUE_ENTRIES.saturating_sub(self.entries.len());
-        if batch.len() > available {
-            return Err(QueueError::Capacity {
-                requested: batch.len(),
-                available,
-            });
-        }
+    /// Appends `batch` with IDs from `ids`, all or nothing. Capacity is the
+    /// caller's check: the cap is global (M8 P7), and a queue cannot see it.
+    pub fn enqueue(
+        &mut self,
+        batch: Vec<NewQueueEntry>,
+        ids: &mut IdAllocator,
+    ) -> Result<Vec<QueueEntryId>, QueueError> {
         if batch.is_empty() {
             return Ok(Vec::new());
         }
-        let count = u64::try_from(batch.len()).map_err(|_| QueueError::IdExhausted)?;
-        let first = self.next_id.ok_or(QueueError::IdExhausted)?;
-        let last = first
-            .checked_add(count - 1)
-            .ok_or(QueueError::IdExhausted)?;
-        let ids = (first..=last)
+        let range = ids.reserve(batch.len())?;
+        Ok(range
             .zip(batch)
             .map(|(raw, new)| {
                 let id = QueueEntryId(raw);
@@ -220,9 +251,7 @@ impl Queue {
                 });
                 id
             })
-            .collect();
-        self.next_id = last.checked_add(1);
-        Ok(ids)
+            .collect())
     }
 
     pub fn move_entry(
@@ -291,16 +320,7 @@ impl Queue {
     /// Persistence's constructor, used only after `queue_codec` validated
     /// uniqueness, identity and capacity.
     pub(crate) fn from_parts(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
-        let next_id = entries
-            .iter()
-            .map(|e| e.id.0)
-            .max()
-            .map_or(Some(1), |max| max.checked_add(1));
-        Self {
-            entries,
-            active,
-            next_id,
-        }
+        Self { entries, active }
     }
 
     pub(crate) fn entry_from_parts(
@@ -330,27 +350,38 @@ mod exhaustion_tests {
             DisplayMetadata::default(),
         )
         .expect("entry");
-        let mut queue = Queue {
-            next_id: Some(u64::MAX),
-            ..Queue::default()
-        };
-        let before = queue.clone();
+        let mut queue = Queue::default();
+        let mut ids = IdAllocator::starting_at(Some(u64::MAX));
+        let before_queue = queue.clone();
+        let before_ids = ids;
         assert_eq!(
-            queue.enqueue(vec![item.clone(), item.clone()]),
+            queue.enqueue(vec![item.clone(), item.clone()], &mut ids),
             Err(QueueError::IdExhausted)
         );
-        assert_eq!(queue, before, "no partial append or allocator change");
+        assert_eq!(queue, before_queue, "no partial append");
+        assert_eq!(ids, before_ids, "no allocator change on a refused batch");
         assert_eq!(
-            queue.enqueue(vec![item.clone()]).expect("last ID")[0].get(),
+            queue
+                .enqueue(vec![item.clone()], &mut ids)
+                .expect("last ID")[0]
+                .get(),
             u64::MAX
         );
-        let mut restored = Queue::from_parts(queue.entries().to_vec(), None);
         assert_eq!(
-            restored.enqueue(vec![item.clone()]),
-            Err(QueueError::IdExhausted)
+            queue.enqueue(vec![item.clone()], &mut ids),
+            Err(QueueError::IdExhausted),
+            "the allocator is exhausted, even across queue.clear()"
         );
         queue.clear();
-        assert_eq!(queue.enqueue(vec![item]), Err(QueueError::IdExhausted));
-        assert!(queue.enqueue(Vec::new()).expect("empty batch").is_empty());
+        assert_eq!(
+            queue.enqueue(vec![item], &mut ids),
+            Err(QueueError::IdExhausted)
+        );
+        assert!(
+            queue
+                .enqueue(Vec::new(), &mut ids)
+                .expect("empty batch")
+                .is_empty()
+        );
     }
 }

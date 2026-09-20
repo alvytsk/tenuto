@@ -12,7 +12,7 @@ use url::Url;
 use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use crate::playback::provenance::PositionProvenance;
 use crate::queue::{
-    DisplayDuration, DisplayMetadata, DurationSource, MAX_QUEUE_ENTRIES, Queue, QueueEntry,
+    DisplayDuration, DisplayMetadata, DurationSource, MAX_PLAYLIST_ENTRIES, Queue, QueueEntry,
     QueueEntryId, QueueSource, source_matches,
 };
 
@@ -201,7 +201,7 @@ fn decode_entries(items: &[Value]) -> Result<Vec<QueueEntry>, QueueProblem> {
         .into_iter()
         .map(entry_from_dto)
         .collect::<Result<Vec<_>, _>>()?;
-    if entries.len() > MAX_QUEUE_ENTRIES {
+    if entries.len() > MAX_PLAYLIST_ENTRIES {
         return Err(QueueProblem::OverCapacity {
             found: entries.len(),
         });

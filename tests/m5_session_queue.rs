@@ -17,7 +17,9 @@ use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::queue::{DisplayMetadata, MAX_QUEUE_ENTRIES, NewQueueEntry, QueueError, QueueSource};
+use tenuto::queue::{
+    DisplayMetadata, MAX_PLAYLIST_ENTRIES, NewQueueEntry, QueueError, QueueSource,
+};
 use tenuto::resume::ResumeCandidate;
 use tenuto::session::{Action, DisplayUpdate, LoadTarget, Session};
 
@@ -78,7 +80,7 @@ fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
         panic!("must submit")
     };
     assert_eq!(state.queue().len(), 1);
-    let too_many = (0..MAX_QUEUE_ENTRIES)
+    let too_many = (0..MAX_PLAYLIST_ENTRIES)
         .map(|i| entry(&format!("t{i}")))
         .collect();
     assert!(matches!(
