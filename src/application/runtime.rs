@@ -21,8 +21,8 @@ use crate::application::transport::{
     PlaybackPhase, TransportDecision, TransportInput, TransportSituation, decide,
 };
 use crate::application::view::{
-    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_title, playlist_tabs, queue_rows,
-    saved_history,
+    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, playlist_tabs,
+    queue_rows, saved_history,
 };
 use crate::artwork::worker::CoverSource;
 use crate::clock::Clock;
@@ -1277,7 +1277,7 @@ impl PlayerRuntime {
         let display = entry.display();
         let unloaded = NowPlaying {
             entry: Some(entry.id()),
-            title: entry_title(entry),
+            title: entry_plain_title(entry),
             artist: display.artist.as_deref().map(displayable),
             album: display.album.as_deref().map(displayable),
             year: display.year.as_deref().map(displayable),
@@ -1371,8 +1371,10 @@ fn new_entry(item: EnqueueItem) -> Result<NewQueueEntry, String> {
 mod tests {
     use super::*;
     use crate::clock::SystemClock;
+    use crate::media::id::AbsolutePath;
     use crate::persistence::writer::StateSink;
     use crate::playback::output::null_output::NullOutput;
+    use crate::queue::{IdAllocator, Queue};
 
     const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
 
@@ -1432,5 +1434,32 @@ mod tests {
         assert_eq!(view.phase, PlaybackPhase::Paused, "{view:?}");
         assert_eq!(view.status.as_deref(), Some(PLAYER_BUSY));
         let _ = runtime.shutdown();
+    }
+
+    #[test]
+    fn now_playing_title_stays_plain_even_though_the_row_combines_artist_and_title() {
+        let path = AbsolutePath::new("/music/file.flac".into())
+            .unwrap_or_else(|error| panic!("absolute: {error}"));
+        let new = NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata {
+                title: Some("So What".to_owned()),
+                artist: Some("Miles Davis".to_owned()),
+                ..DisplayMetadata::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("valid: {error}"));
+        let mut queue = Queue::default();
+        let ids = queue
+            .enqueue(vec![new], &mut IdAllocator::default())
+            .unwrap_or_else(|error| panic!("fits: {error}"));
+        let entry = queue
+            .get(ids[0])
+            .cloned()
+            .unwrap_or_else(|| panic!("just enqueued"));
+
+        let now = runtime().now_playing(&entry, &PersistedState::default());
+        assert_eq!(now.title, "So What");
     }
 }

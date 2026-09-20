@@ -214,11 +214,11 @@ fn volume_without_an_engine_is_persisted_at_shutdown() {
 
 fn shows_tags(view: &PlayerView) -> bool {
     view.rows.iter().any(|row| {
-        row.title == "Morning Tide"
+        row.title == "Harbor – Morning Tide"
             && row
                 .subtitle
                 .as_deref()
-                .is_some_and(|subtitle| subtitle.contains("Harbor"))
+                .is_some_and(|subtitle| subtitle.contains("Coast"))
     })
 }
 
@@ -235,7 +235,7 @@ fn enqueueing_a_tagged_local_file_fills_title_and_artist_in_the_background() {
     );
     pump_until(&mut rig.runtime, "tags shown on the row", shows_tags);
     let row = rig.runtime.view().rows[0].clone();
-    assert_eq!(row.subtitle.as_deref(), Some("Harbor · Coast"));
+    assert_eq!(row.subtitle.as_deref(), Some("Coast"));
     assert!(row.duration.is_some(), "{row:?}");
 }
 

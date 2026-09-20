@@ -166,8 +166,30 @@ pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<Qu
         .collect()
 }
 
-/// The entry's display title, or the name its identity implies, escaped.
+/// The queue row title: `Artist – Title` when both tags are known, else the
+/// plain title (M8 §9).
 pub(crate) fn entry_title(entry: &QueueEntry) -> String {
+    let display = entry.display();
+    let filled = |text: &Option<String>| {
+        text.as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let title = filled(&display.title);
+    displayable(&match entry.media() {
+        MediaId::PodcastEpisode { .. } => episode_name(display.title.as_deref()),
+        media => match (filled(&display.artist), title) {
+            (Some(artist), Some(title)) => format!("{artist} – {title}"),
+            (_, Some(title)) => title,
+            (_, None) => display_name(media),
+        },
+    })
+}
+
+/// The entry's display title, or the name its identity implies, escaped.
+/// Used where the artist already has its own line (the now-playing pane).
+pub(crate) fn entry_plain_title(entry: &QueueEntry) -> String {
     let title = entry.display().title.as_deref();
     displayable(&match entry.media() {
         MediaId::PodcastEpisode { .. } => episode_name(title),
@@ -178,15 +200,15 @@ pub(crate) fn entry_title(entry: &QueueEntry) -> String {
     })
 }
 
-/// Artist and album, each escaped, joined when both are known.
+/// The album, escaped. The artist moved up into the title line (M8 §9).
 fn entry_subtitle(entry: &QueueEntry) -> Option<String> {
-    let display = entry.display();
-    let parts: Vec<String> = [display.artist.as_deref(), display.album.as_deref()]
-        .into_iter()
-        .flatten()
+    entry
+        .display()
+        .album
+        .as_deref()
+        .map(str::trim)
+        .filter(|album| !album.is_empty())
         .map(displayable)
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 #[cfg(test)]
@@ -254,6 +276,7 @@ mod tests {
             DisplayMetadata {
                 title: Some("evil\u{1b}[2Jtitle".to_owned()),
                 artist: Some("bad\u{1b}]0;x\u{7}artist".to_owned()),
+                album: Some("live\u{7}album".to_owned()),
                 ..DisplayMetadata::default()
             },
         )
@@ -273,9 +296,9 @@ mod tests {
         let rows = queue_rows(&state, playing);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].title.contains('\u{1b}'), "{:?}", rows[0].title);
-        assert!(rows[0].title.contains("title"));
-        let subtitle = rows[0].subtitle.as_deref().expect("artist");
-        assert!(!subtitle.contains('\u{1b}') && !subtitle.contains('\u{7}'));
+        assert!(rows[0].title.contains("title") && rows[0].title.contains("artist"));
+        let subtitle = rows[0].subtitle.as_deref().expect("album");
+        assert!(!subtitle.contains('\u{7}'));
         assert_eq!(
             rows[0].saved,
             Some(SavedHistory::Position {
@@ -283,5 +306,61 @@ mod tests {
                 estimated: false
             })
         );
+    }
+
+    fn local(title: Option<&str>, artist: Option<&str>, album: Option<&str>) -> QueueEntry {
+        let path = AbsolutePath::new("/music/file.flac".into())
+            .unwrap_or_else(|error| panic!("absolute: {error}"));
+        let new = NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata {
+                title: title.map(str::to_owned),
+                artist: artist.map(str::to_owned),
+                album: album.map(str::to_owned),
+                ..DisplayMetadata::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("valid: {error}"));
+        let mut queue = crate::queue::Queue::default();
+        let ids = queue
+            .enqueue(vec![new], &mut crate::queue::IdAllocator::default())
+            .unwrap_or_else(|error| panic!("fits: {error}"));
+        queue
+            .get(ids[0])
+            .cloned()
+            .unwrap_or_else(|| panic!("just enqueued"))
+    }
+
+    #[test]
+    fn a_tagged_track_reads_artist_dash_title_with_the_album_below() {
+        let entry = local(Some("So What"), Some("Miles Davis"), Some("Kind of Blue"));
+        assert_eq!(entry_title(&entry), "Miles Davis – So What");
+        assert_eq!(entry_subtitle(&entry).as_deref(), Some("Kind of Blue"));
+    }
+
+    #[test]
+    fn without_an_artist_or_without_a_title_the_row_is_as_before() {
+        assert_eq!(entry_title(&local(Some("So What"), None, None)), "So What");
+        assert_eq!(
+            entry_title(&local(Some("So What"), Some("  "), None)),
+            "So What"
+        );
+        assert_eq!(
+            entry_title(&local(None, Some("Miles Davis"), None)),
+            "file.flac",
+            "no title: the file name, not 'Artist – file.flac'"
+        );
+        assert_eq!(
+            entry_subtitle(&local(None, Some("Miles Davis"), None)),
+            None
+        );
+    }
+
+    #[test]
+    fn control_characters_in_either_tag_never_reach_the_row() {
+        let entry = local(Some("So\u{1b}[31m What"), Some("Miles\u{7}"), None);
+        let title = entry_title(&entry);
+        assert!(!title.chars().any(char::is_control), "{title:?}");
     }
 }
