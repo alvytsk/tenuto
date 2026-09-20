@@ -175,13 +175,13 @@ fn a_quarantine_that_cannot_be_performed_disables_writing_and_keeps_the_file() {
 #[test]
 fn an_unsupported_version_is_preserved_in_place_and_disables_writing() {
     let dir = tempfile::tempdir().unwrap();
-    let newer = br#"{"schema_version":4,"checkpoints":{}}"#;
+    let newer = br#"{"schema_version":5,"checkpoints":{}}"#;
     fs::write(dir.path().join("state.json"), newer).unwrap();
 
     let outcome = store(dir.path()).load();
     assert!(matches!(
         outcome.reason,
-        LoadReason::UnsupportedVersion { found: 4 }
+        LoadReason::UnsupportedVersion { found: 5 }
     ));
     assert!(!outcome.writable);
     assert_eq!(
@@ -200,13 +200,13 @@ fn a_newer_file_is_classified_by_version_even_when_its_shape_is_alien() {
     // Deserializing the model first would call this garbage; the envelope is
     // the only thing every future version is obliged to keep.
     let dir = tempfile::tempdir().unwrap();
-    let alien = br#"{"schema_version":4,"checkpoints":[1,2,3],"queues":{"a":true}}"#;
+    let alien = br#"{"schema_version":5,"checkpoints":[1,2,3],"queues":{"a":true}}"#;
     fs::write(dir.path().join("state.json"), alien).unwrap();
 
     let outcome = store(dir.path()).load();
     assert!(matches!(
         outcome.reason,
-        LoadReason::UnsupportedVersion { found: 4 }
+        LoadReason::UnsupportedVersion { found: 5 }
     ));
     assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), alien);
 }
@@ -325,7 +325,7 @@ fn the_upgrade_cycle_writes_v2_and_survives_a_reload() {
     let bytes = fs::read(dir.path().join("state.json")).unwrap();
     let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        raw["schema_version"], 3,
+        raw["schema_version"], 4,
         "the file on disk must claim the current schema once it holds current-shaped data: {raw}"
     );
 
@@ -362,12 +362,12 @@ fn the_upgrade_cycle_writes_v2_and_survives_a_reload() {
 fn a_genuinely_unknown_version_is_still_preserved_unwritten() {
     let dir = tempfile::tempdir().unwrap();
 
-    let too_new = br#"{"schema_version":4,"checkpoints":{}}"#;
+    let too_new = br#"{"schema_version":5,"checkpoints":{}}"#;
     fs::write(dir.path().join("state.json"), too_new).unwrap();
     let outcome = store(dir.path()).load();
     assert!(matches!(
         outcome.reason,
-        LoadReason::UnsupportedVersion { found: 4 }
+        LoadReason::UnsupportedVersion { found: 5 }
     ));
     assert!(!outcome.writable);
     assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), too_new);

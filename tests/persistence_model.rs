@@ -26,7 +26,7 @@ fn a_recorded_state_round_trips_through_json() {
     state.record(&checkpoint("a", 93), false);
 
     let json = serde_json::to_string(&state).unwrap();
-    assert!(json.contains("\"schema_version\":3"), "{json}");
+    assert!(json.contains("\"schema_version\":4"), "{json}");
     assert!(json.contains("local:/music/a.flac"), "{json}");
     assert!(
         !json.contains("next_seq"),

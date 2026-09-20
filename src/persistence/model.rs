@@ -16,7 +16,7 @@ use crate::queue::{
     IdAllocator, MAX_PLAYLIST_ENTRIES, NewQueueEntry, Queue, QueueEntry, QueueEntryId, QueueError,
 };
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Counting the current entry, which is never evictable (D2).
 pub const MAX_ENTRIES: usize = 512;
@@ -68,21 +68,19 @@ pub struct PersistedState {
     playing: PlaylistId,
     next_seq: u64,
     /// The one allocator for every queue entry ID (M8 §4): outside `Queue`
-    /// so every playlist shares it. Never (de)serialized directly —
-    /// `into_state` rebuilds it by observing every entry ID a recovered
-    /// queue actually holds.
+    /// so every playlist shares it. Written as `next_entry_id` (a number, or
+    /// `null` once exhausted) and read back raised past every ID the file
+    /// holds, so an ID is never handed out twice across a restart.
     entry_ids: IdAllocator,
-    /// The one allocator for every playlist ID (M8 §4). Never (de)serialized
-    /// directly; the file format is unchanged until Task 4. Read only by
-    /// `create_playlist`, unused until the task that wires it through
-    /// `Session`.
-    #[allow(dead_code)]
+    /// The one allocator for every playlist ID (M8 §4), persisted as
+    /// `next_playlist_id` under the same rule.
     playlist_ids: IdAllocator,
 }
 
-/// The state file's shape before the queue is validated: `queue` and
-/// `active_entry` are held as raw JSON so a damaged queue can be recovered
-/// field-by-field without ever touching `checkpoints` (M5 §6, task brief).
+/// The state file's shape before the queue is validated: the playlist fields
+/// (and schema 3's `queue`/`active_entry`, kept for migration) are held as
+/// raw JSON so damaged queue data can be recovered field-by-field without
+/// ever touching `checkpoints` (M5 §6, M8 §6).
 #[derive(Deserialize)]
 pub(super) struct RawState {
     schema_version: u32,
@@ -96,6 +94,22 @@ pub(super) struct RawState {
     queue: Option<serde_json::Value>,
     #[serde(default)]
     active_entry: Option<serde_json::Value>,
+    #[serde(default)]
+    playlists: Option<serde_json::Value>,
+    #[serde(default)]
+    playing: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    next_entry_id: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    next_playlist_id: Option<serde_json::Value>,
+}
+
+/// Keeps `null` apart from an absent key: `Option<Value>` alone folds both
+/// into `None`, and a `null` counter means "exhausted" (M8 §4).
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 fn full_gain() -> f32 {
@@ -103,9 +117,11 @@ fn full_gain() -> f32 {
 }
 
 impl RawState {
-    /// `accept_queue` is false for schema 1/2 files and for read-only
-    /// snapshots, which never examine queue data (task brief recovery rules
-    /// 1-2).
+    /// Three shapes reach here: a schema 1/2 file (and any read-only
+    /// snapshot, which never examines queue data) starts from an empty
+    /// `Default` playlist; a schema 3 file recovers its one queue and
+    /// migrates it into that playlist; schema 4 recovers its playlists
+    /// directly (M8 §6).
     pub(super) fn into_state(self, accept_queue: bool) -> (PersistedState, Option<QueueReset>) {
         let next_seq = self
             .checkpoints
@@ -113,34 +129,39 @@ impl RawState {
             .map(|entry| entry.touch_seq)
             .max()
             .map_or(1, |highest| highest.saturating_add(1));
-        let (queue, reset) = if accept_queue && self.schema_version >= SCHEMA_VERSION {
-            queue_codec::recover_queue(
+        let recovered = if !accept_queue || self.schema_version < 3 {
+            queue_codec::migrate_queue(Queue::default(), self.current_media, None)
+        } else if self.schema_version == 3 {
+            let (queue, reset) = queue_codec::recover_queue(
                 self.queue.as_ref(),
                 self.active_entry.as_ref(),
                 self.current_media.as_ref(),
-            )
+            );
+            queue_codec::migrate_queue(queue, self.current_media, reset)
         } else {
-            (Queue::default(), None)
+            queue_codec::recover_playlists(
+                queue_codec::RawPlaylists {
+                    playlists: self.playlists.as_ref(),
+                    playing: self.playing.as_ref(),
+                    next_entry_id: self.next_entry_id.as_ref(),
+                    next_playlist_id: self.next_playlist_id.as_ref(),
+                },
+                self.current_media,
+            )
         };
-        let mut entry_ids = IdAllocator::default();
-        for entry in queue.entries() {
-            entry_ids.observe(entry.id().get());
-        }
-        let playing = PlaylistId::from_raw(1);
-        let playlists = vec![Playlist::from_parts(playing, "Default".into(), None, queue)];
         (
             PersistedState {
                 schema_version: self.schema_version,
-                current_media: self.current_media,
+                current_media: recovered.current_media,
                 volume: self.volume,
                 checkpoints: self.checkpoints,
-                playlists,
-                playing,
+                playlists: recovered.playlists,
+                playing: recovered.playing,
                 next_seq,
-                entry_ids,
-                playlist_ids: IdAllocator::starting_at(Some(2)),
+                entry_ids: recovered.entry_ids,
+                playlist_ids: recovered.playlist_ids,
             },
-            reset,
+            recovered.reset,
         )
     }
 }
@@ -159,16 +180,21 @@ impl Serialize for PersistedState {
             current_media: &'a Option<MediaId>,
             volume: f32,
             checkpoints: &'a BTreeMap<MediaId, PersistedCheckpoint>,
-            queue: Vec<queue_codec::QueueEntryDto>,
-            active_entry: Option<u64>,
+            playlists: Vec<queue_codec::PlaylistDto>,
+            playing: u64,
+            /// `None` serializes as `null`: an exhausted namespace (M8 §4).
+            next_entry_id: Option<u64>,
+            next_playlist_id: Option<u64>,
         }
         Out {
             schema_version: self.schema_version,
             current_media: &self.current_media,
             volume: self.volume,
             checkpoints: &self.checkpoints,
-            queue: queue_codec::encode(self.queue()),
-            active_entry: self.queue().active().map(QueueEntryId::get),
+            playlists: queue_codec::encode_playlists(&self.playlists),
+            playing: self.playing.get(),
+            next_entry_id: self.entry_ids.next(),
+            next_playlist_id: self.playlist_ids.next(),
         }
         .serialize(serializer)
     }

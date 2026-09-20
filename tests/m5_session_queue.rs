@@ -424,11 +424,11 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
         serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).expect("read"))
             .expect("json");
     assert_eq!(
-        written["queue"].as_array().map(Vec::len),
+        written["playlists"][0]["entries"].as_array().map(Vec::len),
         Some(3),
         "latest queue"
     );
-    assert_eq!(written["active_entry"], ids[0].get());
+    assert_eq!(written["playlists"][0]["active_entry"], ids[0].get());
     assert_eq!(
         written["checkpoints"]["local:/music/a.flac"]["position"]["secs"], 17,
         "latest checkpoint"

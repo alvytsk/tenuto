@@ -479,7 +479,7 @@ fn a_permanent_redirect_moves_fetch_url_and_preserves_id_and_checkpoints()
 
     let key = format!("podcast:{}/guid:id", sub.feed_id.as_str());
     let state: PersistedState = serde_json::from_value(serde_json::json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "checkpoints": {
             (key): {"position": {"secs": 12, "nanos": 0}, "completed": false,
                     "touch_seq": 1, "updated_at": "2026-09-11T00:00:00Z"}

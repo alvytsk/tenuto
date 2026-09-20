@@ -496,7 +496,10 @@ fn contained_artwork_and_metadata_panics_keep_the_player_running() {
         if metadata {
             // The panicked probe's entry kept its unknown metadata.
             let state = tui_profile::read_state(&profile);
-            assert!(state["queue"][0]["display"]["title"].is_null(), "{state}");
+            assert!(
+                state["playlists"][0]["entries"][0]["display"]["title"].is_null(),
+                "{state}"
+            );
         }
     }
 }

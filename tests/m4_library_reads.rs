@@ -55,7 +55,7 @@ fn latest_estimate_and_missing_audio_are_independent() -> Result<(), Box<dyn std
     )?;
     let cached = rig.cache.read(&sub)?;
     let id = cached.episodes[0].media_id.to_string();
-    let json = serde_json::json!({"schema_version": 3, "checkpoints": {
+    let json = serde_json::json!({"schema_version": 4, "checkpoints": {
         (id): {"position": {"secs": 100, "nanos": 0}, "estimated": {"secs": 1082, "nanos": 0},
              "completed": false, "touch_seq": 1, "updated_at": "2026-09-11T00:00:00Z"}
     }});
@@ -97,7 +97,7 @@ fn progress_precedence_and_stored_order_are_preserved() -> Result<(), Box<dyn st
             .ok_or_else(|| format!("no cached episode for {guid}").into())
     };
 
-    let json = json!({"schema_version": 3, "checkpoints": {
+    let json = json!({"schema_version": 4, "checkpoints": {
         (id_of("ep-a")?): {"position": {"secs": 100, "nanos": 0}, "estimated": {"secs": 200, "nanos": 0},
              "completed": true, "touch_seq": 1, "updated_at": "2026-09-11T00:00:00Z"},
         (id_of("ep-b")?): {"position": {"secs": 50, "nanos": 0}, "estimated": {"secs": 222, "nanos": 0},

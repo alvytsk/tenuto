@@ -19,17 +19,20 @@ fn history() -> serde_json::Value {
 }
 
 #[test]
-fn schema_three_round_trips_the_queue_and_active_entry() {
-    assert_eq!(SCHEMA_VERSION, 3);
+fn schema_three_migrates_its_queue_into_the_default_playlist() {
+    assert_eq!(SCHEMA_VERSION, 4);
     let file = json!({ "schema_version": 3, "current_media": "local:/music/a.flac", "volume": 0.5,
         "checkpoints": history(), "queue": [entry(4, "a"), entry(9, "a")], "active_entry": 9 });
     let state: PersistedState = serde_json::from_value(file).expect("valid");
     assert_eq!(state.queue().len(), 2);
     assert_eq!(state.queue().active().map(|id| id.get()), Some(9));
+    // `from_value` decodes without the store's version stamp, so the label is
+    // still the file's; only `StateStore::load` migrates it.
     let back = serde_json::to_value(&state).expect("serializes");
     assert_eq!(back["schema_version"], 3);
-    assert_eq!(back["active_entry"], 9);
-    assert_eq!(back["queue"][1]["id"], 9);
+    assert_eq!(back["playlists"][0]["active_entry"], 9);
+    assert_eq!(back["playlists"][0]["entries"][1]["id"], 9);
+    assert_eq!(back["playing"], 1);
 }
 
 #[test]

@@ -111,11 +111,11 @@ fn invalid_base_state_and_newer_versions_keep_their_existing_handling() {
     assert!(matches!(outcome.reason, LoadReason::Quarantined { .. }));
     assert!(outcome.queue_repair.is_none());
 
-    let path = write_state(dir.path(), json!({ "schema_version": 4, "queue": 7 }));
+    let path = write_state(dir.path(), json!({ "schema_version": 5, "queue": 7 }));
     let outcome = StateStore::new(path, Arc::new(FakeClock::new())).load();
     assert!(matches!(
         outcome.reason,
-        LoadReason::UnsupportedVersion { found: 4 }
+        LoadReason::UnsupportedVersion { found: 5 }
     ));
     assert!(!outcome.writable);
 }
