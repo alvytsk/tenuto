@@ -43,7 +43,7 @@
 | `tests/m8_*.rs` | one file per seam, listed in each task |
 | `docs/`, `CHANGELOG.md` | Task 17 |
 
-Task order is dependency order. Tasks 1–4 are pure data; 5–8 are `Session`; 9–11 application; 12–15 browse and TUI; 16–17 measurement and docs.
+Task order is dependency order, and every task must pass the CI gates on its own: where a task removes something a later task's code still calls, it leaves a minimal compiling caller behind and says so. Tasks 1–4 are pure data; 5–8 are `Session` (6 adoption before 7 ownership — 7's tests need `playing` to move); 9–11 application; 12–15 browse and TUI; 16–17 measurement and docs.
 
 ---
 
@@ -1127,6 +1127,36 @@ fn a_stored_null_counter_stays_exhausted_even_when_no_max_id_remains() {
 }
 
 #[test]
+fn every_fallback_to_a_default_playlist_keeps_both_stored_counters() {
+    for playlists in [json!("nope"), Value::Null] {
+        let loaded = load(v4(playlists, json!(1), json!({ "next_entry_id": 50, "next_playlist_id": 9 })));
+        let written = serde_json::to_value(&loaded.state).expect("serializes");
+        assert_eq!(written["next_entry_id"], 50, "entry IDs below 50 were handed out once; never again");
+        assert_eq!(written["playlists"][0]["id"], 9, "the default takes a fresh playlist ID");
+        assert_eq!(written["next_playlist_id"], 10);
+        kept_checkpoint(&loaded.state);
+    }
+}
+
+#[test]
+fn a_fallback_never_revives_an_exhausted_namespace() {
+    let loaded = load(v4(json!("nope"), json!(1), json!({ "next_entry_id": null, "next_playlist_id": null })));
+    let written = serde_json::to_value(&loaded.state).expect("serializes");
+    assert_eq!(written["next_entry_id"], Value::Null);
+    assert_eq!(written["next_playlist_id"], Value::Null);
+    assert_eq!(loaded.state.playlists().len(), 1, "P1 still holds");
+
+    // Every playlist dropped by rule 3's exhausted fallback: same guarantee.
+    let max = u64::MAX;
+    let all_dropped = load(v4(
+        json!([{ "id": "bad", "name": "A", "entries": [track(max, "a")], "active_entry": null }]),
+        json!(1), json!({ "next_playlist_id": null })));
+    let written = serde_json::to_value(&all_dropped.state).expect("serializes");
+    assert_eq!(written["next_entry_id"], Value::Null, "u64::MAX was seen in the file");
+    assert_eq!(written["next_playlist_id"], Value::Null);
+}
+
+#[test]
 fn names_are_cleaned_and_an_empty_one_is_named_after_its_id() {
     let loaded = load(v4(
         json!([{ "id": 1, "name": format!("  {}  ", "x".repeat(60)), "entries": [track(1, "a")], "active_entry": 1 },
@@ -1292,12 +1322,24 @@ fn fresh(ids: &mut IdAllocator) -> Option<u64> {
     ids.reserve(1).ok().map(|range| *range.start())
 }
 
-fn default_playlists(current_media: Option<MediaId>, reset: Option<QueueReset>) -> Recovered {
+/// One empty `Default`, for a file with no usable playlists. Both counters
+/// are the caller's — already raised past everything stored and seen — so a
+/// fallback can neither reuse an ID nor revive an exhausted namespace. The
+/// playlist takes a fresh ID. Only with playlist IDs exhausted does it fall
+/// back to 1: P1 needs a playlist, and no in-flight result from before a
+/// restart can name it.
+fn default_playlists(
+    current_media: Option<MediaId>,
+    reset: Option<QueueReset>,
+    entry_ids: IdAllocator,
+    mut playlist_ids: IdAllocator,
+) -> Recovered {
+    let id = PlaylistId::from_raw(fresh(&mut playlist_ids).unwrap_or(1));
     Recovered {
-        playlists: vec![Playlist::from_parts(PlaylistId::from_raw(1), "Default".into(), None, Queue::default())],
-        playing: PlaylistId::from_raw(1),
-        entry_ids: IdAllocator::default(),
-        playlist_ids: IdAllocator::starting_at(Some(2)),
+        playlists: vec![Playlist::from_parts(id, "Default".into(), None, Queue::default())],
+        playing: id,
+        entry_ids,
+        playlist_ids,
         current_media,
         reset,
     }
@@ -1323,14 +1365,18 @@ pub(super) fn migrate_queue(
 
 pub(super) fn recover_playlists(raw: RawPlaylists<'_>, current_media: Option<MediaId>) -> Recovered {
     let mut reset = None;
-    // Rule 1.
+    // Rule 1. The stored counters are read before anything else, so every
+    // fallback below carries them.
     let items = match raw.playlists {
         Some(Value::Array(items)) => items,
-        None | Some(Value::Null) => return default_playlists(current_media, None),
-        Some(_) => {
+        other => {
+            let problem = (!matches!(other, None | Some(Value::Null)))
+                .then_some(QueueReset::Playlists(PlaylistProblem::Malformed));
             return default_playlists(
                 current_media,
-                Some(QueueReset::Playlists(PlaylistProblem::Malformed)),
+                problem,
+                counter(raw.next_entry_id, std::iter::empty()),
+                counter(raw.next_playlist_id, std::iter::empty()),
             );
         }
     };
@@ -1483,11 +1529,7 @@ pub(super) fn recover_playlists(raw: RawPlaylists<'_>, current_media: Option<Med
     }
     // Rule 7.
     let Some(first) = playlists.first().map(Playlist::id) else {
-        let mut recovered = default_playlists(current_media, reset);
-        recovered.entry_ids = entry_ids;
-        recovered.playlist_ids = playlist_ids;
-        recovered.playlist_ids.observe(1);
-        return recovered;
+        return default_playlists(current_media, reset, entry_ids, playlist_ids);
     };
 
     // Rule 8, then the media half of rule 9 — never both: a re-pointed
@@ -1575,7 +1617,7 @@ then build `PersistedState` from `recovered` (its `current_media`, not `self.cur
 - [ ] **Step 6: Run**
 
 Run: `cargo test --locked --no-fail-fast`
-Expected: all pass; `m8_state_playlists` 14 passed.
+Expected: all pass; `m8_state_playlists` 16 passed.
 
 - [ ] **Step 7: Commit**
 
@@ -1590,8 +1632,8 @@ git commit -m "feat(state): schema 4 — playlists on disk, migration from 3, or
 ### Task 5: `Session` — explicit destinations and owner lookup
 
 **Files:**
-- Modify: `src/session.rs` (`register_load` :314, `enqueue` :421, `move_entry` :434, `update_display` :537, `update_podcast_fallback` :601, `absorb_load_metadata` :624)
-- Modify: `src/application/runtime.rs` (the one `session.enqueue` call, :981) and every `session.enqueue(` in `tests/`
+- Modify: `src/session.rs` (`register_load` :314, `registered_target` :380, `enqueue` :421, `move_entry` :434, `update_display` :537, `update_podcast_fallback` :601, `absorb_load_metadata` :624)
+- Modify: `src/application/runtime.rs` (`load_entry_starting` :748, the one `session.enqueue` call :981) and every `session.enqueue(` in `tests/`
 - Test: `tests/m8_session_playlists.rs`
 
 **Interfaces:**
@@ -1600,7 +1642,7 @@ git commit -m "feat(state): schema 4 — playlists on disk, migration from 3, or
   - `Session::enqueue(&mut self, dest: PlaylistId, batch: Vec<NewQueueEntry>) -> Result<(Vec<QueueEntryId>, Action), QueueError>`
   - `Session::create_playlist(&mut self, name: &str) -> Result<(PlaylistId, Action), PlaylistError>` (`Ordinary` submit)
   - `Session::rename_playlist(&mut self, id: PlaylistId, name: &str) -> Result<Action, PlaylistError>` (`Ordinary` submit)
-  - `move_entry`, `register_load`, `update_display`, `update_podcast_fallback`, `absorb_load_metadata` resolve entries through the owner, across all playlists
+  - `move_entry`, `register_load`, `registered_target`, `update_display`, `update_podcast_fallback`, `absorb_load_metadata` and the runtime's `load_entry_starting` resolve entries through the owner, across all playlists. Both halves of a load matter: if only the runtime found B's entry, `Session::registered_target` would still reject its `Loaded`; if only `Session` did, Enter in another playlist would silently do nothing.
 
 - [ ] **Step 1: Write the failing tests** — `tests/m8_session_playlists.rs`
 
@@ -1710,6 +1752,18 @@ fn moving_and_loading_find_an_entry_in_any_playlist() {
 }
 
 #[test]
+fn a_loaded_for_an_entry_outside_the_playing_playlist_is_accepted_and_adopted() {
+    // `registered_target` must look the entry up through its owner, or this
+    // `Loaded` is dropped as unknown. (`playing` follows in Task 6.)
+    let mut two = two();
+    let request = adopt(&mut two.session, two.in_b[0], "b1", 1);
+    assert_eq!(
+        two.session.adopted().map(|adopted| (adopted.request, adopted.target)),
+        Some((request, LoadTarget::Queue(two.in_b[0])))
+    );
+}
+
+#[test]
 fn a_display_update_reaches_every_occurrence_in_every_playlist() {
     let mut two = two();
     let (extra, _) = two.session.enqueue(two.b, vec![entry("a1")]).expect("fits");
@@ -1764,12 +1818,21 @@ Add one private helper and use it everywhere an entry is reached by ID:
     }
 ```
 
-- `register_load`: replace `self.state.queue().get(id)` with `self.state.find_entry(id)`.
+- `register_load` (:323) and `registered_target` (:388): replace `self.state.queue().get(id)` with `self.state.find_entry(id)`.
+- `runtime.rs::load_entry_starting` (:748): `self.session.state().find_entry(id)` instead of `.queue().get(id)`.
 - `move_entry`: `self.owner_queue_mut(id).ok_or(QueueError::UnknownEntry(id))?.move_entry(id, direction)?`.
 - `update_display`: collect `ids` from `self.state.playlists().iter().flat_map(|p| p.queue().entries())`, then mutate through `owner_queue_mut(id)` instead of `queue_mut()`.
 - `update_podcast_fallback`, `absorb_load_metadata`: same substitution — `find_entry` to read, `owner_queue_mut` to write.
 
-In `runtime.rs` pass `self.session.state().playing()` for now (Task 10 replaces it with the captured destination). In `tests/`, `session.enqueue(batch)` becomes `session.enqueue(session.state().playing(), batch)` — a two-phase borrow, so it compiles as written.
+In `runtime.rs` pass `self.session.state().playing()` to `enqueue` for now (Task 10 replaces it with the captured destination).
+
+**Audit every `queue()` reader.** Run `grep -n '\.queue()\|queue_mut()' src/*.rs src/application/*.rs src/tui/*.rs` and sort each hit into one of three kinds; after Task 10 nothing may be left unsorted:
+
+| Kind | Sites | Rule |
+|---|---|---|
+| Means *the playing playlist's cursor* | `runtime.rs` `active_local_dir` :385, `cover_key` :405, `active_cover` :429, `view` :570 (`active`, `now_playing`); `session.rs` `adopt_loaded` :949/:957 | keep `queue()` / `queue_mut()` |
+| Looks an entry up *by ID*, or edits a list | `session.rs` :323, :388, :439, :460–:468, :543–:551, :608, :625, :902; `runtime.rs` :748, :992, :1022 | `find_entry` / `owner_queue_mut` (this task), ownership (Task 7), `Playlist::neighbor` (Task 6) |
+| Collects or renders *a whole list* | `runtime.rs` `new` :336 (`restored`), `decide` :654; `view.rs` `queue_rows` :123; `session.rs` `clear_queue` :484–:488 | all playlists / a named playlist (Tasks 7, 9, 10) | In `tests/`, `session.enqueue(batch)` becomes `session.enqueue(session.state().playing(), batch)` — a two-phase borrow, so it compiles as written.
 
 - [ ] **Step 4: Run**
 
@@ -1786,10 +1849,178 @@ git commit -m "feat(session): enqueue names its playlist; entries are found thro
 
 ---
 
-### Task 6: `Session` — release follows adoption, invalidation is scoped
+### Task 6: `Session` — adoption sets `playing`, one traversal policy, shuffle toggle
+
+**Files:**
+- Modify: `src/session.rs` (`adopt_loaded` :938, the `EndOfTrack` arm :901)
+- Test: `tests/m8_session_playlists.rs` (append)
+
+**Interfaces:**
+- Produces:
+  - `Session::set_shuffle(&mut self, id: PlaylistId, seed: Option<u64>) -> Result<Action, PlaylistError>` — `Some(seed)` turns shuffle on with `first` = that playlist's own cursor; `None` turns it off. The seed is the caller's (Task 10 draws it from `getrandom`), which keeps `Session` deterministic.
+  - Adoption of `LoadTarget::Queue(id)` sets `playing = owner(id)` and that playlist's cursor; every other cursor is left alone.
+  - `Advance` comes from `Playlist::neighbor` on the adopted entry's owner.
+
+- [ ] **Step 1: Write the failing tests** (append)
+
+```rust
+use tenuto::playlist::Shuffle;
+
+fn end(rev: u64) -> PlaybackEvent {
+    PlaybackEvent::EndOfTrack {
+        session_rev: rev,
+        position: Duration::from_millis(500),
+        provenance: PositionProvenance::Established,
+    }
+}
+
+#[test]
+fn playing_changes_at_adoption_and_the_old_playlist_keeps_its_cursor() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[1], "a2", 1);
+    let pending = two.session.register_load(LoadTarget::Queue(two.in_b[0]), &media("b1")).expect("registered");
+    assert_eq!(two.session.state().playing(), two.a, "a request alone changes nothing (P4)");
+
+    two.session.observe(&loaded(pending, 2, "b1"), FakeClock::new().sample());
+    let state = two.session.state();
+    assert_eq!(state.playing(), two.b);
+    assert_eq!(state.queue().active(), Some(two.in_b[0]));
+    assert_eq!(state.playlist(two.a).expect("A").queue().active(), Some(two.in_a[1]));
+}
+
+#[test]
+fn a_failed_cross_playlist_load_changes_neither_playing_nor_any_cursor() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[0], "a1", 1);
+    let pending = two.session.register_load(LoadTarget::Queue(two.in_b[0]), &media("b1")).expect("registered");
+    two.session.retract_load(pending);
+    let state = two.session.state();
+    assert_eq!(state.playing(), two.a);
+    assert_eq!(state.queue().active(), Some(two.in_a[0]));
+    assert_eq!(state.playlist(two.b).expect("B").queue().active(), None);
+}
+
+#[test]
+fn automatic_advance_follows_the_same_shuffled_order_as_neighbor() {
+    let mut two = two();
+    let (more, _) = two.session.enqueue(two.a, vec![entry("a3"), entry("a4"), entry("a5")]).expect("fits");
+    let all = [two.in_a[0], two.in_a[1], more[0], more[1], more[2]];
+    adopt(&mut two.session, all[2], "a3", 1);
+    two.session.set_shuffle(two.a, Some(42)).expect("A exists");
+
+    let playlist = two.session.state().playlist(two.a).expect("A").clone();
+    assert_eq!(playlist.shuffle(), Some(Shuffle { seed: 42, first: Some(all[2]) }));
+    let expected = playlist.neighbor(all[2], Direction::Down).expect("the rest lies ahead of `first`");
+    assert_ne!(expected, all[3], "the fixture must actually differ from list order");
+
+    two.session.observe(&end(1), FakeClock::new().sample());
+    assert_eq!(two.session.take_advance(), Some(Advance::Next(expected)));
+}
+
+#[test]
+fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[0], "a1", 1);
+    two.session.set_shuffle(two.b, Some(7)).expect("B exists");
+    assert_eq!(
+        two.session.state().playlist(two.b).expect("B").shuffle(),
+        Some(Shuffle { seed: 7, first: None }),
+        "never another playlist's track"
+    );
+    two.session.set_shuffle(two.b, None).expect("B exists");
+    assert_eq!(two.session.state().playlist(two.b).expect("B").shuffle(), None);
+    assert_eq!(two.session.adopted().map(|a| a.target), Some(LoadTarget::Queue(two.in_a[0])), "no release");
+}
+```
+
+If seed 42 happens to put `a4` right after the pinned `a3` for this fixture's IDs, change the seed until `assert_ne!` holds — the assertion exists to keep the test honest.
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `cargo test --test m8_session_playlists`
+Expected: compile error — `set_shuffle` not found.
+
+- [ ] **Step 3: Implement**
+
+In `adopt_loaded`, replace the `previous_active` / `set_active` block:
+
+```rust
+        let previous = (self.state.playing(), self.state.queue().active());
+        let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
+        match target {
+            LoadTarget::Queue(id) => {
+                // Validated against its owner a moment ago in `observe`.
+                if let Some(owner) = self.state.owner_of(id) {
+                    self.state.set_playing(owner);
+                }
+                let _ = self.state.queue_mut().set_active(Some(id));
+                self.absorb_load_metadata(id, metadata);
+            }
+            // A legacy load belongs to no playlist: it clears the playing
+            // playlist's cursor, as it cleared the one queue's before M8.
+            LoadTarget::Legacy => {
+                let _ = self.state.queue_mut().set_active(None);
+            }
+        }
+        self.adopted = Some(AdoptedLoad { request, target });
+        self.adopted_rev_floor = self.session_rev;
+        let now_at = (self.state.playing(), self.state.queue().active());
+        if switched_media || previous != now_at {
+            self.submit(Urgency::Forced)
+        } else {
+            Action::None
+        }
+```
+
+In the `EndOfTrack` arm:
+
+```rust
+                if let LoadTarget::Queue(id) = adopted.target {
+                    let next = self
+                        .state
+                        .owner_of(id)
+                        .and_then(|owner| self.state.playlist(owner))
+                        .and_then(|playlist| playlist.neighbor(id, Direction::Down));
+                    self.advance = Some(next.map_or(Advance::EndOfQueue, Advance::Next));
+                }
+```
+
+And:
+
+```rust
+    /// `Some(seed)` turns shuffle on, pinning the playlist's *own* cursor
+    /// first; `None` turns it off. No engine command either way, so a
+    /// playing track keeps playing (M8 §7).
+    pub fn set_shuffle(&mut self, id: PlaylistId, seed: Option<u64>) -> Result<Action, PlaylistError> {
+        let playlist = self.state.playlist_mut(id).ok_or(PlaylistError::Unknown(id))?;
+        let first = playlist.queue().active();
+        playlist.set_shuffle(seed.map(|seed| Shuffle { seed, first }));
+        Ok(self.submit(Urgency::Ordinary))
+    }
+```
+
+`grep -n 'neighbor(' src` must now show only `src/playlist.rs`, `src/queue.rs` (the definition and its tests) and `src/application/transport.rs` (Task 9 removes that one).
+
+- [ ] **Step 4: Run**
+
+Run: `cargo test --locked --no-fail-fast`
+Expected: all pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt && cargo clippy --locked --all-targets --all-features -- -D warnings
+git add -A src tests
+git commit -m "feat(session): adoption sets the playing playlist; advance and shuffle share Playlist::neighbor"
+```
+
+---
+
+### Task 7: `Session` — release follows adoption, invalidation is scoped
 
 **Files:**
 - Modify: `src/session.rs` (`remove_entry` :454, `clear_queue` :482, `release_active` :515)
+- Modify: `src/application/runtime.rs` (`clear_queue` :1005 — its one call to `Session::clear_queue`)
 - Modify: `tests/m5_session_queue.rs` — `clear_queue` call (:150) and any assertion that removing a *restored, never adopted* cursor reports `stop_playback: true`; under §5 it now reports `false`
 - Test: `tests/m8_session_playlists.rs` (append)
 
@@ -1988,7 +2219,19 @@ Expected: compile error — `clear_playlist`, `delete_playlist` not found.
     }
 ```
 
-Delete `clear_queue`. Update `release_active`'s doc comment: "called only for an owned entry or an owning playlist — the ownership check lives in its callers". The `LastPlaylist` check precedes `vacate` so a refused delete releases nothing.
+Delete `Session::clear_queue`. Its one caller, `runtime.rs::clear_queue` (:1011), must keep compiling until Task 10 replaces that function: change its call to
+
+```rust
+        let playing = self.session.state().playing();
+        match self.session.clear_playlist(playing, &progress, self.clock.sample()) {
+            Ok(removal) => self.apply_removal(removal),
+            Err(error) => self.status = Some(error.to_string()),
+        }
+```
+
+and leave the rest of that function alone. This task depends on Task 6: its tests need adoption to move `playing`.
+
+Update `release_active`'s doc comment: "called only for an owned entry or an owning playlist — the ownership check lives in its callers". The `LastPlaylist` check precedes `vacate` so a refused delete releases nothing.
 
 - [ ] **Step 4: Run**
 
@@ -2001,173 +2244,6 @@ Expected: all pass after the `m5_session_queue.rs` adjustments named under Files
 cargo fmt && cargo clippy --locked --all-targets --all-features -- -D warnings
 git add -A src tests
 git commit -m "fix(session): releasing playback follows adoption, not a cursor; invalidation is scoped to one playlist"
-```
-
----
-
-### Task 7: `Session` — adoption sets `playing`, one traversal policy, shuffle toggle
-
-**Files:**
-- Modify: `src/session.rs` (`adopt_loaded` :938, the `EndOfTrack` arm :901)
-- Test: `tests/m8_session_playlists.rs` (append)
-
-**Interfaces:**
-- Produces:
-  - `Session::set_shuffle(&mut self, id: PlaylistId, seed: Option<u64>) -> Result<Action, PlaylistError>` — `Some(seed)` turns shuffle on with `first` = that playlist's own cursor; `None` turns it off. The seed is the caller's (Task 10 draws it from `getrandom`), which keeps `Session` deterministic.
-  - Adoption of `LoadTarget::Queue(id)` sets `playing = owner(id)` and that playlist's cursor; every other cursor is left alone.
-  - `Advance` comes from `Playlist::neighbor` on the adopted entry's owner.
-
-- [ ] **Step 1: Write the failing tests** (append)
-
-```rust
-use tenuto::playlist::Shuffle;
-
-fn end(rev: u64) -> PlaybackEvent {
-    PlaybackEvent::EndOfTrack {
-        session_rev: rev,
-        position: Duration::from_millis(500),
-        provenance: PositionProvenance::Established,
-    }
-}
-
-#[test]
-fn playing_changes_at_adoption_and_the_old_playlist_keeps_its_cursor() {
-    let mut two = two();
-    adopt(&mut two.session, two.in_a[1], "a2", 1);
-    let pending = two.session.register_load(LoadTarget::Queue(two.in_b[0]), &media("b1")).expect("registered");
-    assert_eq!(two.session.state().playing(), two.a, "a request alone changes nothing (P4)");
-
-    two.session.observe(&loaded(pending, 2, "b1"), FakeClock::new().sample());
-    let state = two.session.state();
-    assert_eq!(state.playing(), two.b);
-    assert_eq!(state.queue().active(), Some(two.in_b[0]));
-    assert_eq!(state.playlist(two.a).expect("A").queue().active(), Some(two.in_a[1]));
-}
-
-#[test]
-fn a_failed_cross_playlist_load_changes_neither_playing_nor_any_cursor() {
-    let mut two = two();
-    adopt(&mut two.session, two.in_a[0], "a1", 1);
-    let pending = two.session.register_load(LoadTarget::Queue(two.in_b[0]), &media("b1")).expect("registered");
-    two.session.retract_load(pending);
-    let state = two.session.state();
-    assert_eq!(state.playing(), two.a);
-    assert_eq!(state.queue().active(), Some(two.in_a[0]));
-    assert_eq!(state.playlist(two.b).expect("B").queue().active(), None);
-}
-
-#[test]
-fn automatic_advance_follows_the_same_shuffled_order_as_neighbor() {
-    let mut two = two();
-    let (more, _) = two.session.enqueue(two.a, vec![entry("a3"), entry("a4"), entry("a5")]).expect("fits");
-    let all = [two.in_a[0], two.in_a[1], more[0], more[1], more[2]];
-    adopt(&mut two.session, all[2], "a3", 1);
-    two.session.set_shuffle(two.a, Some(42)).expect("A exists");
-
-    let playlist = two.session.state().playlist(two.a).expect("A").clone();
-    assert_eq!(playlist.shuffle(), Some(Shuffle { seed: 42, first: Some(all[2]) }));
-    let expected = playlist.neighbor(all[2], Direction::Down).expect("the rest lies ahead of `first`");
-    assert_ne!(expected, all[3], "the fixture must actually differ from list order");
-
-    two.session.observe(&end(1), FakeClock::new().sample());
-    assert_eq!(two.session.take_advance(), Some(Advance::Next(expected)));
-}
-
-#[test]
-fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
-    let mut two = two();
-    adopt(&mut two.session, two.in_a[0], "a1", 1);
-    two.session.set_shuffle(two.b, Some(7)).expect("B exists");
-    assert_eq!(
-        two.session.state().playlist(two.b).expect("B").shuffle(),
-        Some(Shuffle { seed: 7, first: None }),
-        "never another playlist's track"
-    );
-    two.session.set_shuffle(two.b, None).expect("B exists");
-    assert_eq!(two.session.state().playlist(two.b).expect("B").shuffle(), None);
-    assert_eq!(two.session.adopted().map(|a| a.target), Some(LoadTarget::Queue(two.in_a[0])), "no release");
-}
-```
-
-If seed 42 happens to put `a4` right after the pinned `a3` for this fixture's IDs, change the seed until `assert_ne!` holds — the assertion exists to keep the test honest.
-
-- [ ] **Step 2: Run to verify failure**
-
-Run: `cargo test --test m8_session_playlists`
-Expected: compile error — `set_shuffle` not found.
-
-- [ ] **Step 3: Implement**
-
-In `adopt_loaded`, replace the `previous_active` / `set_active` block:
-
-```rust
-        let previous = (self.state.playing(), self.state.queue().active());
-        let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
-        match target {
-            LoadTarget::Queue(id) => {
-                // Validated against its owner a moment ago in `observe`.
-                if let Some(owner) = self.state.owner_of(id) {
-                    self.state.set_playing(owner);
-                }
-                let _ = self.state.queue_mut().set_active(Some(id));
-                self.absorb_load_metadata(id, metadata);
-            }
-            // A legacy load belongs to no playlist: it clears the playing
-            // playlist's cursor, as it cleared the one queue's before M8.
-            LoadTarget::Legacy => {
-                let _ = self.state.queue_mut().set_active(None);
-            }
-        }
-        self.adopted = Some(AdoptedLoad { request, target });
-        self.adopted_rev_floor = self.session_rev;
-        let now_at = (self.state.playing(), self.state.queue().active());
-        if switched_media || previous != now_at {
-            self.submit(Urgency::Forced)
-        } else {
-            Action::None
-        }
-```
-
-In the `EndOfTrack` arm:
-
-```rust
-                if let LoadTarget::Queue(id) = adopted.target {
-                    let next = self
-                        .state
-                        .owner_of(id)
-                        .and_then(|owner| self.state.playlist(owner))
-                        .and_then(|playlist| playlist.neighbor(id, Direction::Down));
-                    self.advance = Some(next.map_or(Advance::EndOfQueue, Advance::Next));
-                }
-```
-
-And:
-
-```rust
-    /// `Some(seed)` turns shuffle on, pinning the playlist's *own* cursor
-    /// first; `None` turns it off. No engine command either way, so a
-    /// playing track keeps playing (M8 §7).
-    pub fn set_shuffle(&mut self, id: PlaylistId, seed: Option<u64>) -> Result<Action, PlaylistError> {
-        let playlist = self.state.playlist_mut(id).ok_or(PlaylistError::Unknown(id))?;
-        let first = playlist.queue().active();
-        playlist.set_shuffle(seed.map(|seed| Shuffle { seed, first }));
-        Ok(self.submit(Urgency::Ordinary))
-    }
-```
-
-`grep -n 'neighbor(' src` must now show only `src/playlist.rs`, `src/queue.rs` (the definition and its tests) and `src/application/transport.rs` (Task 9 removes that one).
-
-- [ ] **Step 4: Run**
-
-Run: `cargo test --locked --no-fail-fast`
-Expected: all pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-cargo fmt && cargo clippy --locked --all-targets --all-features -- -D warnings
-git add -A src tests
-git commit -m "feat(session): adoption sets the playing playlist; advance and shuffle share Playlist::neighbor"
 ```
 
 ---
@@ -2643,7 +2719,7 @@ pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<Qu
   `PlayerView::rows` are the *viewed* playlist's rows; `active` and `now_playing` stay the *playing* playlist's cursor. `PlaylistTab::name` is already `displayable`.
 - `PlayerRuntime::viewed(&self) -> PlaylistId`, `PlayerRuntime::rows_of(&self, playlist: PlaylistId) -> Vec<QueueRow>` (the browser's captured destination, Task 14).
 
-- [ ] **Step 1: Write the failing tests** — `tests/m8_runtime.rs` (header: copy `tests/m5_runtime.rs` lines 1–40 — the `mod` mounts, imports and the `SHORT` constant)
+- [ ] **Step 1: Write the failing tests** — `tests/m8_runtime.rs` (header: copy `tests/m5_runtime.rs` lines 1–62 — the `mod` mounts, imports, the `SHORT` constant and the `local_entry` helper)
 
 ```rust
 fn tab_names(runtime: &PlayerRuntime) -> Vec<String> {
@@ -2718,6 +2794,30 @@ fn clearing_an_inactive_playlist_neither_stops_playback_nor_loses_anothers_enric
 }
 
 #[test]
+fn a_restored_inactive_playlist_is_enriched_on_the_first_pump() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tagged = tagged_flac::tagged_flac(dir.path(), "Title", "Artist", "Album", None);
+    // A state as a previous run left it: an untitled entry in a playlist that
+    // is not the playing one.
+    let mut session = tenuto::session::Session::new(PersistedState::default());
+    let (other, _) = session.create_playlist("Other").expect("room");
+    session.enqueue(other, vec![local_entry(&tagged)]).expect("fits");
+    let state = session.state().clone();
+    assert_ne!(state.playing(), other);
+
+    let mut rig = rig_with_probe(state, default_probe(TestHook::None));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        rig.runtime.pump();
+        if rig.runtime.rows_of(other).iter().any(|row| row.title.contains("Title")) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the restored entries of a non-playing playlist were never offered to the metadata workers");
+}
+
+#[test]
 fn toggling_shuffle_marks_the_tab_and_keeps_the_track_playing() {
     let mut rig = rig_with(PersistedState::default());
     let first = rig.runtime.viewed();
@@ -2777,7 +2877,21 @@ pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<Qu
 
 - [ ] **Step 4: Implement the runtime**
 
-Field `viewed: PlaylistId`, initialised in `new` from `parts.session.state().playing()`. Accessors `viewed()` and `rows_of(id)` (`queue_rows(self.session.state(), id)`).
+Field `viewed: PlaylistId`, initialised in `new` from `parts.session.state().playing()`.
+
+`new`'s `restored` collection (:333) reads only the playing queue today. Quit before the probes finish and every *other* playlist keeps bare file names forever. Collect across all of them:
+
+```rust
+        let restored = parts
+            .session
+            .state()
+            .playlists()
+            .iter()
+            .flat_map(|playlist| playlist.queue().entries())
+            .map(QueueEntry::id)
+            .collect();
+```
+ Accessors `viewed()` and `rows_of(id)` (`queue_rows(self.session.state(), id)`).
 
 `view()`: `rows: queue_rows(state, self.viewed)`, `tabs: playlist_tabs(state)`, `viewed: self.viewed`; `active`/`now_playing` unchanged (they read `state.queue()`, the playing playlist).
 
@@ -3051,7 +3165,7 @@ pub fn collect_tree(roots: &[PathBuf], dest: PlaylistId, limit: usize) -> TreeCo
 // BrowseResult::TreeCollected(TreeCollected)
 ```
 
-  Walk order (§8): depth-first, each level in exactly `list_directory`'s order — subdirectories first by case-insensitive name, each walked to the bottom, then the level's own audio files. A root that is itself an audio file is collected directly. A directory symlink is skipped; a file symlink is followed, as `list_directory` does today.
+  Walk order (§8): depth-first, each level in exactly `list_directory`'s order — subdirectories first by case-insensitive name, each walked to the bottom, then the level's own audio files. A root that is itself an audio file is collected directly. A directory symlink is never traversed — not as a descendant and not when it is itself a selected root; a file symlink is followed, as `list_directory` does today. The walk stops the moment it holds `limit` candidates: it does not go on reading a large remaining tree just to learn whether another audio file exists. `scan_limit_reached` is then set when anything audio-or-directory was left unvisited — it means unvisited files *may* exist (§8), never a count.
 
 - [ ] **Step 1: Write the failing tests** — `tests/m8_tree_walk.rs`
 
@@ -3111,6 +3225,33 @@ fn the_limit_keeps_the_earliest_candidates_in_walk_order() {
     assert!(!exact.scan_limit_reached, "reaching the limit with nothing left unvisited is not a truncation");
 }
 
+#[cfg(unix)]
+#[test]
+fn at_capacity_the_walk_stops_instead_of_reading_the_rest_of_the_tree() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    touch(dir.path(), "a/1.mp3");
+    touch(dir.path(), "b/2.mp3");
+    let later = dir.path().join("b");
+    std::fs::set_permissions(&later, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let tree = collect_tree(&[dir.path().to_path_buf()], dest(), 1);
+    std::fs::set_permissions(&later, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+
+    assert_eq!(names(dir.path(), &tree), ["a/1.mp3"]);
+    assert!(tree.scan_limit_reached, "b was left unvisited, so files may exist there");
+    assert!(tree.unreadable.is_empty(), "b was never opened: a read attempt would have reported it (unless root)");
+}
+
+#[test]
+fn a_remaining_root_counts_as_unvisited_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    touch(dir.path(), "a/1.mp3");
+    touch(dir.path(), "b/2.mp3");
+    let tree = collect_tree(&[dir.path().join("a"), dir.path().join("b")], dest(), 1);
+    assert_eq!(names(dir.path(), &tree), ["a/1.mp3"]);
+    assert!(tree.scan_limit_reached);
+}
+
 #[test]
 fn overlapping_roots_and_a_root_that_is_a_file_are_deduplicated() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -3130,6 +3271,18 @@ fn a_directory_symlink_is_skipped_so_a_cycle_cannot_recurse() {
     std::os::unix::fs::symlink(dir.path(), dir.path().join("a/loop")).expect("symlink");
     let tree = collect_tree(&[dir.path().to_path_buf()], dest(), 4096);
     assert_eq!(names(dir.path(), &tree), ["a/1.mp3"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_symlink_selected_as_a_root_is_not_traversed_either() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    touch(dir.path(), "real/1.mp3");
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(dir.path().join("real"), &link).expect("symlink");
+    let tree = collect_tree(&[link], dest(), 4096);
+    assert!(tree.items.is_empty(), "{:?}", tree.items);
+    assert!(tree.unreadable.is_empty(), "skipped, not failed");
 }
 
 #[cfg(unix)]
@@ -3176,12 +3329,22 @@ Expected: compile error — `collect_tree` not found.
 /// the listener is looking at agree; that order also decides what a
 /// truncated walk keeps. Filename order, not album track order.
 pub fn collect_tree(roots: &[PathBuf], dest: PlaylistId, limit: usize) -> TreeCollected {
-    let mut walk = Walk { limit, seen: HashSet::new(), tree: TreeCollected {
-        dest, items: Vec::new(), unreadable: Vec::new(), scan_limit_reached: false,
-    } };
-    for root in roots {
-        let is_dir = std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir());
-        if is_dir {
+    let mut walk = Walk {
+        limit,
+        full: limit == 0,
+        seen: HashSet::new(),
+        tree: TreeCollected { dest, items: Vec::new(), unreadable: Vec::new(), scan_limit_reached: false },
+    };
+    let mut roots = roots.iter();
+    while let Some(root) = roots.next() {
+        if walk.full {
+            // Whatever is left was never looked at.
+            walk.tree.scan_limit_reached = true;
+            break;
+        }
+        // `metadata` follows symlinks, so a root that links to a directory
+        // lands in `directory`, which is where directory symlinks are refused.
+        if std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
             walk.directory(root);
         } else if is_audio(root) {
             walk.file(root);
@@ -3192,6 +3355,8 @@ pub fn collect_tree(roots: &[PathBuf], dest: PlaylistId, limit: usize) -> TreeCo
 
 struct Walk {
     limit: usize,
+    /// `limit` candidates are held: stop now, do not keep reading the tree.
+    full: bool,
     seen: HashSet<MediaId>,
     tree: TreeCollected,
 }
@@ -3201,20 +3366,24 @@ impl Walk {
         let Ok((media, _)) = resolve_path(path) else {
             return;
         };
-        if self.seen.contains(&media) {
+        if !self.seen.insert(media) {
             return;
         }
-        if self.tree.items.len() >= self.limit {
-            // Only now is something known to be left out.
-            self.tree.scan_limit_reached = true;
-            return;
-        }
-        self.seen.insert(media);
         self.tree.items.push(path.to_path_buf());
+        self.full = self.tree.items.len() >= self.limit;
     }
 
+    /// The one entry point for traversing a directory, so the one place a
+    /// directory symlink is refused — as a descendant or as a selected root.
+    /// That refusal is what rules out a cycle (M8 §8).
+    ///
+    /// ponytail: recursion depth equals directory depth; a tree thousands of
+    /// levels deep would overflow the worker's stack. An explicit stack is
+    /// the upgrade.
     fn directory(&mut self, path: &Path) {
-        if self.tree.scan_limit_reached {
+        let is_link = std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if is_link {
             return;
         }
         let entries = match list_directory(path) {
@@ -3224,23 +3393,21 @@ impl Walk {
                 return;
             }
         };
-        for entry in entries {
-            if self.tree.scan_limit_reached {
-                return;
-            }
+        let mut entries = entries.into_iter();
+        while let Some(entry) = entries.next() {
             match entry.kind {
-                // `list_directory` follows symlinks when classifying, so ask
-                // again without following: a directory symlink is skipped,
-                // which is what rules out a cycle.
-                EntryKind::Directory => {
-                    let is_link = std::fs::symlink_metadata(&entry.path)
-                        .is_ok_and(|metadata| metadata.file_type().is_symlink());
-                    if !is_link {
-                        self.directory(&entry.path);
-                    }
-                }
+                EntryKind::Directory => self.directory(&entry.path),
                 EntryKind::Audio => self.file(&entry.path),
                 EntryKind::Other => {}
+            }
+            if self.full {
+                // Stop here. Anything audio-or-directory still unvisited at
+                // this level means files may exist that were never seen; the
+                // callers above make the same check on their own levels.
+                if entries.any(|rest| rest.kind != EntryKind::Other) {
+                    self.tree.scan_limit_reached = true;
+                }
+                return;
             }
         }
     }
@@ -3248,8 +3415,6 @@ impl Walk {
 ```
 
 `MediaId` must be `Hash` for `HashSet` — `BrowserState::queued` is already a `HashMap<MediaId, _>`, so it is. Add `BrowseRequest::CollectTree { roots, dest }`, `BrowseResult::TreeCollected(TreeCollected)`, the `answer` arm `BrowseRequest::CollectTree { roots, dest } => BrowseResult::TreeCollected(collect_tree(&roots, dest, MAX_PLAYLIST_ENTRIES))`, and the `answer_with` arm returning `TreeCollected { dest, items: Vec::new(), unreadable: roots, scan_limit_reached: false }`.
-
-ponytail: recursion depth equals directory depth; a pathological tree thousands deep would overflow the worker's stack. An explicit stack is the upgrade; note it in a `// ponytail:` comment on `directory`.
 
 - [ ] **Step 4: Run**
 
@@ -4254,18 +4419,18 @@ Then use superpowers:finishing-a-development-branch. The PR description must say
 
 | Spec | Task |
 |---|---|
-| §3 P1 at least one playlist | 3 (`LastPlaylist`), 4 (rule 7), 6, 15 (`D` refused) |
-| §3 P2 explicit destinations | 5, 10, 13, 14, 15 |
-| §3 P3 cursor ≠ ownership | 6 |
-| §3 P4 `playing` at adoption | 7, 10 |
+| §3 P1 at least one playlist | 3 (`LastPlaylist`), 4 (rule 7, counters kept), 7, 15 (`D` refused) |
+| §3 P2 explicit destinations, owner lookup on both halves of a load | 5, 10, 13, 14, 15 |
+| §3 P3 cursor ≠ ownership | 7 |
+| §3 P4 `playing` at adoption | 6, 10 |
 | §3 P5 view vs. playing, Loading exception | 9, 10 |
-| §3 P6 one traversal policy | 1, 7, 9 |
+| §3 P6 one traversal policy | 1, 6, 9 |
 | §3 P7 global cap where IDs are allocated | 2, 3, 13 |
 | §3 P8 no lost checkpoint | 4 (`kept_checkpoint` in every recovery test) |
 | §4 model, limits, allocation, exhaustion | 1, 2, 3 |
-| §5 ownership check, scoped invalidation, metadata workers, re-pointing | 3, 6, 10 |
+| §5 ownership check, scoped invalidation, metadata workers (incl. restored entries of every playlist), re-pointing | 3, 5 (audit), 7, 10 |
 | §6 migration and the ten recovery rules | 4 |
-| §7 traversal, shuffled order, toggling, transport, start from zero | 1, 7, 8, 9, 10 |
+| §7 traversal, shuffled order, toggling, transport, start from zero | 1, 6, 8, 9, 10 |
 | §8 folder add: keys, destination, walk, result routing, notice | 12, 13, 14 |
 | §9 rows | 11 |
 | §10 tab strip, viewed playlist, keys, overlays | 10, 15 |
