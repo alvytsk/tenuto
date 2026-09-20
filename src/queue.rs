@@ -154,6 +154,10 @@ impl NewQueueEntry {
             display,
         })
     }
+
+    pub fn media(&self) -> &MediaId {
+        &self.media
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

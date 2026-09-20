@@ -15,8 +15,6 @@ impl PlaylistId {
     pub fn get(self) -> u64 {
         self.0
     }
-    /// Wired up by the task that allocates playlist IDs; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
@@ -75,8 +73,6 @@ pub struct Playlist {
 }
 
 impl Playlist {
-    /// Wired up by the task that creates playlists; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn new(id: PlaylistId, name: String) -> Self {
         Self::from_parts(id, name, None, Queue::default())
     }
@@ -109,8 +105,6 @@ impl Playlist {
     pub fn queue(&self) -> &Queue {
         &self.queue
     }
-    /// Wired up by the task that mutates a playlist's queue; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn queue_mut(&mut self) -> &mut Queue {
         &mut self.queue
     }
@@ -118,7 +112,8 @@ impl Playlist {
     pub fn queue_mut_for_tests(&mut self) -> &mut Queue {
         &mut self.queue
     }
-    /// Wired up by the task that renames playlists; unused until then.
+    /// Only reachable through `PersistedState::rename_playlist`, unused
+    /// until the task that wires that through `Session`.
     #[allow(dead_code)]
     pub(crate) fn set_name(&mut self, name: String) {
         self.name = name;
