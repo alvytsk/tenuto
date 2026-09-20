@@ -169,22 +169,23 @@ pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<Qu
 /// The queue row title: `Artist – Title` when both tags are known, else the
 /// plain title (M8 §9).
 pub(crate) fn entry_title(entry: &QueueEntry) -> String {
-    let display = entry.display();
-    let filled = |text: &Option<String>| {
-        text.as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned)
+    let filled = |text: &str| {
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_owned())
     };
-    let title = filled(&display.title);
-    displayable(&match entry.media() {
-        MediaId::PodcastEpisode { .. } => episode_name(display.title.as_deref()),
-        media => match (filled(&display.artist), title) {
-            (Some(artist), Some(title)) => format!("{artist} – {title}"),
-            (_, Some(title)) => title,
-            (_, None) => display_name(media),
-        },
-    })
+    match entry.media() {
+        MediaId::PodcastEpisode { .. } => entry_plain_title(entry),
+        _ => {
+            let display = entry.display();
+            match (
+                display.artist.as_deref().and_then(filled),
+                display.title.as_deref().and_then(filled),
+            ) {
+                (Some(artist), Some(title)) => displayable(&format!("{artist} – {title}")),
+                _ => entry_plain_title(entry),
+            }
+        }
+    }
 }
 
 /// The entry's display title, or the name its identity implies, escaped.
