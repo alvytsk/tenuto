@@ -86,9 +86,11 @@ With mouse capture on, a click selects a row of the viewed playlist and a second
 
 ### Playlists
 
-The queue is now one of several named playlists, shown as tabs above the list. At most 32 playlists exist at once, each named 1 to 40 characters after trimming; deleting the last one is refused. Together they hold at most 4,096 entries, not 4,096 each.
+The queue is now one of several named playlists, shown as tabs above the list. At most 32 playlists exist at once, each named 1 to 40 characters after trimming — names may repeat, since a playlist's identity is its ID, not its name; deleting the last one is refused. Together they hold at most 4,096 entries, not 4,096 each.
 
-Two playlists matter independently: the one you are *viewing* (what the list shows, what `Enter`, `a`, `c`, `r`, `D` and `z` act on) and the one that is *playing* (what Space, `p`, `[` and `]` act on, and what a track ending advances). They are usually the same tab, but switching tabs with `Tab`/`Shift-Tab` only changes which one you are viewing — playback keeps running on whichever playlist it was already on. Enter on another tab's row starts playing that playlist, which makes it both viewed and playing at once.
+Two playlists matter independently: the one you are *viewing* (what the list shows, what `Enter`, `a`, `c`, `r`, `D` and `z` act on) and the one that is *playing* (what Space, `p`, `[` and `]` act on, and what a track ending advances). They are usually the same tab, but switching tabs with `Tab`/`Shift-Tab` only changes which one you are viewing — playback keeps running on whichever playlist it was already on. Enter on another tab's row starts playing that playlist, which makes it both viewed and playing at once. The view starts on the playing playlist each time the player opens; which tab you had open is not remembered across a restart.
+
+Deleting the viewed playlist with `D` moves the view to the adjacent one — the tab that took its place in the strip, or the one before it if the deleted tab was last. Deleting the *playing* playlist follows the same rule for `playing`: whatever it had adopted is released and playback stops, and the `▶` mark moves to that same adjacent playlist.
 
 On the tab strip, the playing playlist's name is prefixed with `▶`; the viewed tab is bold; a shuffled playlist's name is suffixed with `⤮`. An existing queue from before this feature becomes a playlist named `Default`.
 
