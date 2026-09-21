@@ -8,14 +8,18 @@ mod runtime;
 mod tagged_flac;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids};
 use tenuto::application::browse::TreeCollected;
-use tenuto::application::enrich::default_probe;
-use tenuto::application::runtime::{AppCommand, EnqueueItem, PlayerRuntime};
+use tenuto::application::enrich::{TagProbe, default_probe};
+use tenuto::application::runtime::{
+    AppCommand, EnqueueItem, MAX_ENRICHMENT_PER_PUMP, PlayerRuntime,
+};
 use tenuto::lifecycle::hooks::TestHook;
 use tenuto::media::id::{AbsolutePath, MediaId};
+use tenuto::media::tags::LocalTags;
 use tenuto::persistence::model::PersistedState;
 use tenuto::playlist::PlaylistId;
 use tenuto::queue::{MAX_PLAYLIST_ENTRIES, NewQueueEntry, QueueSource};
@@ -424,5 +428,84 @@ fn capacity_is_rechecked_on_apply_and_the_notice_counts_only_what_is_known() {
     assert_eq!(
         rig.runtime.view().status.as_deref(),
         Some("added 2 · 1 unreadable · 3 did not fit · scan limit reached")
+    );
+}
+
+/// Empty files under distinct names: the tag probe is injected, so a file
+/// only has to exist and resolve.
+fn empty_files(dir: &Path, count: usize) -> Vec<PathBuf> {
+    (0..count)
+        .map(|i| {
+            let path = dir.join(format!("{i:04}.flac"));
+            std::fs::File::create(&path).unwrap_or_else(|error| panic!("create: {error}"));
+            path
+        })
+        .collect()
+}
+
+/// Titles every file instantly, so the workers are never the bottleneck.
+fn instant_probe() -> TagProbe {
+    Arc::new(|path: &AbsolutePath| {
+        Ok(LocalTags {
+            title: Some(format!("Tagged {}", path.as_path().display())),
+            ..LocalTags::default()
+        })
+    })
+}
+
+/// A folder larger than the metadata workers' old 256-job backlog: every row
+/// must end up titled, not just the first few hundred (M8 §5, §8).
+#[test]
+fn every_file_of_a_folder_add_is_titled_however_large_the_folder() {
+    const FILES: usize = 1000;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let files = empty_files(dir.path(), FILES);
+    let mut rig = rig_with_probe(PersistedState::default(), instant_probe());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::AddTree(tree(first, files)));
+    assert_eq!(rig.runtime.rows_of(first).len(), FILES);
+    assert_eq!(rig.runtime.view().status.as_deref(), Some("added 1000"));
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut titled = 0;
+    while Instant::now() < deadline {
+        rig.runtime.pump();
+        titled = rig
+            .runtime
+            .rows_of(first)
+            .iter()
+            .filter(|row| row.title.starts_with("Tagged /"))
+            .count();
+        if titled == FILES {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("only {titled} of {FILES} rows were ever titled");
+}
+
+/// The drain is bounded, so one pump cannot spend a frame's worth of time
+/// applying results (each carries a full state clone).
+#[test]
+fn one_pump_applies_at_most_a_bounded_batch_of_results() {
+    const FILES: usize = 1000;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let files = empty_files(dir.path(), FILES);
+    let mut rig = rig_with_probe(PersistedState::default(), instant_probe());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::AddTree(tree(first, files)));
+    // Let the workers get well ahead of the runtime before the first pump.
+    std::thread::sleep(Duration::from_millis(100));
+
+    rig.runtime.pump();
+    let titled = rig
+        .runtime
+        .rows_of(first)
+        .iter()
+        .filter(|row| row.title.starts_with("Tagged /"))
+        .count();
+    assert!(
+        titled <= MAX_ENRICHMENT_PER_PUMP,
+        "one pump applied {titled} results, more than the {MAX_ENRICHMENT_PER_PUMP} bound"
     );
 }

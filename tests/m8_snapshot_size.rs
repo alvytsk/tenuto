@@ -1,6 +1,7 @@
-//! M8 §12: what a full 4,096-entry state costs. Ignored by default — it
-//! measures, it does not assert. Run it by hand and copy the output into
-//! docs/m8-acceptance.md:
+//! M8 §12: what a full 4,096-entry state costs — to snapshot once, and to
+//! enrich a whole folder add of one pump at a time. Ignored by default —
+//! they measure, they do not assert. Run them by hand and copy the output
+//! into docs/m8-acceptance.md:
 //!
 //!   cargo test --release --test m8_snapshot_size -- --ignored --nocapture
 //!
@@ -13,12 +14,20 @@
 //! sits on whatever real filesystem the crate itself is built on — the same
 //! kind of disk `$XDG_STATE_HOME/state.json` lives on, unlike `/tmp`.
 
+#[path = "support/runtime.rs"]
+mod runtime;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use runtime::rig_with_probe;
+use tenuto::application::browse::TreeCollected;
+use tenuto::application::enrich::TagProbe;
+use tenuto::application::runtime::{AppCommand, MAX_ENRICHMENT_PER_PUMP};
 use tenuto::clock::FakeClock;
 use tenuto::media::id::{AbsolutePath, EpisodeKey, FeedId, MediaId, NormalizedUrl};
+use tenuto::media::tags::LocalTags;
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::store::StateStore;
 use tenuto::playback::checkpoint::PlaybackCheckpoint;
@@ -291,5 +300,82 @@ fn a_full_snapshot_costs_this_much() {
     println!(
         "atomic write, on-disk (target) {disk_write_time:?}  fstype={disk_fstype}  path={}",
         disk_dir.path().display()
+    );
+}
+
+/// What a folder add of a full 4,096-entry library costs the application
+/// thread, pump by pump: the number M8 §12's cost reasoning actually needs,
+/// since a submit happens per mutation and not on the 5-second capture
+/// cadence. Ignored like its neighbour; run it the same way.
+///
+/// The tag probe is instant, so the workers are never the bottleneck and the
+/// runtime is measured against the worst arrival rate it can ever see.
+#[test]
+#[ignore = "a measurement, run by hand; see the module comment"]
+fn the_worst_enrichment_pump_costs_this_much() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let files: Vec<PathBuf> = (0..MAX_PLAYLIST_ENTRIES)
+        .map(|i| {
+            let path = dir.path().join(format!("{i:05}.flac"));
+            std::fs::File::create(&path).unwrap_or_else(|error| panic!("create: {error}"));
+            path
+        })
+        .collect();
+    let probe: TagProbe = Arc::new(|path: &AbsolutePath| {
+        Ok(LocalTags {
+            title: Some(format!("Tagged {}", path.as_path().display())),
+            artist: Some("An Artist With a Reasonable Name".into()),
+            album: Some("Some Fairly Long Album Title (Deluxe Edition)".into()),
+            ..LocalTags::default()
+        })
+    });
+    let mut rig = rig_with_probe(PersistedState::default(), probe);
+    let dest = rig.runtime.viewed();
+
+    let started = Instant::now();
+    rig.runtime.handle(AppCommand::AddTree(TreeCollected {
+        dest,
+        items: files,
+        unreadable: Vec::new(),
+        scan_limit_reached: false,
+    }));
+    let add_time = started.elapsed();
+    assert_eq!(rig.runtime.rows_of(dest).len(), MAX_PLAYLIST_ENTRIES);
+
+    let mut worst = Duration::ZERO;
+    let mut pump_total = Duration::ZERO;
+    let mut pumps = 0usize;
+    let drain_started = Instant::now();
+    let deadline = drain_started + Duration::from_secs(60);
+    let titled = loop {
+        let started = Instant::now();
+        rig.runtime.pump();
+        let spent = started.elapsed();
+        worst = worst.max(spent);
+        pump_total += spent;
+        pumps += 1;
+        // Building 4,096 rows is not free either, so this check is kept out
+        // of the pump numbers above and costs the wall clock below.
+        let titled = rig
+            .runtime
+            .rows_of(dest)
+            .iter()
+            .filter(|row| row.title.contains("Tagged /"))
+            .count();
+        if titled == MAX_PLAYLIST_ENTRIES || Instant::now() >= deadline {
+            break titled;
+        }
+    };
+    let drain_time = drain_started.elapsed();
+
+    println!("entries                        {MAX_PLAYLIST_ENTRIES}");
+    println!("results applied per pump (cap) {MAX_ENRICHMENT_PER_PUMP}");
+    println!("add_tree (app thread)          {add_time:?}");
+    println!("rows titled                    {titled}");
+    println!("pumps to drain                 {pumps}");
+    println!("worst single pump              {worst:?}");
+    println!("all pumps, summed              {pump_total:?}");
+    println!(
+        "drain, wall clock              {drain_time:?}  (includes this test's own row checks)"
     );
 }

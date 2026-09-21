@@ -68,6 +68,18 @@ pub const PLAYER_BUSY: &str = "Player is busy";
 pub const TOO_MANY_PENDING_LOADS: &str = "Too many pending loads";
 /// At most this many tag probes run at once (§8).
 const METADATA_WORKERS: usize = 2;
+/// At most this many finished tag probes are applied in one [`pump`]; the
+/// rest wait for the next one. The batch shares a single submit, so what
+/// this bounds is the per-result scan of every queued entry, not the clone.
+///
+// ponytail: a fixed batch rather than a time budget. Ceiling: after a folder
+// add of thousands of files the tags trickle in over several frames instead
+// of arriving at once. Upgrade path: stop rescanning every playlist per
+// result — `Session::update_displays` looks each media up by walking all
+// entries, so a media → entry index would make the batch size irrelevant.
+///
+/// [`pump`]: PlayerRuntime::pump
+pub const MAX_ENRICHMENT_PER_PUMP: usize = 64;
 
 /// Builds the engine on the first load. Boxed so a test can hand in a
 /// deviceless output while production uses the environment's choice.
@@ -1249,15 +1261,23 @@ impl PlayerRuntime {
     }
 
     /// Applies finished enrichment through `Session`, which updates every
-    /// occurrence of the media still queued — none, if it was removed.
+    /// occurrence of the media still queued — none, if it was removed. The
+    /// whole batch costs one submit, and at most [`MAX_ENRICHMENT_PER_PUMP`]
+    /// results are taken per pump: a folder add hands back thousands of
+    /// results, and an unbounded drain would stall a frame. Whatever is left
+    /// waits in the workers' result channel for the next pump.
     fn apply_enrichment(&mut self) {
         let Some(workers) = &self.metadata else {
             return;
         };
-        while let Some(result) = workers.try_result() {
+        let mut batch = Vec::new();
+        while batch.len() < MAX_ENRICHMENT_PER_PUMP
+            && let Some(result) = workers.try_result()
+        {
             match result.outcome {
-                EnrichOutcome::Tags(tags) => {
-                    let update = DisplayUpdate {
+                EnrichOutcome::Tags(tags) => batch.push((
+                    result.media,
+                    DisplayUpdate {
                         title: tags.title,
                         artist: tags.artist,
                         album: tags.album,
@@ -1266,10 +1286,8 @@ impl PlayerRuntime {
                             value,
                             source: DurationSource::Decoded(tags.duration_provenance),
                         }),
-                    };
-                    let action = self.session.update_display(&result.media, update);
-                    self.submit(action);
-                }
+                    },
+                )),
                 EnrichOutcome::Failed(message) => {
                     tracing::debug!(%message, "no tags for a queued file");
                 }
@@ -1277,6 +1295,10 @@ impl PlayerRuntime {
                     tracing::debug!("the tag probe panicked; the entry keeps its name");
                 }
             }
+        }
+        if !batch.is_empty() {
+            let action = self.session.update_displays(&batch);
+            self.submit(action);
         }
     }
 

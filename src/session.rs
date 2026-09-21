@@ -643,8 +643,35 @@ impl Session {
     /// metadata it already wrote (the plan's metadata-enrichment workers do
     /// this repeatedly) does not push an empty write on every call.
     pub fn update_display(&mut self, media: &MediaId, update: DisplayUpdate) -> Action {
-        if update == DisplayUpdate::default() {
-            return Action::None;
+        if self.apply_display(media, &update) {
+            self.submit(Urgency::Ordinary)
+        } else {
+            Action::None
+        }
+    }
+
+    /// [`update_display`](Self::update_display) for a batch, with **one**
+    /// submit for the whole of it rather than one per update: the snapshot a
+    /// submit carries is a full clone of the state, so the metadata workers'
+    /// results — which arrive in bursts of hundreds after a folder add — must
+    /// not pay for one clone each.
+    pub fn update_displays(&mut self, updates: &[(MediaId, DisplayUpdate)]) -> Action {
+        let mut changed = false;
+        for (media, update) in updates {
+            changed |= self.apply_display(media, update);
+        }
+        if changed {
+            self.submit(Urgency::Ordinary)
+        } else {
+            Action::None
+        }
+    }
+
+    /// The mutation half of [`update_display`](Self::update_display):
+    /// whether anything actually changed, with no submit of its own.
+    fn apply_display(&mut self, media: &MediaId, update: &DisplayUpdate) -> bool {
+        if *update == DisplayUpdate::default() {
+            return false;
         }
         let ids: Vec<QueueEntryId> = self
             .state
@@ -691,11 +718,7 @@ impl Session {
                 changed = true;
             }
         }
-        if changed {
-            self.submit(Urgency::Ordinary)
-        } else {
-            Action::None
-        }
+        changed
     }
 
     /// Replaces one entry's podcast fallback URL. Unknown `id` is an error;
