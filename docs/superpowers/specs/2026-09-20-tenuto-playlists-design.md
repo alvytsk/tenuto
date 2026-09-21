@@ -121,7 +121,7 @@ Schema 4. Still one file, one atomic snapshot, one writer.
 7. An empty array after the steps above → one empty `Default`.
 8. `playing` malformed or dangling → the first playlist, with `current_media` re-pointed as in §5.
 9. The `active` ↔ `current_media` check applies to the playing playlist only. Any other playlist's `active` is checked for membership only.
-10. A malformed `shuffle` turns shuffle off for that playlist; a `first` that is not a member becomes `None`.
+10. A malformed `shuffle` turns shuffle off for that playlist and is reported; a `first` that is not a member becomes `None` *silently*, because §7 makes that a legal state — shuffle on mid-track pins the cursor, and removing that entry leaves the pin behind — so reporting it would warn about damage that never happened.
 
 ## 7. Playback behavior
 

@@ -404,10 +404,9 @@ fn a_dangling_playing_falls_back_to_the_first_playlist_and_repoints_current_medi
 }
 
 #[test]
-fn a_bad_shuffle_turns_shuffle_off_and_a_foreign_first_becomes_none() {
+fn a_malformed_shuffle_turns_shuffle_off_and_is_reported() {
     let loaded = load(v4(
-        json!([{ "id": 1, "name": "A", "shuffle": "yes", "entries": [track(1, "a")], "active_entry": 1 },
-               { "id": 2, "name": "B", "shuffle": { "seed": 7, "first": 1 }, "entries": [track(2, "b")], "active_entry": null }]),
+        json!([{ "id": 1, "name": "A", "shuffle": "yes", "entries": [track(1, "a")], "active_entry": 1 }]),
         json!(1),
         json!({}),
     ));
@@ -416,6 +415,20 @@ fn a_bad_shuffle_turns_shuffle_off_and_a_foreign_first_becomes_none() {
         Some(QueueReset::Playlists(PlaylistProblem::Shuffle))
     );
     assert_eq!(loaded.state.playlists()[0].shuffle(), None);
-    let shuffle = loaded.state.playlists()[1].shuffle().expect("kept");
+}
+
+/// A `first` that is no longer a member is what ordinary use leaves behind —
+/// shuffle on mid-track pins the cursor, then that entry is removed — and
+/// §7 calls that state legal. Recovery normalizes it silently: reporting it
+/// would warn the listener that their queue was reset when nothing was.
+#[test]
+fn a_foreign_shuffle_first_becomes_none_without_a_report() {
+    let loaded = load(v4(
+        json!([{ "id": 2, "name": "B", "shuffle": { "seed": 7, "first": 1 }, "entries": [track(2, "b")], "active_entry": null }]),
+        json!(2),
+        json!({}),
+    ));
+    assert_eq!(loaded.reset, None, "a legal state is not damage");
+    let shuffle = loaded.state.playlists()[0].shuffle().expect("kept");
     assert_eq!((shuffle.seed, shuffle.first), (7, None));
 }

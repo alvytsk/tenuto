@@ -47,6 +47,10 @@ pub enum PlaylistProblem {
         found: usize,
     },
     DanglingPlaying,
+    /// A `shuffle` value that is not an object with a numeric `seed`, or
+    /// whose `first` is not a number (M8 §6 rule 10). A `first` that is
+    /// merely no longer a member is *not* this: §7 calls that legal, and
+    /// recovery drops it without a word.
     Shuffle,
 }
 
@@ -445,11 +449,17 @@ pub(super) fn recover_playlists(
             Some(value) => match value.get("seed").and_then(Value::as_u64) {
                 Some(seed) => {
                     let named = value.get("first").filter(|first| !first.is_null());
-                    let first = named
-                        .and_then(Value::as_u64)
+                    let numbered = named.and_then(Value::as_u64);
+                    let first = numbered
                         .filter(|id| entries.iter().any(|e| e.id().get() == *id))
                         .map(QueueEntryId::from_raw);
-                    if named.is_some() && first.is_none() {
+                    // A `first` that is no longer a member is dropped
+                    // *silently*: §7 makes that a legal in-memory state —
+                    // shuffle on mid-track pins the cursor, then that entry
+                    // is removed — so reporting it would tell the listener
+                    // their queue was reset when nothing was lost. Only a
+                    // `first` that is not a number is damage.
+                    if named.is_some() && numbered.is_none() {
                         note(&mut reset, QueueReset::Playlists(PlaylistProblem::Shuffle));
                     }
                     Some(Shuffle { seed, first })
