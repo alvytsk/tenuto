@@ -566,7 +566,7 @@ fn ended_with_no_active_entry_loads_the_first_row_on_space() {
 }
 
 // While loading, Previous/Next anchor on the last requested entry only if it
-// is still queued; otherwise on the active entry, then the selection.
+// is still queued; otherwise on the active entry.
 
 #[test]
 fn loading_anchors_on_active_when_last_requested_is_gone() {

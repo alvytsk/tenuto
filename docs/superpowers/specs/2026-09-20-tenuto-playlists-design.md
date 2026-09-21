@@ -66,6 +66,8 @@ next_playlist_id: Option<u64>,
 
 **Limits.** `MAX_ENTRIES = 4096` across all playlists, replacing `MAX_QUEUE_ENTRIES`; there is no separate per-playlist number. `MAX_PLAYLISTS = 32`. A name is 1–40 characters after trimming; duplicate names are allowed, since `PlaylistId` is the identity.
 
+The code names this cap `MAX_PLAYLIST_ENTRIES`, not `MAX_ENTRIES`: `persistence::model` already has a `MAX_ENTRIES` for checkpoints.
+
 **Allocation.** Both counters are monotonic, advance by `checked_add`, and are never reused — a late asynchronous result for a deleted playlist can therefore never land in a newer one. A batch enqueue reserves all its IDs and checks global capacity first; on exhaustion (`QueueError::IdExhausted`) or lack of capacity (`QueueError::Capacity`) it changes nothing. Each counter is an `Option<u64>` — the next ID to hand out, or `None` for an exhausted namespace — serialized as a number or `null`; a `u64` alone cannot represent "past `u64::MAX`". Handing out `u64::MAX` leaves `None`. On load, each counter is the larger of the stored value and `highest seen + 1`, where `highest seen` covers every well-formed ID in the file, including ones recovery will later repair; if `highest seen` is `u64::MAX`, or the stored value is `null`, the counter is `None`. Such a file loads, and every later allocation is refused.
 
 **Playlist operations** (all through `Session`): `create(name) -> PlaylistId`, `rename(id, name)`, `delete(id)`, `set_shuffle(id, on)`. Creating past `MAX_PLAYLISTS` and deleting the last playlist are errors that change nothing.
@@ -139,7 +141,7 @@ Known ceiling, marked with a `ponytail:` comment: an entry added while shuffle i
 
 **Enter is the only command that reads the selection.** It plays the selected row of the viewed playlist, and its emptiness check is the viewed playlist's: an empty playing playlist never blocks Enter in a populated one.
 
-**Space and `p`** never follow the viewed tab. Where today's table falls back to `selection` (`Unloaded`, `Ended`, `LoadFailed`), the chain becomes: `retry` (in `LoadFailed` only, as today) → the navigation playlist's cursor → its first entry in playback order → the empty-queue notice. A valid `retry` therefore outranks the empty check: with A empty and a failed request in B, `p` retries B's entry. Where Space and `p` are engine commands today (`Playing`, `Paused`, `Reconnecting`, `Stopped`: toggle pause, play) they stay engine commands, including over an emptied playlist (`decide_engine_with_empty_queue`).
+**Space and `p`** never follow the viewed tab. Where today's table falls back to `selection` (`Unloaded`, `Ended`, `LoadFailed`), the chain becomes: `retry` (in `LoadFailed` only, as today) → the navigation playlist's cursor → its first entry in playback order → the empty-queue notice. A valid `retry` therefore outranks the empty check: with A empty and a failed request in B, `p` retries B's entry. Space and `p` are engine commands today (`Playing`, `Paused`, `Reconnecting`, `Stopped`: toggle pause, play) in all four phases when the navigation playlist has entries. Over an *emptied* playlist only `Playing`, `Paused` and `Reconnecting` keep them as engine commands (`decide_engine_with_empty_queue`); `Stopped` shows the empty-queue notice, exactly as it did before M8.
 
 **Next and previous** anchor on `retry` during `Loading`, else on the navigation playlist's cursor; with no anchor they do nothing. Seek, restart and the live-media rules are unchanged.
 

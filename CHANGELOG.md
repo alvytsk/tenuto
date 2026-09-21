@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Playlists. The queue is now one of several named playlists, shown as tabs
+  above the list: `Tab` and `Shift-Tab` switch the view, `n` creates one,
+  `r` renames and `D` deletes it after a `y`. Playback stays on the playing
+  playlist while you look at another; Enter in any playlist plays from it.
+  An existing queue becomes a playlist named `Default`.
+- Shuffle, per playlist, with `z`. The list keeps its order on screen;
+  next, previous and end-of-track follow one shuffled order that survives a
+  restart. Turning it off continues in list order from the current track.
+- Adding a folder from the Files tab: Space now marks directories too, and
+  `a` adds the marked rows — or the row under the cursor — recursively, in
+  the browser's own listing order. Directory symlinks are skipped, even
+  when selected directly as a root.
+- Rows read `Artist – Title`, with the album below.
 - Live HTTP radio. An Icecast or Shoutcast v2 stream plays without a
   position bar, from `tenuto play <url>` or the queue. It cannot seek or
   restart and is never resumed: pausing closes the connection and playing
@@ -32,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Local files and plain URLs start from the beginning each time they are
+  loaded, from `tenuto play` as well as the player. Podcast episodes still
+  resume, and pausing or stopping a track still continues where it was.
+- The entry limit is 4,096 across all playlists, replacing 256 per queue.
+- On a playlist that has never played, `p` and Space start its first track
+  in playback order rather than the highlighted row, and next/previous wait
+  for a current track. Enter on the highlighted row is unchanged.
+- `state.json` is schema 4. A schema 3 file is migrated on first load; an
+  older build leaves a schema 4 file in place and runs without saving.
 - A seek on a source that cannot seek no longer drops its connection.
 - Loading another track interrupts a stalled one immediately.
 - A live stream is no longer refused. A stream that interleaves ICY

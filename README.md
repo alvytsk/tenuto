@@ -10,7 +10,7 @@ A keyboard-first terminal audio player for local files, HTTP media and podcasts.
 - Remembers where you stopped in every track and episode, and resumes there next time.
 - Never plays, fetches or refreshes anything on its own. Every network request follows a key you pressed or a command you ran.
 
-![The terminal player: cover art, track information, spectrum, transport and the queue](https://raw.githubusercontent.com/alvytsk/tenuto/main/docs/images/tui.webp)
+![The terminal player: cover art, track information, spectrum, transport and a playlist](https://raw.githubusercontent.com/alvytsk/tenuto/main/docs/images/tui.webp)
 
 ## Install
 
@@ -57,9 +57,9 @@ The terminal shows one status line with the track name, the state, the position,
 tenuto
 ```
 
-The full-screen player opens on your queue, which is empty the first time, and nothing plays until you ask. Press `a`, type a path or an `http(s)://` URL, and press Enter to add it to the queue. Press Space to play. The keys you need most are listed along the bottom of the screen, and `?` shows all of them.
+The full-screen player opens on your playlists — one `Default` playlist, empty the first time — and nothing plays until you ask. Press `a`, type a path or an `http(s)://` URL, and press Enter to add it to the playlist you're viewing. Press Space to play. The keys you need most are listed along the bottom of the screen, and `?` shows all of them.
 
-**Subscribe to a podcast.** Press `b` to open the browser, then Tab to switch to the Podcasts tab. Press `a`, paste the feed URL and press Enter. The feed is fetched once and its episodes appear in the list. Move to an episode and press Enter to add it to the queue, then Space to play it. The same works from a shell:
+**Subscribe to a podcast.** Press `b` to open the browser, then Tab to switch to the Podcasts tab. Press `a`, paste the feed URL and press Enter. The feed is fetched once and its episodes appear in the list. Move to an episode and press Enter to add it to your playlist, then Space to play it. The same works from a shell:
 
 ```sh
 tenuto subscribe http://feeds.rucast.net/radio-t --as radio-t
@@ -71,30 +71,33 @@ tenuto play radio-t 3
 
 ## The player
 
-The player restores your queue, the active entry, the volume and every saved position. It never starts playing on its own, and nothing is fetched until you press a playback key. Cover art is read from the file's tag, from a `cover.jpg` or `folder.jpg` beside it, or for a podcast from the feed's own image.
+The player restores every playlist, the playing one's active entry, the volume and every saved position. It never starts playing on its own, and nothing is fetched until you press a playback key. Cover art is read from the file's tag, from a `cover.jpg` or `folder.jpg` beside it, or for a podcast from the feed's own image.
 
 | Key | Action |
 |---|---|
-| Space | Pause or resume. Before anything is loaded, load the restored active entry, or the selected row. After the last entry ended, replay it |
-| Enter | Play the selected queue entry |
+| Space | Pause or resume. Before anything is loaded, resume the playing playlist's remembered entry, or its first track in playback order if it has none. After the last entry ended, replay it |
+| Enter | Play the selected row of the playlist you're viewing |
 | Up, Down, `j`, `k` | Move the selection. Playback does not change |
 | `J`, `K` | Move the selected entry down or up |
 | Left, Right | Seek backward or forward 10 seconds. A burst of presses becomes one seek |
 | Home | Restart the track from the beginning |
 | `-`, `_`, `+`, `=` | Volume down or up by 5% |
 | `s`, `p` | Stop, play |
-| `[`, `]` | Previous or next queue entry. Never wraps |
+| `[`, `]` | Previous or next entry in the playing playlist. Never wraps |
 | `d` | Remove the selected entry |
-| `a` | Type a path or an `http(s)://` URL to enqueue |
-| `c` | Clear the queue after a `y` confirmation |
+| `a` | Type a path or an `http(s)://` URL to add to the viewed playlist |
+| `c` | Clear the viewed playlist after a `y` confirmation |
 | `b` | Open the browser |
+| Tab, Shift-Tab | Switch which playlist you're viewing |
+| `n`, `r`, `D` | New, rename or delete the viewed playlist (`D` after a `y` confirmation) |
+| `z` | Shuffle the viewed playlist |
 | `?` | Show the key help |
 | `m` | Toggle mouse capture |
 | Ctrl-L | Redraw the screen and re-place the cover |
 | Esc | Close the open overlay or cancel typing |
 | `q`, Ctrl-C | Quit |
 
-With the mouse on, a click selects a queue row, a second click plays it, the wheel scrolls the queue, the transport buttons work, and a click on the progress bar seeks. `tenuto tui --mouse off` leaves the mouse to the terminal, and `--artwork blocks` or `--artwork off` change how the cover is drawn. The [reference](https://github.com/alvytsk/tenuto/blob/main/docs/reference.md#the-terminal-player) covers the options, the layout tiers and every message the player can answer with.
+With the mouse on, a click selects a row of the viewed playlist, a second click plays it, the wheel scrolls it, the transport buttons work, and a click on the progress bar seeks. `tenuto tui --mouse off` leaves the mouse to the terminal, and `--artwork blocks` or `--artwork off` change how the cover is drawn. The [reference](https://github.com/alvytsk/tenuto/blob/main/docs/reference.md#the-terminal-player) covers the options, the layout tiers and every message the player can answer with.
 
 ### The browser
 
@@ -104,8 +107,9 @@ With the mouse on, a click selects a queue row, a second click plays it, the whe
 |---|---|
 | Up, Down, `j`, `k` | Move |
 | Tab | Switch between Files, Podcasts and Radio |
-| Enter | Open a directory or a feed. Enqueue a file, an episode or a station. On a row already queued, remove it from the queue |
-| Space | Mark several rows to enqueue together. Rows already queued are skipped |
+| Enter | Open a directory or a feed. Add a file, an episode or a station to the playlist you had open when you pressed `b`. On a row already added, remove it instead |
+| Space | Mark several rows to add together. On Files, a folder can be marked too |
+| `a` (Files) | Add the marked rows, or the one under the cursor, recursively — files and folders alike |
 | Backspace, Left | Go up one level |
 | `a` (Podcasts) | Subscribe by URL |
 | `a` (Radio) | Add a station by its stream URL |
@@ -115,13 +119,13 @@ With the mouse on, a click selects a queue row, a second click plays it, the whe
 | `d` (Radio) | Remove the station after a `y` confirmation |
 | `b`, Esc | Close the browser |
 
-A row already in the queue shows a green `✓`. Opening the browser never refreshes a feed. `r` and `R` do, and so does `tenuto refresh` from a shell.
+A row already added shows a green `✓`. Opening the browser never refreshes a feed. `r` and `R` do, and so does `tenuto refresh` from a shell.
 
 **Radio.** Adding a station probes its stream once: the ICY identity it reports — name, genre, bitrate, logo — comes back cached, so the list draws on a cold start without a request. A verified row draws its slug, then genre and bitrate; the name itself is not drawn again, since the slug already stands for it. A station whose probe only got a retryable failure (a `429`, a `503`, a reset connection) is saved anyway, shown by its URL with an unreached marker; `r` tries the probe again. A station's logo, when it has one and it decodes, shows in the cover pane while that station plays.
 
-### The queue
+### Playlists
 
-Adding appends to the queue and never interrupts what is playing. The queue is saved and survives a restart. When a track ends the next one starts from its own saved position, and the last one simply ends. There is no shuffle and no repeat. Before a track is loaded its row shows what was saved: `12:34 saved`, `~12:34 saved` for an estimate, or `played` for a finished track. The [reference](https://github.com/alvytsk/tenuto/blob/main/docs/reference.md#the-queue) has the caps and the exact rules.
+The queue is now several named playlists, shown as tabs above the list: `Tab`/`Shift-Tab` switch which one you're viewing, `n`/`r`/`D` create, rename and delete one, and `z` shuffles the one you're viewing. Playback stays on whichever playlist is playing while you look at another; Enter in any of them plays from it. Adding appends and never interrupts what is playing. Every playlist is saved and survives a restart. When a track ends the next one, in playback order, starts from its own saved position, and the last one simply ends. Before a track is loaded its row shows what was saved: `12:34 saved`, `~12:34 saved` for an estimate, or `played` for a finished track. Local files and plain URLs now always start at 0:00 on a fresh load — a podcast episode still resumes. The [reference](https://github.com/alvytsk/tenuto/blob/main/docs/reference.md#playlists) has the caps and the exact rules.
 
 ## Podcasts from the shell
 
@@ -166,7 +170,7 @@ A seek inside an MP3 with no seek index lands on an estimate, which can be some 
 
 | Location | Contents |
 |---|---|
-| `$XDG_STATE_HOME/tenuto/state.json` | Saved positions, volume and the queue |
+| `$XDG_STATE_HOME/tenuto/state.json` | Saved positions, volume and your playlists |
 | `$XDG_STATE_HOME/tenuto/logs/` | One log per player run |
 | `$XDG_DATA_HOME/tenuto/subscriptions.json` | Your subscriptions |
 | `$XDG_DATA_HOME/tenuto/stations.json` | Your saved radio stations |
