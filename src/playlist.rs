@@ -125,9 +125,9 @@ impl Playlist {
     /// ponytail: O(n log n) per call, called on a keypress or a track end,
     /// never per frame. Cache the order if n ever grows past the 4,096 cap.
     ///
-    /// ponytail: an entry added while shuffle is on lands at its hash
-    /// position, which may be behind the current track, so this pass can
-    /// miss it. Toggling shuffle off and on reshuffles what is ahead.
+    /// An entry added while shuffle is on would land at its hash position,
+    /// possibly behind the current track; `Session::enqueue` reshuffles so
+    /// it cannot.
     pub fn playback_order(&self) -> Vec<QueueEntryId> {
         let mut ids: Vec<QueueEntryId> = self.queue.entries().iter().map(|e| e.id()).collect();
         if let Some(shuffle) = self.shuffle {

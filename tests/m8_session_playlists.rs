@@ -532,3 +532,36 @@ fn removing_the_playing_cursor_while_another_playlist_loads_leaves_that_load_val
     );
     assert_eq!(session.state().playing(), b);
 }
+
+#[test]
+fn adding_to_a_shuffled_playlist_reshuffles_with_the_cursor_first() {
+    let mut two = two();
+    adopt(&mut two.session, two.in_a[1], "a2", 1);
+    two.session.set_shuffle(two.a, Some(99)).expect("A exists");
+
+    let names: Vec<String> = (0..20).map(|n| format!("new{n}")).collect();
+    let (added, _) = two
+        .session
+        .enqueue(two.a, names.iter().map(|name| entry(name)).collect())
+        .expect("fits");
+
+    let playlist = two.session.state().playlist(two.a).expect("A");
+    let shuffle = playlist.shuffle().expect("still shuffled");
+    assert_ne!(shuffle.seed, 99, "a new order, not the old one patched");
+    assert_eq!(shuffle.first, Some(two.in_a[1]));
+    let order = playlist.playback_order();
+    assert_eq!(order[0], two.in_a[1]);
+    assert!(
+        added.iter().all(|id| order[1..].contains(id)),
+        "every added track lies ahead of the playing one"
+    );
+
+    two.session
+        .enqueue(two.b, vec![entry("plain")])
+        .expect("fits");
+    assert_eq!(
+        two.session.state().playlist(two.b).expect("B").shuffle(),
+        None,
+        "an unshuffled playlist stays unshuffled"
+    );
+}

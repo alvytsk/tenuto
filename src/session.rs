@@ -32,7 +32,7 @@ use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDispo
 use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
-use crate::playlist::{Playlist, PlaylistError, PlaylistId, Shuffle};
+use crate::playlist::{Playlist, PlaylistError, PlaylistId, Shuffle, splitmix64};
 use crate::queue::{
     Direction, DisplayDuration, DurationSource, NewQueueEntry, Queue, QueueEntryId, QueueError,
     QueueSource,
@@ -418,12 +418,27 @@ impl Session {
     /// Enqueues `batch` all-or-nothing into `dest`. `Ordinary` submit on
     /// success; the queue is untouched on failure, so nothing is submitted
     /// for it. Touches neither adoption nor any pending load's target.
+    ///
+    /// A shuffled `dest` is reshuffled with its cursor pinned first, so
+    /// every added track lies ahead of the playing one; tracks already
+    /// played this pass come round again. The next seed is derived from the
+    /// old one, which keeps `Session` free of a randomness source.
     pub fn enqueue(
         &mut self,
         dest: PlaylistId,
         batch: Vec<NewQueueEntry>,
     ) -> Result<(Vec<QueueEntryId>, Action), QueueError> {
         let ids = self.state.enqueue(dest, batch)?;
+        if !ids.is_empty()
+            && let Some(playlist) = self.state.playlist_mut(dest)
+            && let Some(shuffle) = playlist.shuffle()
+        {
+            let first = playlist.queue().active();
+            playlist.set_shuffle(Some(Shuffle {
+                seed: splitmix64(shuffle.seed),
+                first,
+            }));
+        }
         Ok((ids, self.submit(Urgency::Ordinary)))
     }
 
