@@ -302,7 +302,7 @@ fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
 }
 
 #[test]
-fn removing_a_cursor_nothing_adopted_only_clears_it() {
+fn removing_an_inactive_playlists_cursor_only_clears_it() {
     // B's cursor exists because B played earlier; A plays now.
     let mut two = two();
     adopt(&mut two.session, two.in_b[0], "b1", 1);

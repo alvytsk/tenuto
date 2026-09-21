@@ -377,14 +377,11 @@ fn run_loop(
         // A finished folder walk belongs to the application, not the
         // browser that asked for it (M8 §8): it lands here even if the
         // browser has since closed or moved to another directory.
-        let trees = browsing.poll();
-        let landed_a_tree = !trees.is_empty();
-        for tree in trees {
+        // No `take_selection_hint` here: only a removal ever sets one
+        // (`PlayerRuntime::apply_removal`), and the unconditional
+        // `ui.reconcile` below covers what an add changes.
+        for tree in browsing.poll() {
             runtime.handle(AppCommand::AddTree(tree));
-        }
-        if landed_a_tree {
-            let hint = runtime.take_selection_hint();
-            ui.reconcile(&runtime.view(), hint);
         }
         // Every pass, so the worker's one-slot result channel never stalls it.
         artwork.poll(runtime);
@@ -1054,7 +1051,7 @@ mod tests {
 
         let mut browsing = Browsing {
             state: Some(BrowserState::new(dir.path().to_path_buf(), dest)),
-            worker: None,
+            worker: Some(BrowseWorker::spawn(None)),
         };
         browsing.request(BrowseRequest::CollectTree {
             roots: vec![dir.path().to_path_buf()],
@@ -1087,7 +1084,7 @@ mod tests {
 
         let mut browsing = Browsing {
             state: Some(BrowserState::new(asked_dir.path().to_path_buf(), dest)),
-            worker: None,
+            worker: Some(BrowseWorker::spawn(None)),
         };
         browsing.request(BrowseRequest::CollectTree {
             roots: vec![asked_dir.path().to_path_buf()],

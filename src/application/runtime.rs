@@ -1071,7 +1071,7 @@ impl PlayerRuntime {
     /// playlists may have grown while the worker walked.
     fn add_tree(&mut self, tree: TreeCollected) {
         for path in &tree.unreadable {
-            tracing::warn!(path = %path.display(), "folder add: directory could not be read");
+            tracing::warn!(path = ?path, "folder add: directory could not be read");
         }
         let Some(playlist) = self.session.state().playlist(tree.dest) else {
             self.status = Some("Playlist was deleted; nothing added".to_owned());
@@ -1188,6 +1188,12 @@ impl PlayerRuntime {
                 if owning {
                     self.router.cancel();
                 }
+                // ponytail: `MetadataWorkers` can only cancel everything, so
+                // this drops the backlog and re-offers every untitled entry
+                // below. Ceiling: clearing one playlist re-walks the others'
+                // pending probes, and each re-request costs a probe that was
+                // already queued. Upgrade path: per-media cancel in
+                // `MetadataWorkers`, so only this playlist's jobs go.
                 if let Some(workers) = &self.metadata {
                     workers.cancel_all();
                 }

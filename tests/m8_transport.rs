@@ -104,6 +104,26 @@ fn space_and_play_never_load_the_viewed_selection() {
                 TransportDecision::Load(in_playing[0]),
                 "{phase:?} {input:?}: first in playback order"
             );
+            // The harder case: the selection is a *mid-list* row of the
+            // navigation playlist itself, with no cursor. Space and `p`
+            // still start at the first entry in playback order — a fallback
+            // to the selection would be invisible if the selection were the
+            // first row or lived in another playlist.
+            assert_eq!(
+                decide(
+                    input,
+                    &TransportSituation {
+                        navigation: &playing,
+                        viewed: &playing,
+                        selected: Some(in_playing[1]),
+                        phase,
+                        retry: None,
+                        live: false,
+                    },
+                ),
+                TransportDecision::Load(in_playing[0]),
+                "{phase:?} {input:?}: a mid-list selection is not a start point"
+            );
         }
     }
 }
@@ -222,12 +242,33 @@ fn next_and_previous_step_from_the_cursor_in_playback_order_and_stop_at_the_ends
         "a boundary does not disturb playback"
     );
     let mut ids = IdAllocator::default();
-    let (no_cursor, _) = playlist(1, &["a", "b"], None, None, &mut ids);
+    let (no_cursor, in_no_cursor) = playlist(1, &["a", "b", "c"], None, None, &mut ids);
     assert_eq!(
         at(&no_cursor, TransportInput::Next),
         TransportDecision::Nothing,
         "no anchor, no step"
     );
+    // A mid-list selection in the navigation playlist itself: still nothing.
+    // Anything but `Nothing` here means the pre-M8 selection fallback came
+    // back, and the middle row is the only one that shows it — stepping from
+    // the first row and stepping from no anchor both look like a boundary.
+    for input in [TransportInput::Next, TransportInput::Previous] {
+        assert_eq!(
+            decide(
+                input,
+                &TransportSituation {
+                    navigation: &no_cursor,
+                    viewed: &no_cursor,
+                    selected: Some(in_no_cursor[1]),
+                    phase: PlaybackPhase::Playing,
+                    retry: None,
+                    live: false,
+                },
+            ),
+            TransportDecision::Nothing,
+            "{input:?}: the selection is not an anchor"
+        );
+    }
 }
 
 #[test]

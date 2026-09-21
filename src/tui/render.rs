@@ -88,29 +88,29 @@ const RESIZE_HINTS: &str = "space play · q quit";
 /// Verbatim per the design (§4/§7): confirming discards the queue, not
 /// listening history.
 const CONFIRM_CLEAR_TEXT: &str = "Clear the queue? Listening history is kept. y to confirm";
-/// The §7 key table, one line per row.
-const HELP_LINES: [&str; 22] = [
+/// The §7 key table, one line per row. Kept to the height it had before M8
+/// (19 lines, 21 rows with the border) by pairing related keys: a classic
+/// 80x24 terminal loses two rows to a multiplexer's status line, and the
+/// last lines here are the ones a listener most needs.
+const HELP_LINES: [&str; 19] = [
     "Space           Pause/resume; unloaded/ended behavior follows §4",
     "Enter           Play selected queue entry",
-    "Up/Down or j/k  Move selection",
-    "J/K             Move selected entry down/up",
-    "Left/Right      Seek backward/forward 10 seconds",
-    "Home            Explicit restart from beginning",
+    "Up/Down or j/k  Move selection; J/K move the selected entry",
+    "Left/Right      Seek backward/forward 10 seconds; Home restarts",
     "- _ / + =       Decrease / increase volume",
     "s / p           Stop / play",
     "[ / ]           Previous / next queue entry",
     "d               Remove selected entry",
     "b               Open/close browser",
+    "  in Files      Enter opens or adds · a adds the whole folder",
     "  in Podcasts   a subscribe · r/R refresh one/all · d unsubscribe",
     "a               Open path/URL input",
     "c               Clear this playlist, with confirmation",
     "Tab/Shift-Tab   Next / previous playlist",
     "n / r / D       New / rename / delete playlist",
     "z               Shuffle this playlist",
-    "?               Show help",
-    "m               Toggle mouse capture",
-    "Ctrl-L          Redraw the whole view",
-    "Esc             Close the active overlay or cancel input",
+    "m / Ctrl-L      Toggle mouse capture / redraw the whole view",
+    "? / Esc         Show help / close the overlay or cancel input",
     "q / Ctrl-C      Graceful quit",
 ];
 const NOTHING_PLAYING: &str = "Nothing playing";

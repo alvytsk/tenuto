@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a` adds the marked rows — or the row under the cursor — recursively, in
   the browser's own listing order. Directory symlinks are skipped, even
   when selected directly as a root.
-- Rows read `Artist – Title`, with the album below.
+- Rows read `Artist – Title`, with the album below. Rows whose title line
+  did not take the artist up — a podcast episode, or a file with no title
+  tag — are unchanged, and still read `Artist · Album` underneath.
 - Live HTTP radio. An Icecast or Shoutcast v2 stream plays without a
   position bar, from `tenuto play <url>` or the queue. It cannot seek or
   restart and is never resumed: pausing closes the connection and playing

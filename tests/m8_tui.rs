@@ -1,7 +1,8 @@
 //! M8 §10: the playlist keys, the overlays that act on the playlist they
 //! captured when they opened — not on whatever is viewed at confirm time —
 //! and the drawn tab strip: the budget it is given inside the queue border,
-//! the Minimal tier's row of its own, and what a hostile name renders as.
+//! the Minimal tier's row of its own, and what a hostile name renders as —
+//! plus the height the help overlay has to stay inside.
 
 #[path = "support/runtime.rs"]
 mod runtime;
@@ -303,4 +304,34 @@ fn a_hostile_playlist_name_reaches_the_strip_defused() {
         "no control character reaches the terminal: {row:?}"
     );
     assert!(row.contains(r"Jazz\u{1b}[31m\u{7}"), "{row}");
+}
+
+/// The help overlay must still fit the terminal it fitted before M8: 19
+/// lines plus a border is 21 rows, and its widest line (the Podcasts one, 67
+/// bytes — `draw_help_overlay` measures with `str::len`) plus the border and
+/// padding is 71 columns. At 71x21 the last line, the one that says how to
+/// leave, has to be on screen.
+#[test]
+fn the_help_overlay_still_shows_its_quit_line_at_the_size_it_fitted_before_m8() {
+    let mut ui = UiState::new(false);
+    ui.overlay = Overlay::Help;
+    let mut terminal = Terminal::new(TestBackend::new(71, 21)).expect("backend");
+    terminal
+        .draw(|frame| {
+            draw(frame, &views::sample_view(), &ui, &Visuals::default());
+        })
+        .expect("draw");
+    let buffer: Buffer = terminal.backend().buffer().clone();
+    let rendered: String = buffer
+        .content()
+        .chunks(71)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for line in ["q / Ctrl-C", "? / Esc", "z ", "Tab/Shift-Tab", "n / r / D"] {
+        assert!(
+            rendered.contains(line),
+            "the overlay lost {line:?} at 71x21\n{rendered}"
+        );
+    }
 }

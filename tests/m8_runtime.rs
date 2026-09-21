@@ -1,5 +1,7 @@
 //! M8 §5, §7, §10: the runtime's viewed playlist, the playlist commands and
-//! the side effects scoped to the playlist they touch.
+//! the side effects scoped to the playlist they touch — including what a
+//! folder add costs the metadata workers (§5, §8) and the one navigation
+//! exception a pending load makes (P5).
 
 #[path = "support/runtime.rs"]
 mod runtime;
@@ -245,7 +247,7 @@ fn a_restored_inactive_playlist_is_enriched_on_the_first_pump() {
 }
 
 #[test]
-fn neither_an_unowned_removal_nor_another_playlists_clear_cancels_a_standing_seek() {
+fn another_playlists_clear_does_not_cancel_a_standing_seek() {
     let mut rig = rig_with(PersistedState::default());
     let first = rig.runtime.viewed();
     rig.runtime.handle(AppCommand::Enqueue {
@@ -508,4 +510,53 @@ fn one_pump_applies_at_most_a_bounded_batch_of_results() {
         titled <= MAX_ENRICHMENT_PER_PUMP,
         "one pump applied {titled} results, more than the {MAX_ENRICHMENT_PER_PUMP} bound"
     );
+}
+
+/// Spec P5's one exception: while a load is in flight, next/previous follow
+/// the *requested* entry's playlist, not the one that is still playing. A
+/// is playing; Enter on B's first row leaves a load pending; `Next` must
+/// then step to B's second row. Wired in `runtime::decide`; nothing else
+/// drives it.
+#[test]
+fn during_loading_next_steps_inside_the_requested_playlist_not_the_playing_one() {
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(FIVE.into())],
+    });
+    let in_a = row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(in_a));
+    pump_until(&mut rig.runtime, "A is playing", |view| {
+        view.active == Some(in_a)
+    });
+
+    rig.runtime
+        .handle(AppCommand::CreatePlaylist("Jazz".into()));
+    let jazz = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: jazz,
+        items: vec![
+            EnqueueItem::Path(SHORT.into()),
+            EnqueueItem::Path(FIVE.into()),
+        ],
+    });
+    let in_b = row_ids(&rig.runtime);
+
+    // Not pumped in between: the load registered here is still pending, so
+    // the phase is `Loading` and `last_requested` is B's first row.
+    rig.runtime.handle(AppCommand::PlayEntry(in_b[0]));
+    assert!(
+        rig.runtime.session().pending_load_count() > 0,
+        "precondition: a load is in flight"
+    );
+    assert_eq!(rig.runtime.view().last_requested, Some(in_b[0]));
+
+    rig.runtime.handle(AppCommand::Next);
+    assert_eq!(
+        rig.runtime.view().last_requested,
+        Some(in_b[1]),
+        "Next anchored on the playing playlist instead of the loading one"
+    );
+    let _ = rig.runtime.shutdown();
 }

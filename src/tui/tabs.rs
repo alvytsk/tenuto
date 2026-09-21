@@ -28,6 +28,10 @@ fn label(tab: &PlaylistTab) -> String {
 }
 
 /// `text` cut to `width` columns, ending in `…` when anything was cut.
+///
+/// ponytail: walks `char`s, not grapheme clusters, so a cut can land between
+/// a base character and its combining mark. Upgrade path: `unicode-segmentation`
+/// — a new dependency for a playlist name, hence deferred.
 fn clip(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_owned();
