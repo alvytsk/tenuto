@@ -1572,3 +1572,51 @@ fn enter_on_an_unqueued_station_enqueues_it() {
         .unwrap_or_else(|| panic!("no row for the station: {text}"));
     assert!(line.contains('✓'), "the row now draws a tick: {line}");
 }
+
+#[test]
+fn a_directory_holding_a_queued_file_draws_the_tick() {
+    let (_dir, root) = sample_dir();
+    let mut state = listed(&root);
+    let ids = views::ids();
+    let deep = listed(&root.join("z")).entries[0]
+        .media
+        .clone()
+        .unwrap_or_else(|| panic!("audio has an identity"));
+    let a_flac = state.entries[1]
+        .media
+        .clone()
+        .unwrap_or_else(|| panic!("audio has an identity"));
+    assert_eq!(state.entries[0].name, "z");
+
+    state.sync_queue(&[queue_row(ids[0], deep)]);
+    assert!(state.ticked(0), "z/ holds a queued file");
+    assert!(!state.ticked(1));
+    assert!(
+        state.queued_at(0).is_none(),
+        "a directory is never removable"
+    );
+
+    // A file beside the directory says nothing about what is inside it.
+    state.sync_queue(&[queue_row(ids[0], a_flac)]);
+    assert!(!state.ticked(0));
+    assert!(state.ticked(1));
+}
+
+#[test]
+fn a_listing_longer_than_the_overlay_gets_a_scrollbar_on_its_border() {
+    let (_dir, root) = sample_dir();
+    assert!(!screen(&listed(&root)).0.contains('┃'), "four rows fit");
+    for n in 0..60 {
+        std::fs::write(root.join(format!("t{n:02}.flac")), b"x")
+            .unwrap_or_else(|error| panic!("write: {error}"));
+    }
+    let (text, _) = screen(&listed(&root));
+    let line = text
+        .lines()
+        .find(|line| line.contains('┃'))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.trim_end().ends_with('┃'),
+        "the thumb sits on the right border: {line}"
+    );
+}

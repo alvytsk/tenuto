@@ -523,3 +523,49 @@ fn the_open_browser_takes_every_key_but_ctrl_c_and_ctrl_l() {
     ));
     assert_eq!(ui.overlay, Overlay::Browser);
 }
+
+#[test]
+fn clicking_a_playlist_tab_views_that_playlist() {
+    let mut view = sample_view();
+    let other = tenuto::playlist::PlaylistId::from_raw_for_tests(77);
+    view.tabs.push(tenuto::application::view::PlaylistTab {
+        id: other,
+        name: "Road".into(),
+        playing: false,
+        shuffled: false,
+    });
+    let hits = draw_hits(&view, &UiState::new(true));
+    assert_eq!(hits.tabs.len(), 2);
+    assert!(
+        hits.tabs[0].0.right() <= hits.tabs[1].0.x,
+        "labels do not overlap"
+    );
+    let rect = hits
+        .tabs
+        .iter()
+        .find(|(_, id)| *id == other)
+        .expect("tab")
+        .0;
+    let (col, row) = centre(rect);
+    let mut ui = UiState::new(true);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    assert!(matches!(app(&effects)[..], [AppCommand::View(id)] if *id == other));
+}
+
+#[test]
+fn clicking_the_shuffle_button_toggles_shuffle_like_z() {
+    let view = sample_view();
+    let hits = draw_hits(&view, &UiState::new(true));
+    let rect = hits
+        .buttons
+        .iter()
+        .find(|(_, b)| *b == TransportButton::Shuffle)
+        .expect("shuffle button")
+        .0;
+    let (col, row) = centre(rect);
+    let mut ui = UiState::new(true);
+    let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let pressed = handle_key(KeyEvent::from(KeyCode::Char('z')), &mut ui, &view);
+    assert!(matches!(app(&clicked)[..], [AppCommand::ToggleShuffle(id)] if *id == view.viewed));
+    assert_eq!(app(&clicked).len(), app(&pressed).len());
+}

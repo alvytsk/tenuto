@@ -167,6 +167,7 @@ pub enum AppCommand {
     ToggleShuffle(PlaylistId),
     ViewNext,
     ViewPrevious,
+    View(PlaylistId),
 }
 
 /// What the final flush is reported as.
@@ -557,6 +558,11 @@ impl PlayerRuntime {
             AppCommand::ToggleShuffle(id) => self.toggle_shuffle(id),
             AppCommand::ViewNext => self.step_view(1),
             AppCommand::ViewPrevious => self.step_view(-1),
+            AppCommand::View(id) => {
+                if self.session.state().playlist(id).is_some() {
+                    self.viewed = id;
+                }
+            }
         }
     }
 

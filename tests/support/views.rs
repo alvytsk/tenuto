@@ -21,8 +21,13 @@ use tenuto::queue::{
 
 /// The ids a fresh queue assigns to three entries; the same on every call.
 pub fn ids() -> Vec<QueueEntryId> {
+    ids_for(&["a", "b", "c"])
+}
+
+/// The ids a fresh queue assigns to `names`, in order.
+pub fn ids_for(names: &[&str]) -> Vec<QueueEntryId> {
     let mut queue = Queue::default();
-    let entries = ["a", "b", "c"]
+    let entries = names
         .iter()
         .map(|name| {
             let path = AbsolutePath::new(format!("/music/{name}.flac").into())
@@ -37,7 +42,7 @@ pub fn ids() -> Vec<QueueEntryId> {
         .collect();
     queue
         .enqueue(entries, &mut IdAllocator::default())
-        .unwrap_or_else(|error| panic!("three entries fit: {error}"))
+        .unwrap_or_else(|error| panic!("the entries fit: {error}"))
 }
 
 /// The identity `ids()` gave entry `name`.

@@ -9,7 +9,8 @@
 //! another directory, feed or tab empties the list and marks it loading, and
 //! an answer for anywhere else is dropped.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -83,6 +84,9 @@ pub struct BrowserState {
     /// [`sync_queue`](Self::sync_queue): a queued row draws a tick and Enter
     /// removes it instead of adding it again.
     pub queued: HashMap<MediaId, QueueEntryId>,
+    /// The names of `cwd`'s subdirectories that hold a queued file at any
+    /// depth, as of the same sync: such a directory draws the tick too.
+    queued_dirs: HashSet<OsString>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,13 +124,49 @@ impl BrowserState {
             pending: None,
             notice: None,
             queued: HashMap::new(),
+            queued_dirs: HashSet::new(),
         }
     }
 
     /// Records which media the queue holds; with duplicates, the later row
     /// is the one Enter removes.
+    ///
+    /// ponytail: a queued file is matched to a directory by its canonical
+    /// path, so a directory reached through a symlink never draws the tick.
+    /// And this runs every frame over the whole playlist; rebuild only when
+    /// the rows change if a 4,096-row playlist ever makes the browser lag.
     pub fn sync_queue(&mut self, rows: &[QueueRow]) {
         self.queued = rows.iter().map(|row| (row.media.clone(), row.id)).collect();
+        self.queued_dirs.clear();
+        for row in rows {
+            let MediaId::LocalFile(path) = &row.media else {
+                continue;
+            };
+            let Ok(below) = path.as_path().strip_prefix(&self.cwd) else {
+                continue;
+            };
+            let mut parts = below.components();
+            // Two components or more: the first is a subdirectory of `cwd`.
+            if let (Some(first), Some(_)) = (parts.next(), parts.next())
+                && !self.queued_dirs.contains(first.as_os_str())
+            {
+                self.queued_dirs.insert(first.as_os_str().to_owned());
+            }
+        }
+    }
+
+    /// Whether row `index` draws the tick: it is queued, or it is a
+    /// directory with a queued file somewhere inside.
+    pub fn ticked(&self, index: usize) -> bool {
+        self.queued_at(index).is_some()
+            || (self.tab == BrowserTab::Files
+                && self.entries.get(index).is_some_and(|entry| {
+                    entry.kind == EntryKind::Directory
+                        && entry
+                            .path
+                            .file_name()
+                            .is_some_and(|name| self.queued_dirs.contains(name))
+                }))
     }
 
     /// The queue entry row `index` is already in, if any.

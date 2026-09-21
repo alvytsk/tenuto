@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shuffle, per playlist, with `z`. The list keeps its order on screen;
   next, previous and end-of-track follow one shuffled order that survives a
   restart. Turning it off continues in list order from the current track.
+- A `SHFL` shuffle button beside the transport buttons, lit while the viewed
+  playlist is shuffled; playlist tabs are clickable; and a playlist or a
+  browser listing longer than its pane shows a scrollbar on its border.
+- Adding to a shuffled playlist reshuffles it with the current track first,
+  so every added track is still ahead on this pass.
+- In the Files tab a directory draws the `✓` when the destination playlist
+  holds a file from anywhere inside it.
 - Adding a folder from the Files tab: Space now marks directories too, and
   `a` adds the marked rows — or the row under the cursor — recursively, in
   the browser's own listing order. Directory symlinks are skipped, even

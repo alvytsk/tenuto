@@ -232,7 +232,7 @@ fn the_strip_shares_the_queue_border_with_the_track_count() {
     three.viewed = PlaylistId::from_raw_for_tests(3);
     assert_eq!(
         border_row(&screen(&three, 100, 30)),
-        "  ┌ ▶Default  Morning Coffee Selection ⤮  Evening Wind Down ─────────────────────────── 3 tracks ┐"
+        "  ┌ ▶Default  Morning Coffee Selection ·shfl  Evening Wind Down ─────────────────────── 3 tracks ┐"
     );
 }
 

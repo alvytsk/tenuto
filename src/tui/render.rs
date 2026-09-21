@@ -11,13 +11,17 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{
+    Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget,
+    Widget, Wrap,
+};
 use unicode_width::UnicodeWidthStr;
 
 use crate::application::transport::PlaybackPhase;
 use crate::application::view::{NowPlaying, PersistenceStatus, PlayerView, QueueRow, format_saved};
 use crate::media::display::format_hms;
 use crate::playback::provenance::PositionProvenance;
+use crate::playlist::PlaylistId;
 use crate::queue::{DisplayDuration, DurationSource, QueueEntryId};
 use crate::tui::browser::BrowserState;
 use crate::tui::layout::{
@@ -60,6 +64,9 @@ pub struct HitMap {
     /// The bar alone, so a click's column maps to a fraction of the track.
     pub progress: Rect,
     pub buttons: Vec<(Rect, TransportButton)>,
+    /// Each label of the playlist tab strip; empty in the Minimal tier,
+    /// whose compact strip names only the viewed playlist.
+    pub tabs: Vec<(Rect, PlaylistId)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +77,8 @@ pub enum TransportButton {
     Stop,
     SeekForward,
     Next,
+    /// Toggles shuffle on the viewed playlist, as `z` does.
+    Shuffle,
 }
 
 const EMPTY_QUEUE: &str = "Queue is empty — press b to browse or a to add";
@@ -131,7 +140,7 @@ const PEAK_CAP: &str = "─";
 const VOLUME_COLUMNS: usize = 10;
 /// The transport row width below which the compact tier has no slider: the
 /// buttons, `reconnecting…` and the slider would no longer fit.
-const SLIDER_MIN_ROW: u16 = 64;
+const SLIDER_MIN_ROW: u16 = 71;
 const MARKER_COLUMNS: u16 = 2;
 const NUMBER_COLUMNS: u16 = 4;
 /// Rows below the last entry, like an editor past the end of a file.
@@ -178,7 +187,8 @@ pub fn draw(
     }
     let buttons = draw_transport(buffer, regions.transport, view, tier, slider, &theme);
     let progress = draw_progress(buffer, &regions, view, tier, &theme);
-    let rows = draw_queue(buffer, regions.queue, view, ui, tier, &theme);
+    let mut tabs = Vec::new();
+    let rows = draw_queue(buffer, regions.queue, view, ui, tier, &theme, &mut tabs);
     draw_footer(buffer, regions.footer, view, &theme);
     draw_overlay(buffer, area, view, ui, visuals.browser, &theme);
     HitMap {
@@ -186,6 +196,7 @@ pub fn draw(
         queue: regions.queue,
         progress,
         buttons,
+        tabs,
     }
 }
 
@@ -570,6 +581,7 @@ fn draw_transport(
         (" ■ ", TransportButton::Stop),
         (" ▶▶ ", TransportButton::SeekForward),
         (" ▶ǀ ", TransportButton::Next),
+        (" SHFL ", TransportButton::Shuffle),
     ];
     let mut rest = area;
     if slider {
@@ -577,7 +589,7 @@ fn draw_transport(
     }
     let mut buttons = Vec::with_capacity(labels.len());
     for (label, button) in labels {
-        let style = button_style(button, theme);
+        let style = button_style(button, view, theme);
         // `‖` and `ǀ` are the bars fonts centre in their cell; bold gives
         // them the weight of the triangles beside them.
         let line: Line = label
@@ -624,9 +636,15 @@ fn draw_volume(buffer: &mut Buffer, rest: &mut Rect, view: &PlayerView, theme: &
     line.render(slider, buffer);
 }
 
-fn button_style(button: TransportButton, theme: &Theme) -> Style {
+fn button_style(button: TransportButton, view: &PlayerView, theme: &Theme) -> Style {
+    let shuffled = view
+        .tabs
+        .iter()
+        .any(|tab| tab.id == view.viewed && tab.shuffled);
     match button {
         TransportButton::PlayPause => Style::new().bg(theme.green).fg(theme.ink),
+        // Lit while the viewed playlist is shuffled, as Winamp's is.
+        TransportButton::Shuffle if shuffled => Style::new().bg(theme.amber).fg(theme.ink),
         _ => Style::new().bg(theme.panel).fg(theme.text),
     }
 }
@@ -803,6 +821,7 @@ fn draw_queue(
     ui: &UiState,
     tier: Tier,
     theme: &Theme,
+    tab_hits: &mut Vec<(Rect, PlaylistId)>,
 ) -> Vec<(Rect, QueueEntryId)> {
     let body = if tier == Tier::Minimal {
         // No border to put the strip in: its first row carries the compact
@@ -823,8 +842,17 @@ fn draw_queue(
         // The strip sits where ` QUEUE ` did: inside the corners, with a
         // column of air at each end, and clear of the right-aligned count.
         let room = usize::from(area.width).saturating_sub(4 + count.width());
+        let labels = tabs::strip(&view.tabs, view.viewed, room);
+        // The title starts a column inside the corner and `tab_strip` leads
+        // with a space, so the first label sits two columns in.
+        let mut x = area.x.saturating_add(2);
+        for label in &labels {
+            let width = u16::try_from(label.text.width()).unwrap_or(u16::MAX);
+            tab_hits.push((Rect::new(x, area.y, width, 1), label.id));
+            x = x.saturating_add(width + tabs::GAP.len() as u16);
+        }
         bordered(theme)
-            .title(tab_strip(view, room, theme))
+            .title(tab_strip(labels, theme))
             .title(Line::styled(count, Style::new().fg(theme.muted)).right_aligned())
             .render(area, buffer);
         queue_body(area)
@@ -839,6 +867,11 @@ fn draw_queue(
         .and_then(|id| view.rows.iter().position(|row| row.id == id));
     let capacity = usize::from(body.height);
     let window = visible_rows(view.rows.len(), ui.queue_offset, selected, capacity);
+    if tier != Tier::Minimal {
+        // On the right border, beside the rows; Minimal has no border.
+        let track = Rect::new(area.right().saturating_sub(1), body.y, 1, body.height);
+        draw_scrollbar(buffer, track, view.rows.len(), window.start, theme);
+    }
     let mut hits = Vec::with_capacity(window.len());
     let mut y = body.y;
     for index in window {
@@ -867,14 +900,32 @@ fn draw_queue(
     hits
 }
 
+/// A thumb down `track` — one column, a list's right border — when `total`
+/// rows overflow it, placed by the first visible row `start`. Display only:
+/// nothing here is clickable. The border stays the track.
+fn draw_scrollbar(buffer: &mut Buffer, track: Rect, total: usize, start: usize, theme: &Theme) {
+    let capacity = usize::from(track.height);
+    if capacity == 0 || total <= capacity {
+        return;
+    }
+    // One position per possible first row, so the thumb reaches both ends.
+    let mut state = ScrollbarState::new(total - capacity + 1)
+        .position(start)
+        .viewport_content_length(capacity);
+    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(None)
+        .thumb_symbol("┃")
+        .thumb_style(Style::new().fg(theme.text))
+        .render(track, buffer, &mut state);
+}
+
 /// The playlist tabs as a border title: the viewed one bold and cream, the
 /// playing one in the text colour, the rest muted (§10).
-fn tab_strip(view: &PlayerView, room: usize, theme: &Theme) -> Line<'static> {
+fn tab_strip(labels: Vec<tabs::TabLabel>, theme: &Theme) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
-    for (index, label) in tabs::strip(&view.tabs, view.viewed, room)
-        .into_iter()
-        .enumerate()
-    {
+    for (index, label) in labels.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw(tabs::GAP));
         }

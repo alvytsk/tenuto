@@ -217,7 +217,8 @@ fn the_hit_map_covers_visible_rows_the_progress_bar_and_transport() {
             TransportButton::PlayPause,
             TransportButton::Stop,
             TransportButton::SeekForward,
-            TransportButton::Next
+            TransportButton::Next,
+            TransportButton::Shuffle
         ]
     );
     for pair in hits.buttons.windows(2) {
@@ -796,4 +797,49 @@ mod spectrum_display {
             assert!(!wants_analysis(normal, phase), "{phase:?}");
         }
     }
+}
+
+/// The column of the queue's right border, top to bottom.
+fn queue_border(view: &PlayerView, ui: &UiState) -> String {
+    let (buffer, hits) = render(view, ui, &Visuals::default(), 100, 30);
+    let x = hits.queue.right() - 1;
+    (hits.queue.y..hits.queue.bottom())
+        .map(|y| buffer[(x, y)].symbol().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_playlist_longer_than_its_pane_gets_a_scrollbar_that_follows_the_selection() {
+    let short = view(PlaybackPhase::Unloaded, None);
+    assert!(
+        !queue_border(&short, &UiState::new(true)).contains('┃'),
+        "three rows fit: no scrollbar"
+    );
+
+    let mut long = view(PlaybackPhase::Unloaded, None);
+    let template = long.rows[0].clone();
+    let names: Vec<String> = (0..300).map(|n| format!("t{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    long.rows = views::ids_for(&names)
+        .into_iter()
+        .map(|id| {
+            let mut row = template.clone();
+            row.id = id;
+            row
+        })
+        .collect();
+    let mut ui = UiState::new(true);
+    ui.selected = Some(long.rows[0].id);
+    let top = queue_border(&long, &ui);
+    ui.selected = Some(long.rows[299].id);
+    let bottom = queue_border(&long, &ui);
+
+    let thumb = |column: &str| column.chars().position(|c| c == '┃');
+    // Row 0 of the column is the corner; the thumb starts right under it.
+    assert_eq!(thumb(&top), Some(1), "{top}");
+    assert!(thumb(&bottom) > thumb(&top), "{bottom}");
+    assert!(
+        bottom.ends_with(['┘', '╯']),
+        "the corner survives: {bottom}"
+    );
 }

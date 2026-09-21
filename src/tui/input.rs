@@ -103,7 +103,7 @@ pub fn handle_mouse(
     }
 }
 
-/// A transport button first, then a queue row — selecting it, or on the
+/// A playlist tab first, then a transport button, then a queue row — selecting it, or on the
 /// already-selected row, playing it — then the progress bar.
 fn left_click(
     event: MouseEvent,
@@ -112,8 +112,11 @@ fn left_click(
     view: &PlayerView,
 ) -> Vec<Effect> {
     let point = (event.column, event.row).into();
+    if let Some((_, id)) = hits.tabs.iter().find(|(rect, _)| rect.contains(point)) {
+        return vec![Effect::App(AppCommand::View(*id))];
+    }
     if let Some((_, button)) = hits.buttons.iter().find(|(rect, _)| rect.contains(point)) {
-        return vec![transport_effect(*button)];
+        return vec![transport_effect(*button, view)];
     }
     if let Some((_, id)) = hits.rows.iter().find(|(rect, _)| rect.contains(point)) {
         return if ui.selected == Some(*id) {
@@ -128,7 +131,7 @@ fn left_click(
         .collect()
 }
 
-fn transport_effect(button: TransportButton) -> Effect {
+fn transport_effect(button: TransportButton, view: &PlayerView) -> Effect {
     Effect::App(match button {
         TransportButton::Previous => AppCommand::Previous,
         TransportButton::SeekBack => AppCommand::SeekBy(-SEEK_STEP),
@@ -136,6 +139,7 @@ fn transport_effect(button: TransportButton) -> Effect {
         TransportButton::PlayPause => AppCommand::PlayPause,
         TransportButton::Stop => AppCommand::Stop,
         TransportButton::Next => AppCommand::Next,
+        TransportButton::Shuffle => AppCommand::ToggleShuffle(view.viewed),
     })
 }
 

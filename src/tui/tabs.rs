@@ -8,11 +8,14 @@ use crate::application::view::PlaylistTab;
 use crate::playlist::PlaylistId;
 
 pub const PLAYING_MARK: &str = "▶";
-pub const SHUFFLE_MARK: &str = " ⤮";
+/// Letters, not a glyph: no monospace font carries a shuffle sign, and one
+/// drawn from a fallback font drifts off the cell grid or comes out tiny.
+pub const SHUFFLE_MARK: &str = " ·shfl";
 pub const GAP: &str = "  ";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TabLabel {
+    pub id: PlaylistId,
     pub text: String,
     pub viewed: bool,
     pub playing: bool,
@@ -74,6 +77,7 @@ pub fn strip(tabs: &[PlaylistTab], viewed: PlaylistId, width: usize) -> Vec<TabL
     }
     (start..end)
         .map(|index| TabLabel {
+            id: tabs[index].id,
             text: clip(&texts[index], width),
             // `at` is the viewed tab, or the first tab for an ID that is gone.
             viewed: index == at,
@@ -124,7 +128,10 @@ mod tests {
             tab(3, "Workout", true, true),
         ];
         let labels = strip(&tabs, PlaylistId::from_raw_for_tests(2), 80);
-        assert_eq!(texts(&labels), ["Default", "Morning ⤮", "▶Workout ⤮"]);
+        assert_eq!(
+            texts(&labels),
+            ["Default", "Morning ·shfl", "▶Workout ·shfl"]
+        );
         assert_eq!(
             labels
                 .iter()
@@ -192,7 +199,7 @@ mod tests {
         ];
         assert_eq!(
             compact(&tabs, PlaylistId::from_raw_for_tests(2), 40),
-            "▶Morning ⤮ 2/2"
+            "▶Morning ·shfl 2/2"
         );
         assert!(compact(&tabs, PlaylistId::from_raw_for_tests(2), 8).width() <= 8);
     }

@@ -97,7 +97,7 @@ The player restores every playlist, the playing one's active entry, the volume a
 | Esc | Close the open overlay or cancel typing |
 | `q`, Ctrl-C | Quit |
 
-With the mouse on, a click selects a row of the viewed playlist, a second click plays it, the wheel scrolls it, the transport buttons work, and a click on the progress bar seeks. `tenuto tui --mouse off` leaves the mouse to the terminal, and `--artwork blocks` or `--artwork off` change how the cover is drawn. The [reference](https://github.com/alvytsk/tenuto/blob/main/docs/reference.md#the-terminal-player) covers the options, the layout tiers and every message the player can answer with.
+With the mouse on, a click selects a row of the viewed playlist, a second click plays it, the wheel scrolls it, a click on a tab views that playlist, the transport buttons — `SHFL` for shuffle among them — work, and a click on the progress bar seeks. `tenuto tui --mouse off` leaves the mouse to the terminal, and `--artwork blocks` or `--artwork off` change how the cover is drawn. The [reference](https://github.com/alvytsk/tenuto/blob/main/docs/reference.md#the-terminal-player) covers the options, the layout tiers and every message the player can answer with.
 
 ### The browser
 
