@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+mode=${STUB_TENUTO_MODE:-ok}
+case "${1:-}" in
+  --version)
+    if [ "$mode" = wrong-version ]; then echo "tenuto 9.9.9"; else echo "tenuto 1.2.3"; fi ;;
+  --help)
+    echo "A keyboard-first terminal audio player"; echo; echo "Usage: tenuto [COMMAND]" ;;
+  feeds)
+    [ "$mode" = writes-home ] && mkdir -p "$XDG_DATA_HOME/tenuto"
+    echo "SLUG        EPISODES  REFRESHED (UTC)  TITLE" ;;
+  play)
+    [ "${TENUTO_AUDIO_OUTPUT:-}" = null ] || { echo "no audio device" >&2; exit 1; }
+    echo "sine.wav [playing] 00:00:00"
+    [ "$mode" = no-ended ] || echo "sine.wav [ended] 00:00:00"
+    if [ "$mode" != no-state ]; then
+      mkdir -p "$XDG_STATE_HOME/tenuto"; echo '{}' > "$XDG_STATE_HOME/tenuto/state.json"
+    fi ;;
+  *) exit 2 ;;
+esac
