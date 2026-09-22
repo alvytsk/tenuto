@@ -61,8 +61,8 @@ Three workflow files, plus the scripts in §6–§8.
 
 Jobs:
 
-1. **`build`**, `runs-on: ubuntu-latest` in `container: ubuntu:22.04`.
-   - Installs `git ca-certificates curl build-essential pkg-config libasound2-dev dpkg-dev binutils`, marks the workspace `safe.directory`, and checks out `inputs.sha` with `fetch-depth: 1`.
+1. **`build`**, `runs-on: ubuntu-latest` in `container: ubuntu:22.04`, `timeout-minutes: 60`.
+   - Installs `git ca-certificates curl build-essential pkg-config libasound2-dev dpkg-dev binutils jq`, marks the workspace `safe.directory`, and checks out `inputs.sha` with `fetch-depth: 1`.
    - Installs Rust with rustup from `rust-toolchain.toml` (1.98.1), then `cargo install cargo-deb --locked --version <pinned>`. `Swatinem/rust-cache@v2` caches the build.
    - Reads the version from `cargo metadata` and exposes it as the `version` output.
    - Builds once: `CARGO_PROFILE_RELEASE_STRIP=symbols cargo build --release --locked`. The project's release profile is unchanged, so `cargo install` users keep symbols.
@@ -73,14 +73,14 @@ Jobs:
    - Byte identity: the SHA-256 of `target/release/tenuto`, of `./usr/bin/tenuto` extracted from the `.deb` (`dpkg-deb -x`), and of the binary extracted from the tarball must all be equal.
    - Writes `SHA256SUMS` (tarball and `.deb`) and `build-info.txt` (source SHA, version, rustc version, cargo-deb version, the `.deb` `Depends` line, the `check-elf.sh` report, the binary's SHA-256).
    - Uploads one artifact, `linux-x86_64-<sha>`, with the four files. It also uploads a second, never-published artifact, `test-inputs-<sha>`, with `scripts/release/smoke-test.sh` and `tests/fixtures/sine.wav` from the same checkout.
-2. **`install-deb`**, which `needs: build`, in a matrix of `container:` `debian:12`, `debian:13`, `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04`, `fail-fast: false`.
+2. **`install-deb`**, which `needs: build`, `timeout-minutes: 15`, in a matrix of `container:` `debian:12`, `debian:13`, `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04`, `fail-fast: false`.
    - Downloads the artifact and runs `sha256sum -c SHA256SUMS`.
    - Downloads `test-inputs-<sha>`. There is no checkout: installing `git` in the container would pull in `ca-certificates` as a recommended package and invalidate the next check.
    - Asserts `ca-certificates` is **not** installed yet, then runs `apt-get update && apt-get install -y ./tenuto_<ver>-1_amd64.deb`, which resolves ALSA and `ca-certificates` from the distro's own archive.
    - `dpkg -s tenuto` and `dpkg -s ca-certificates` must both report `Status: install ok installed`, and `/etc/ssl/certs/ca-certificates.crt` must exist and be non-empty.
    - `smoke-test.sh /usr/bin/tenuto <ver> sine.wav` from the downloaded test inputs.
    - `apt-get remove -y tenuto`, then `/usr/bin/tenuto` must not exist.
-3. **`install-tarball`**, which `needs: build`, in the same five-container matrix.
+3. **`install-tarball`**, which `needs: build`, `timeout-minutes: 15`, in the same five-container matrix.
    - Installs only the runtime prerequisites the README lists for the tarball: the ALSA runtime library, named per matrix entry (`libasound2` on Debian 12 and Ubuntu 22.04, `libasound2t64` on Debian 13, Ubuntu 24.04 and 26.04), and `ca-certificates`. No toolchain, no `-dev` packages.
    - Asserts `/etc/ssl/certs/ca-certificates.crt` exists and is non-empty.
    - Verifies checksums, downloads `test-inputs-<sha>`, extracts the tarball and runs `smoke-test.sh` on the extracted `tenuto`.
@@ -91,7 +91,8 @@ No test container installs Rust or rebuilds anything. The release binary and pac
 
 - The existing crates.io `package` job is renamed `crate` (display name "Crate package"), unchanged otherwise.
 - New job `linux-packages`: `uses: ./.github/workflows/package.yml` with `sha: ${{ github.sha }}`, on every PR and push to `main`.
-- New job `release-scripts`: runs `scripts/release/test.sh` (§9.2) on `ubuntu-latest`.
+- New job `release-scripts`: runs `scripts/release/test.sh` (§9.2) on `ubuntu-latest`, `timeout-minutes: 10`.
+- Top-level `concurrency: { group: ci-${{ github.ref }}, cancel-in-progress: ${{ github.event_name == 'pull_request' }} }`, so a superseded PR push cancels the older run while a push to `main` never does.
 
 ### 5.3 `release.yml`
 
@@ -111,13 +112,13 @@ concurrency: { group: release-${{ github.sha }}, cancel-in-progress: false }
 
 Jobs:
 
-1. **`validate`** always runs, on both events. Checkout has `fetch-depth: 0`. Outputs: `sha`, `version`.
+1. **`validate`** always runs, on both events. `timeout-minutes: 10`. Checkout has `fetch-depth: 0`. Outputs: `sha`, `version`.
    - Dispatch: `github.ref == refs/heads/main`; `inputs.sha` matches `^[0-9a-f]{40}$`; `inputs.sha == github.sha` (the SHA captured at dispatch, not a freshly fetched `main`, so a merge while the run queues cannot invalidate it); `git merge-base --is-ancestor $sha origin/main`.
    - Tag push: `scripts/release/check-tag.sh "$GITHUB_REF_NAME" "$version"` (the tag must be exactly `v` + the `Cargo.toml` version at the tagged commit); the commit is an ancestor of `origin/main`; `scripts/release/find-rehearsal.sh "$sha"` exits 0 (§7.2). This job gets `actions: read` for the lookup.
    - Both events: `scripts/release/changelog-section.sh "$version"` must succeed on the real `CHANGELOG.md` at that commit. A missing, duplicated or empty section therefore fails the rehearsal, before the crates.io publish and the tag, not in `publish` after both.
-2. **`suite`** needs `validate`: `cargo test --locked --no-fail-fast` and `cargo publish --dry-run --locked` at `validate.outputs.sha`, on `ubuntu-latest` with ALSA headers, as `ci.yml` does it.
+2. **`suite`** needs `validate`: `timeout-minutes: 60`. `cargo test --locked --no-fail-fast` and `cargo publish --dry-run --locked` at `validate.outputs.sha`, on `ubuntu-latest` with ALSA headers, as `ci.yml` does it.
 3. **`package`** needs `validate`: `uses: ./.github/workflows/package.yml` with `sha: ${{ needs.validate.outputs.sha }}`.
-4. **`publish`**: `needs: [validate, suite, package]`, `if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')`, `permissions: contents: write`. The only job with write access (§7.4).
+4. **`publish`**: `needs: [validate, suite, package]`, `if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')`, `timeout-minutes: 15`, `permissions: contents: write`. The only job with write access (§7.4).
 
 No job is dispatch-only, so on a tag run nothing that `publish` needs is skipped. On a dispatch run, `publish` is skipped by its own `if` and the run is green when everything else passes.
 
@@ -174,12 +175,12 @@ Calls:
 workflow_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml" --jq .id)
 gh run list --workflow release.yml --event workflow_dispatch --branch main \
   --commit "$sha" --status success --limit 200 \
-  --json databaseId,headSha,headBranch,event,conclusion,workflowDatabaseId,displayTitle
+  --json databaseId,headSha,headBranch,event,conclusion,workflowDatabaseId,displayTitle,url
 ```
 
 (`gh workflow view` has no `--json` flag. It fails with `unknown flag: --json`, which is why the workflow ID comes from the REST API.)
 
-It re-filters the result in `jq` on every field, so a server-side filter that stopped working cannot let a wrong run through: `workflowDatabaseId == $workflow_id`, `event == "workflow_dispatch"`, `headBranch == "main"`, `headSha == $sha`, `conclusion == "success"`. The title is never matched on.
+It re-filters the result in `jq` on every field, so a server-side filter that stopped working cannot let a wrong run through: `workflowDatabaseId == $workflow_id`, `event == "workflow_dispatch"`, `headBranch == "main"`, `headSha == $sha`, `conclusion == "success"`. The title is never matched on. `url` is requested because exit 0 prints the matched run's URL.
 
 Exit codes are a contract:
 
@@ -281,5 +282,5 @@ The first real release is the first end-to-end test of the GitHub write path: `g
 
 ## 11. Files touched
 
-- New: `.github/workflows/package.yml`; `scripts/release/{check-elf,smoke-test,check-tag,find-rehearsal,changelog-section,guard-release,test}.sh`; `scripts/release/fixtures/`.
+- New: `.github/workflows/package.yml`; `scripts/release/{check-elf,smoke-test,check-tag,find-rehearsal,changelog-section,guard-release,build-artifacts,verify-deb-install,verify-tarball-install,test}.sh`; `scripts/release/lib.sh`; `scripts/release/fixtures/`; `scripts/release/tests/`.
 - Changed: `.github/workflows/ci.yml` (rename `package` to `crate`, add `linux-packages` and `release-scripts`), `.github/workflows/release.yml` (rewritten), `Cargo.toml` (`[package.metadata.deb]`; `exclude` gains `/scripts`), `src/cli.rs`, `tests/cli.rs`, `docs/architecture.md`, `README.md`, `CHANGELOG.md` (an Unreleased "Added" entry for `--version` and the packages).
