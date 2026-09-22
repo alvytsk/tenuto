@@ -8,12 +8,16 @@
 //! here uses a `tempfile::TempDir`, never the platform state path.
 //!
 //! `tests/estimated_seek.rs` and `tests/session_policy.rs` already prove the
-//! mechanism this file exercises end to end: `restart_preference` (Task 6),
-//! `resume_intent_for` (`src/app.rs:567`) and `ResumeIntent::EstimatedCandidate`
-//! (`src/playback/engine.rs`) at their own boundaries. What none of them can
-//! show is that the whole chain survives an actual write-to-disk and
-//! reload — a real second process, not a value passed straight from one
-//! function to the next in the same test.
+//! mechanism this file exercises end to end: `restart_preference` (Task 6)
+//! and `ResumeIntent::EstimatedCandidate` (`src/playback/engine.rs`) at
+//! their own boundaries. What none of them can show is that the whole
+//! chain survives an actual write-to-disk and reload — a real second
+//! process, not a value passed straight from one function to the next in
+//! the same test. Since Task 8, `resume_intent_for` no longer drives this
+//! for this file's plain-URL fixture — a fresh load of a local file or
+//! plain URL starts from zero — so each "relaunch" below hands
+//! `restart_preference`'s own output to the engine directly, the way a
+//! real relaunch of a podcast episode still would.
 
 mod support;
 
@@ -267,9 +271,12 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
     );
     assert!(!after_session_2.completed);
 
-    // Session 3: the real relaunch. §4.3 prefers the estimate over the
-    // established fallback — the same preference `resume_intent_for`
-    // (`src/app.rs:567`) computes at every real launch.
+    // Session 3: hands the engine `restart_preference`'s own output
+    // directly. §4.3 prefers the estimate over the established fallback;
+    // since Task 8 a real relaunch of this file's plain-URL fixture would
+    // start at zero instead (`resume_intent_for` no longer resumes
+    // `MediaId::RemoteUrl`), so this pins the preference and its on-disk
+    // survival directly rather than through a real relaunch.
     let preference = restart_preference(after_session_2.position, after_session_2.estimated)
         .unwrap_or_else(|| panic!("an entry carrying both fields must produce a preference"));
     assert_eq!(preference.established, established.position);
@@ -328,9 +335,11 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
 
 /// §6/R8: "reporting `established: None` for an estimate-only entry." A
 /// media that never had an established position at all — only ever an
-/// estimate — persists that estimate through a real quit, and a real
-/// relaunch resumes from it while reporting no fallback exists, on both the
-/// wire (`Loaded.disposition`) and the file underneath it.
+/// estimate — persists that estimate through a real quit. Session 2 hands
+/// that estimate to the engine directly and resumes from it while
+/// reporting no fallback exists, on both the wire (`Loaded.disposition`)
+/// and the file underneath it — since Task 8, a real relaunch of this
+/// file's plain-URL fixture would start at zero instead.
 ///
 /// Ablation: a `checkpoint_from_progress` that bootstrapped `position` from
 /// an estimated sample whenever none existed yet (deleting §4.2's second
@@ -408,9 +417,10 @@ fn a_relaunch_resumes_an_estimate_only_entry_and_reports_no_established_fallback
     assert!(never_established.estimated.is_some());
     assert!(!never_established.completed);
 
-    // Session 2: the real relaunch, against the same preference
-    // `resume_intent_for` computes for an entry with no established
-    // fallback at all.
+    // Session 2: hands the engine `restart_preference`'s own output for an
+    // entry with no established fallback at all — since Task 8, a real
+    // relaunch of this plain-URL fixture would start at zero rather than
+    // compute this preference at all.
     let preference = restart_preference(never_established.position, never_established.estimated)
         .unwrap_or_else(|| panic!("an entry carrying only an estimate must still produce one"));
     assert_eq!(preference.established, None);
@@ -503,11 +513,13 @@ fn a_relaunch_refused_past_an_estimated_ceiling_leaves_the_stored_checkpoint_unt
         .unwrap_or_else(|| panic!("the seeded checkpoint must be on disk"));
     assert_eq!(before.position, Some(target));
 
-    // The real relaunch, through the same `Rig` (real `Session`, real
-    // `StateStore`) every other test in this file uses — not a bare engine
-    // with no persistence wired up at all, so whatever the failure path
-    // actually emits gets a genuine chance to reach the file, exactly as it
-    // would inside `app::run`.
+    // Driven through the same `Rig` (real `Session`, real `StateStore`)
+    // every other test in this file uses — not a bare engine with no
+    // persistence wired up at all — so whatever the failure path actually
+    // emits gets a genuine chance to reach the file. Since Task 8, a real
+    // relaunch of this file's plain-URL fixture would start at zero rather
+    // than attempt this resume at all; this pins the engine's own refusal
+    // and persistence path directly instead.
     let (store2, clock2) = Rig::store_in(dir.path());
     let mut session = Session::new(reload(dir.path()));
     let request = session

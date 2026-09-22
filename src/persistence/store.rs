@@ -45,8 +45,9 @@ struct VersionEnvelope {
 /// What each caller does with a rejection — quarantine and keep writing,
 /// disable writing, or simply return `Err` — is entirely theirs.
 ///
-/// `accept_queue` gates whether schema 3's `queue`/`active_entry` fields are
-/// decoded at all: [`StateStore::load`] passes `true`, and
+/// `accept_queue` gates whether the file's queue data — schema 4's
+/// `playlists`/`playing`, or schema 3's `queue`/`active_entry` — is decoded
+/// at all: [`StateStore::load`] passes `true`, and
 /// [`StateStore::read_snapshot`] passes `false`, since a listing never
 /// examines queue data (task brief recovery rules 1-2). The queue's own
 /// recovery outcome — `Some(QueueReset)` when the queue or active entry had

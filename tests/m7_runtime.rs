@@ -8,7 +8,7 @@ mod runtime;
 
 use std::time::Duration;
 
-use runtime::{pump_for, pump_until, rig_with_reconnect_policy, row_ids};
+use runtime::{enqueue, pump_for, pump_until, rig_with_reconnect_policy, row_ids};
 use support::server::{Script, TestServer};
 use tenuto::application::runtime::{AppCommand, EnqueueItem};
 use tenuto::persistence::model::PersistedState;
@@ -38,10 +38,10 @@ fn space_during_a_reconnect_pauses_and_arrow_keys_never_reach_the_engine() {
             stable_after: Duration::from_secs(30),
         },
     );
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::from_input(
-            &server.url("/radio"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&server.url("/radio"))],
+    );
     let station = row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
     pump_until(&mut rig.runtime, "the station reconnects", |view| {
@@ -59,7 +59,7 @@ fn space_during_a_reconnect_pauses_and_arrow_keys_never_reach_the_engine() {
         "{status:?}"
     );
 
-    rig.runtime.handle(AppCommand::PlayPause { selected: None });
+    rig.runtime.handle(AppCommand::PlayPause);
     pump_until(&mut rig.runtime, "the station pauses", |view| {
         view.now_playing
             .as_ref()

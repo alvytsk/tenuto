@@ -14,7 +14,7 @@ use tenuto::application::runtime::{AppCommand, EnqueueItem};
 use tenuto::application::transport::PlaybackPhase;
 use tenuto::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
 use tenuto::tui::render::{HitMap, TransportButton, Visuals, draw};
-use tenuto::tui::state::{Overlay, UiState};
+use tenuto::tui::state::{InputPurpose, Overlay, UiState};
 use views::{decoded, ids, playing, sample_view, view};
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -61,14 +61,14 @@ fn selection_moves_without_touching_playback() {
 }
 
 #[test]
-fn transport_keys_carry_the_selection_as_an_argument() {
+fn transport_keys_map_to_their_commands_and_enter_carries_the_selection() {
     let view = sample_view();
     let mut ui = UiState::new(true);
     ui.selected = Some(view.rows[2].id);
     let selected = ui.selected;
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char(' ')), &mut ui, &view))[..],
-        [AppCommand::PlayPause { selected: s }] if *s == selected
+        [AppCommand::PlayPause]
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Enter), &mut ui, &view))[..],
@@ -76,7 +76,7 @@ fn transport_keys_carry_the_selection_as_an_argument() {
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char('p')), &mut ui, &view))[..],
-        [AppCommand::Play { .. }]
+        [AppCommand::Play]
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Left), &mut ui, &view))[..],
@@ -88,7 +88,7 @@ fn transport_keys_carry_the_selection_as_an_argument() {
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char(']')), &mut ui, &view))[..],
-        [AppCommand::Next { .. }]
+        [AppCommand::Next]
     ));
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char('J')), &mut ui, &view))[..],
@@ -114,7 +114,10 @@ fn typing_a_url_never_triggers_shortcuts_and_enter_enqueues_it() {
     let view = sample_view();
     let mut ui = UiState::new(true);
     handle_key(key(KeyCode::Char('a')), &mut ui, &view);
-    assert_eq!(ui.overlay, Overlay::Input);
+    assert_eq!(
+        ui.overlay,
+        Overlay::Input(InputPurpose::AddUrl(view.viewed))
+    );
     for c in "https://q.example/ p+.mp3".chars() {
         assert!(
             handle_key(key(KeyCode::Char(c)), &mut ui, &view).is_empty(),
@@ -124,7 +127,8 @@ fn typing_a_url_never_triggers_shortcuts_and_enter_enqueues_it() {
     let effects = handle_key(key(KeyCode::Enter), &mut ui, &view);
     assert!(matches!(
         app(&effects)[..],
-        [AppCommand::Enqueue(items)] if matches!(&items[..], [EnqueueItem::Url(u)] if u == "https://q.example/ p+.mp3")
+        [AppCommand::Enqueue { dest, items }] if *dest == view.viewed
+            && matches!(&items[..], [EnqueueItem::Url(u)] if u == "https://q.example/ p+.mp3")
     ));
     assert_eq!(ui.overlay, Overlay::None);
 }
@@ -153,7 +157,7 @@ fn clearing_requires_confirmation() {
     handle_key(key(KeyCode::Char('c')), &mut ui, &view);
     assert!(matches!(
         app(&handle_key(key(KeyCode::Char('y')), &mut ui, &view))[..],
-        [AppCommand::ClearQueue]
+        [AppCommand::ClearPlaylist(id)] if *id == view.viewed
     ));
 }
 
@@ -306,12 +310,11 @@ fn scrolling_inside_the_queue_moves_the_selection() {
 }
 
 #[test]
-fn clicking_play_pause_carries_the_selection() {
+fn clicking_play_pause_is_the_play_pause_command() {
     let view = sample_view();
     let hits = draw_hits(&view, &UiState::new(true));
     let mut ui = UiState::new(true);
     ui.selected = Some(view.rows[1].id);
-    let selected = ui.selected;
     let rect = hits
         .buttons
         .iter()
@@ -320,10 +323,7 @@ fn clicking_play_pause_carries_the_selection() {
         .0;
     let (col, row) = centre(rect);
     let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
-    assert!(matches!(
-        app(&effects)[..],
-        [AppCommand::PlayPause { selected: s }] if *s == selected
-    ));
+    assert!(matches!(app(&effects)[..], [AppCommand::PlayPause]));
 }
 
 #[test]
@@ -450,8 +450,8 @@ fn ctrl_l_redraws_from_every_overlay_without_closing_it() {
     for overlay in [
         Overlay::None,
         Overlay::Help,
-        Overlay::Input,
-        Overlay::ConfirmClear,
+        Overlay::Input(InputPurpose::AddUrl(view.viewed)),
+        Overlay::ConfirmClear(view.viewed),
         Overlay::Browser,
     ] {
         let mut ui = UiState::new(true);
@@ -474,7 +474,7 @@ fn a_ctrl_chord_on_y_does_not_confirm_the_clear() {
     let view = sample_view();
     let mut ui = UiState::new(true);
     handle_key(key(KeyCode::Char('c')), &mut ui, &view);
-    assert_eq!(ui.overlay, Overlay::ConfirmClear);
+    assert_eq!(ui.overlay, Overlay::ConfirmClear(view.viewed));
     assert!(app(&handle_key(ctrl('y'), &mut ui, &view)).is_empty());
     assert_eq!(ui.overlay, Overlay::None, "any key closes the confirmation");
 }
@@ -522,4 +522,50 @@ fn the_open_browser_takes_every_key_but_ctrl_c_and_ctrl_l() {
         [Effect::Quit]
     ));
     assert_eq!(ui.overlay, Overlay::Browser);
+}
+
+#[test]
+fn clicking_a_playlist_tab_views_that_playlist() {
+    let mut view = sample_view();
+    let other = tenuto::playlist::PlaylistId::from_raw_for_tests(77);
+    view.tabs.push(tenuto::application::view::PlaylistTab {
+        id: other,
+        name: "Road".into(),
+        playing: false,
+        shuffled: false,
+    });
+    let hits = draw_hits(&view, &UiState::new(true));
+    assert_eq!(hits.tabs.len(), 2);
+    assert!(
+        hits.tabs[0].0.right() <= hits.tabs[1].0.x,
+        "labels do not overlap"
+    );
+    let rect = hits
+        .tabs
+        .iter()
+        .find(|(_, id)| *id == other)
+        .expect("tab")
+        .0;
+    let (col, row) = centre(rect);
+    let mut ui = UiState::new(true);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    assert!(matches!(app(&effects)[..], [AppCommand::View(id)] if *id == other));
+}
+
+#[test]
+fn clicking_the_shuffle_button_toggles_shuffle_like_z() {
+    let view = sample_view();
+    let hits = draw_hits(&view, &UiState::new(true));
+    let rect = hits
+        .buttons
+        .iter()
+        .find(|(_, b)| *b == TransportButton::Shuffle)
+        .expect("shuffle button")
+        .0;
+    let (col, row) = centre(rect);
+    let mut ui = UiState::new(true);
+    let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let pressed = handle_key(KeyEvent::from(KeyCode::Char('z')), &mut ui, &view);
+    assert!(matches!(app(&clicked)[..], [AppCommand::ToggleShuffle(id)] if *id == view.viewed));
+    assert_eq!(app(&clicked).len(), app(&pressed).len());
 }

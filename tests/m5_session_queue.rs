@@ -6,7 +6,7 @@ use std::time::Duration;
 use support::media;
 use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
-use tenuto::media::id::MediaId;
+use tenuto::media::id::{EpisodeKey, FeedId, MediaId};
 use tenuto::media::metadata::MediaMetadata;
 use tenuto::persistence::PersistenceError;
 use tenuto::persistence::model::PersistedState;
@@ -17,7 +17,9 @@ use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::queue::{DisplayMetadata, MAX_QUEUE_ENTRIES, NewQueueEntry, QueueError, QueueSource};
+use tenuto::queue::{
+    DisplayMetadata, MAX_PLAYLIST_ENTRIES, NewQueueEntry, QueueError, QueueSource,
+};
 use tenuto::resume::ResumeCandidate;
 use tenuto::session::{Action, DisplayUpdate, LoadTarget, Session};
 
@@ -73,16 +75,18 @@ fn playing(rev: u64) -> PlaybackEvent {
 #[test]
 fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
     let mut session = Session::new(PersistedState::default());
-    let (_, action) = session.enqueue(vec![entry("a")]).expect("fits");
+    let (_, action) = session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     let Action::Submit { state, .. } = action else {
         panic!("must submit")
     };
     assert_eq!(state.queue().len(), 1);
-    let too_many = (0..MAX_QUEUE_ENTRIES)
+    let too_many = (0..MAX_PLAYLIST_ENTRIES)
         .map(|i| entry(&format!("t{i}")))
         .collect();
     assert!(matches!(
-        session.enqueue(too_many),
+        session.enqueue(session.state().playing(), too_many),
         Err(QueueError::Capacity { .. })
     ));
     assert_eq!(session.state().queue().len(), 1);
@@ -92,7 +96,9 @@ fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
 fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
         .expect("registered");
@@ -125,7 +131,9 @@ fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
 fn removing_a_nonplaying_entry_leaves_playback_alone() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
         .expect("registered");
@@ -141,40 +149,71 @@ fn removing_a_nonplaying_entry_leaves_playback_alone() {
 fn clearing_stops_and_keeps_listening_history() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[1]), &media("b"))
         .expect("registered");
     session.observe(&loaded(request, 1, "b"), clock.sample());
     session.observe(&playing(1), clock.sample());
-    let removal = session.clear_queue(&progress(1, "b", 9, Some(request)), clock.sample());
+    let removal = session
+        .clear_playlist(
+            session.state().playing(),
+            &progress(1, "b", 9, Some(request)),
+            clock.sample(),
+        )
+        .expect("the playing playlist exists");
     assert!(removal.stop_playback);
     assert!(session.state().queue().is_empty());
     assert!(session.state().entry_for(&media("b")).is_some());
 }
 
+/// Podcast episodes, not local files (Task 8: a local file never resumes on
+/// a fresh load, whatever its checkpoint says — this test's point is the
+/// resume policy's handling of partial/completed/unseen entries, which still
+/// applies to a media kind that does resume).
+fn episode(guid: &str) -> MediaId {
+    let feed = FeedId::new("0123456789abcdef0123456789abcdef".to_string())
+        .unwrap_or_else(|error| panic!("a literal feed ID must parse: {error}"));
+    let episode = EpisodeKey::resolve(Some(guid), None, None)
+        .unwrap_or_else(|error| panic!("a literal key must resolve: {error}"));
+    MediaId::PodcastEpisode { feed, episode }
+}
+
 #[test]
 fn advancing_into_partial_and_completed_entries_uses_the_resume_policy() {
-    let file = serde_json::json!({ "schema_version": 3, "volume": 1.0, "checkpoints": {
-        "local:/music/half.flac": { "position": { "secs": 40, "nanos": 0 }, "completed": false, "touch_seq": 1, "updated_at": "2026-09-14T10:00:00Z" },
-        "local:/music/done.flac": { "position": { "secs": 90, "nanos": 0 }, "completed": true, "touch_seq": 2, "updated_at": "2026-09-14T10:00:00Z" } } });
+    let half = episode("half");
+    let done = episode("done");
+    let new = episode("new");
+    let mut checkpoints = serde_json::Map::new();
+    checkpoints.insert(
+        half.to_string(),
+        serde_json::json!({ "position": { "secs": 40, "nanos": 0 }, "completed": false, "touch_seq": 1, "updated_at": "2026-09-14T10:00:00Z" }),
+    );
+    checkpoints.insert(
+        done.to_string(),
+        serde_json::json!({ "position": { "secs": 90, "nanos": 0 }, "completed": true, "touch_seq": 2, "updated_at": "2026-09-14T10:00:00Z" }),
+    );
+    let file =
+        serde_json::json!({ "schema_version": 3, "volume": 1.0, "checkpoints": checkpoints });
     let session = Session::new(serde_json::from_value(file).expect("valid"));
     assert_eq!(
-        session.resume_intent(&media("half")),
+        session.resume_intent(&half),
         ResumeIntent::Candidate(ResumeCandidate {
             position: Duration::from_secs(40),
             completed: false
         })
     );
     assert!(matches!(
-        session.resume_intent(&media("done")),
+        session.resume_intent(&done),
         ResumeIntent::Candidate(ResumeCandidate {
             completed: true,
             ..
         })
     ));
     assert_eq!(
-        session.resume_intent(&media("new")),
+        session.resume_intent(&new),
         ResumeIntent::StartAt(Duration::ZERO)
     );
 }
@@ -226,7 +265,9 @@ fn a_queued_track_can_lose_its_history_to_eviction_and_stays_queued() {
 #[test]
 fn volume_and_display_updates_submit_through_the_session() {
     let mut session = Session::new(PersistedState::default());
-    let (ids, _) = session.enqueue(vec![entry("a"), entry("a")]).expect("fits");
+    let (ids, _) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("a")])
+        .expect("fits");
     assert!(matches!(
         session.set_volume(tenuto::playback::volume::Volume::new(0.4)),
         Action::Submit { .. }
@@ -257,7 +298,9 @@ fn volume_and_display_updates_submit_through_the_session() {
 #[test]
 fn an_identical_display_update_submits_nothing_and_leaves_state_unchanged() {
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry("a")]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     let update = DisplayUpdate {
         title: Some("Title".into()),
         artist: Some("Artist".into()),
@@ -285,7 +328,9 @@ fn an_identical_display_update_submits_nothing_and_leaves_state_unchanged() {
 fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps_the_repeated_field()
  {
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry("a")]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     session.update_display(
         &media("a"),
         DisplayUpdate {
@@ -325,7 +370,9 @@ fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps
 #[test]
 fn a_none_field_in_a_display_update_never_blanks_an_existing_value() {
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry("a")]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry("a")])
+        .expect("fits");
     session.update_display(
         &media("a"),
         DisplayUpdate {
@@ -390,7 +437,9 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
     );
     let mut session = Session::new(PersistedState::default());
 
-    let (ids, action) = session.enqueue(vec![entry("a"), entry("b")]).expect("fits");
+    let (ids, action) = session
+        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .expect("fits");
     if let Action::Submit { state, .. } = action {
         writer.submit(state, Urgency::Forced);
     }
@@ -409,7 +458,9 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
     {
         writer.submit(state, urgency);
     }
-    let (_, action) = session.enqueue(vec![entry("c")]).expect("fits");
+    let (_, action) = session
+        .enqueue(session.state().playing(), vec![entry("c")])
+        .expect("fits");
     if let Action::Submit { state, .. } = action {
         writer.submit(state, Urgency::Forced);
     }
@@ -422,11 +473,11 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
         serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).expect("read"))
             .expect("json");
     assert_eq!(
-        written["queue"].as_array().map(Vec::len),
+        written["playlists"][0]["entries"].as_array().map(Vec::len),
         Some(3),
         "latest queue"
     );
-    assert_eq!(written["active_entry"], ids[0].get());
+    assert_eq!(written["playlists"][0]["active_entry"], ids[0].get());
     assert_eq!(
         written["checkpoints"]["local:/music/a.flac"]["position"]["secs"], 17,
         "latest checkpoint"

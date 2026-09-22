@@ -136,9 +136,13 @@ fn reload(dir: &Path) -> PersistedState {
 
 #[test]
 fn a_second_session_resumes_from_the_flushed_checkpoint() {
-    // H4: a second process using the same original URL resumes from the
-    // flushed checkpoint, and a redirect encountered on the way does not
-    // change the identity the checkpoint is filed under.
+    // H4: this session hands the engine the flushed checkpoint's own
+    // `ResumeIntent::Candidate` directly, and a redirect encountered on the
+    // way does not change the identity the checkpoint is filed under.
+    // Since Task 8, a real second process opening this same plain URL
+    // would start at zero instead — `resume_intent_for` no longer resumes
+    // `MediaId::RemoteUrl` — so this pins the checkpoint/identity plumbing
+    // itself, not what an actual relaunch decides today.
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let url = {
         let probe = TestServer::start(Script::from_fixture("sine-5s.flac"));

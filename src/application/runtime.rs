@@ -5,12 +5,14 @@
 //!
 //! [`pump`]: PlayerRuntime::pump
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use url::Url;
 
+use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, resolve_podcast,
@@ -21,7 +23,8 @@ use crate::application::transport::{
     PlaybackPhase, TransportDecision, TransportInput, TransportSituation, decide,
 };
 use crate::application::view::{
-    NowPlaying, PersistenceStatus, PlayerView, entry_title, queue_rows, saved_history,
+    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, playlist_tabs,
+    queue_rows, saved_history,
 };
 use crate::artwork::worker::CoverSource;
 use crate::clock::Clock;
@@ -48,9 +51,10 @@ use crate::playback::spectrum::worker::SpectrumHandle;
 use crate::playback::state::PlaybackState;
 use crate::playback::timeline::PositionQuality;
 use crate::playback::volume::Volume;
+use crate::playlist::PlaylistId;
 use crate::queue::{
-    Direction, DisplayDuration, DisplayMetadata, DurationSource, MAX_QUEUE_ENTRIES, NewQueueEntry,
-    QueueEntry, QueueEntryId, QueueError, QueueSource,
+    Direction, DisplayDuration, DisplayMetadata, DurationSource, MAX_PLAYLIST_ENTRIES,
+    NewQueueEntry, QueueEntry, QueueEntryId, QueueError, QueueSource,
 };
 use crate::session::{
     Action, Advance, DisplayUpdate, LoadTarget, RegisterLoadError, Removal, Session,
@@ -64,6 +68,18 @@ pub const PLAYER_BUSY: &str = "Player is busy";
 pub const TOO_MANY_PENDING_LOADS: &str = "Too many pending loads";
 /// At most this many tag probes run at once (§8).
 const METADATA_WORKERS: usize = 2;
+/// At most this many finished tag probes are applied in one [`pump`]; the
+/// rest wait for the next one. The batch shares a single submit, so what
+/// this bounds is the per-result scan of every queued entry, not the clone.
+///
+// ponytail: a fixed batch rather than a time budget. Ceiling: after a folder
+// add of thousands of files the tags trickle in over several frames instead
+// of arriving at once. Upgrade path: stop rescanning every playlist per
+// result — `Session::update_displays` looks each media up by walking all
+// entries, so a media → entry index would make the batch size irrelevant.
+///
+/// [`pump`]: PlayerRuntime::pump
+pub const MAX_ENRICHMENT_PER_PUMP: usize = 64;
 
 /// Builds the engine on the first load. Boxed so a test can hand in a
 /// deviceless output while production uses the environment's choice.
@@ -125,20 +141,33 @@ impl EnqueueItem {
 
 #[derive(Clone, Debug)]
 pub enum AppCommand {
-    PlayPause { selected: Option<QueueEntryId> },
-    Play { selected: Option<QueueEntryId> },
+    PlayPause,
+    Play,
     PlayEntry(QueueEntryId),
     Stop,
     SeekBy(i64),
     SeekTo(Duration),
     Restart,
     AdjustVolume(f32),
-    Previous { selected: Option<QueueEntryId> },
-    Next { selected: Option<QueueEntryId> },
-    Enqueue(Vec<EnqueueItem>),
+    Previous,
+    Next,
+    Enqueue {
+        dest: PlaylistId,
+        items: Vec<EnqueueItem>,
+    },
+    /// A finished folder walk, applied to the playlist captured when it was
+    /// requested (M8 §8, P2) — not wherever the browser is now.
+    AddTree(TreeCollected),
     Remove(QueueEntryId),
     Move(QueueEntryId, Direction),
-    ClearQueue,
+    ClearPlaylist(PlaylistId),
+    CreatePlaylist(String),
+    RenamePlaylist(PlaylistId, String),
+    DeletePlaylist(PlaylistId),
+    ToggleShuffle(PlaylistId),
+    ViewNext,
+    ViewPrevious,
+    View(PlaylistId),
 }
 
 /// What the final flush is reported as.
@@ -325,19 +354,25 @@ pub struct PlayerRuntime {
     metadata: Option<MetadataWorkers>,
     /// The restored entries, until the first pump offers them to `metadata`.
     restored: Vec<QueueEntryId>,
+    /// The playlist the front end is looking at (M8 §10). Transient: never
+    /// persisted, and it starts on whichever playlist was playing.
+    viewed: PlaylistId,
 }
 
 impl PlayerRuntime {
     pub fn new(parts: RuntimeParts) -> Self {
         let volume = parts.session.state().volume();
+        // Every playlist, not just the playing one: quit before the probes
+        // finish and the others would keep bare file names forever.
         let restored = parts
             .session
             .state()
-            .queue()
-            .entries()
+            .playlists()
             .iter()
+            .flat_map(|playlist| playlist.queue().entries())
             .map(QueueEntry::id)
             .collect();
+        let viewed = parts.session.state().playing();
         Self {
             session: parts.session,
             writer: parts.writer,
@@ -360,11 +395,23 @@ impl PlayerRuntime {
                 .metadata_probe
                 .map(|probe| MetadataWorkers::spawn(METADATA_WORKERS, probe, parts.hook)),
             restored,
+            viewed,
         }
     }
 
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// The playlist the front end is looking at (M8 §10).
+    pub fn viewed(&self) -> PlaylistId {
+        self.viewed
+    }
+
+    /// One named playlist's rows, for a caller that needs a playlist other
+    /// than the viewed one.
+    pub fn rows_of(&self, playlist: PlaylistId) -> Vec<QueueRow> {
+        queue_rows(self.session.state(), playlist)
     }
 
     /// The engine's spectrum analysis worker; `None` until the first load
@@ -473,16 +520,14 @@ impl PlayerRuntime {
 
     pub fn handle(&mut self, command: AppCommand) {
         match command {
-            AppCommand::PlayPause { selected } => self.transport(TransportInput::Space, selected),
-            AppCommand::Play { selected } => self.transport(TransportInput::Play, selected),
+            AppCommand::PlayPause => self.transport(TransportInput::Space, None),
+            AppCommand::Play => self.transport(TransportInput::Play, None),
             AppCommand::PlayEntry(id) => self.transport(TransportInput::Enter, Some(id)),
             AppCommand::SeekBy(step) => self.transport(TransportInput::SeekBy(step), None),
             AppCommand::SeekTo(target) => self.transport(TransportInput::SeekTo(target), None),
             AppCommand::Restart => self.transport(TransportInput::Home, None),
-            AppCommand::Previous { selected } => {
-                self.transport(TransportInput::Previous, selected);
-            }
-            AppCommand::Next { selected } => self.transport(TransportInput::Next, selected),
+            AppCommand::Previous => self.transport(TransportInput::Previous, None),
+            AppCommand::Next => self.transport(TransportInput::Next, None),
             AppCommand::Stop => {
                 self.router.cancel();
                 if let Some(engine) = &self.engine {
@@ -490,13 +535,34 @@ impl PlayerRuntime {
                 }
             }
             AppCommand::AdjustVolume(delta) => self.adjust_volume(delta),
-            AppCommand::Enqueue(items) => self.enqueue(items),
+            AppCommand::Enqueue { dest, items } => self.enqueue(dest, items),
+            AppCommand::AddTree(tree) => self.add_tree(tree),
             AppCommand::Remove(id) => self.remove(id),
             AppCommand::Move(id, direction) => match self.session.move_entry(id, direction) {
                 Ok(action) => self.submit(action),
                 Err(error) => self.status = Some(error.to_string()),
             },
-            AppCommand::ClearQueue => self.clear_queue(),
+            AppCommand::ClearPlaylist(id) => self.vacate(id, false),
+            AppCommand::DeletePlaylist(id) => self.vacate(id, true),
+            AppCommand::CreatePlaylist(name) => match self.session.create_playlist(&name) {
+                Ok((id, action)) => {
+                    self.submit(action);
+                    self.viewed = id;
+                }
+                Err(error) => self.status = Some(error.to_string()),
+            },
+            AppCommand::RenamePlaylist(id, name) => match self.session.rename_playlist(id, &name) {
+                Ok(action) => self.submit(action),
+                Err(error) => self.status = Some(error.to_string()),
+            },
+            AppCommand::ToggleShuffle(id) => self.toggle_shuffle(id),
+            AppCommand::ViewNext => self.step_view(1),
+            AppCommand::ViewPrevious => self.step_view(-1),
+            AppCommand::View(id) => {
+                if self.session.state().playlist(id).is_some() {
+                    self.viewed = id;
+                }
+            }
         }
     }
 
@@ -570,7 +636,9 @@ impl PlayerRuntime {
         let queue = state.queue();
         let active = queue.active();
         PlayerView {
-            rows: queue_rows(state),
+            rows: queue_rows(state, self.viewed),
+            tabs: playlist_tabs(state),
+            viewed: self.viewed,
             active,
             now_playing: active
                 .and_then(|id| queue.get(id))
@@ -648,13 +716,27 @@ impl PlayerRuntime {
     }
 
     fn decide(&self, input: TransportInput, selected: Option<QueueEntryId>) -> TransportDecision {
+        let state = self.session.state();
+        let phase = self.phase();
+        let retry = self
+            .last_requested
+            .filter(|id| state.find_entry(*id).is_some());
+        // M8 P5: while loading, navigation follows the request's own playlist.
+        let navigation = (phase == PlaybackPhase::Loading)
+            .then_some(retry)
+            .flatten()
+            .and_then(|id| state.owner_of(id))
+            .and_then(|owner| state.playlist(owner))
+            .unwrap_or_else(|| state.playing_playlist());
+        let viewed = state.playlist(self.viewed).unwrap_or(navigation);
         decide(
             input,
             &TransportSituation {
-                queue: self.session.state().queue(),
+                navigation,
+                viewed,
                 selected,
-                phase: self.phase(),
-                last_requested: self.last_requested,
+                phase,
+                retry,
                 live: self.indefinite(),
             },
         )
@@ -745,7 +827,7 @@ impl PlayerRuntime {
         id: QueueEntryId,
         start: impl FnOnce(&EngineHandle, LoadRequestId) -> Admission,
     ) {
-        let Some(entry) = self.session.state().queue().get(id) else {
+        let Some(entry) = self.session.state().find_entry(id) else {
             return;
         };
         let (media, source) = (entry.media().clone(), entry.source().clone());
@@ -962,7 +1044,7 @@ impl PlayerRuntime {
 
     // ---------------------------------------------------------------- queue
 
-    fn enqueue(&mut self, items: Vec<EnqueueItem>) {
+    fn enqueue(&mut self, dest: PlaylistId, items: Vec<EnqueueItem>) {
         if items.is_empty() {
             return;
         }
@@ -976,20 +1058,89 @@ impl PlayerRuntime {
                 }
             }
         }
-        match self.session.enqueue(batch) {
+        match self.session.enqueue(dest, batch) {
             Ok((ids, action)) => {
                 self.submit(action);
                 self.request_enrichment(&ids);
             }
             Err(QueueError::Capacity { .. }) => {
-                self.status = Some(format!("Queue is full ({MAX_QUEUE_ENTRIES} entries)"));
+                self.status = Some(format!(
+                    "Playlists are full ({MAX_PLAYLIST_ENTRIES} entries in total)"
+                ));
             }
             Err(error) => self.status = Some(error.to_string()),
         }
     }
 
+    /// Applies a finished folder walk to the destination captured when it
+    /// was requested (M8 §8, P2). Capacity is rechecked here (P7): the
+    /// playlists may have grown while the worker walked.
+    fn add_tree(&mut self, tree: TreeCollected) {
+        for path in &tree.unreadable {
+            tracing::warn!(path = ?path, "folder add: directory could not be read");
+        }
+        let Some(playlist) = self.session.state().playlist(tree.dest) else {
+            self.status = Some("Playlist was deleted; nothing added".to_owned());
+            return;
+        };
+        let queued: HashSet<&MediaId> = playlist
+            .queue()
+            .entries()
+            .iter()
+            .map(QueueEntry::media)
+            .collect();
+        let mut fresh = Vec::new();
+        let mut already = 0usize;
+        for path in &tree.items {
+            match new_entry(EnqueueItem::Path(path.clone())) {
+                Ok(entry) if queued.contains(entry.media()) => already += 1,
+                Ok(entry) => fresh.push(entry),
+                Err(_) => {}
+            }
+        }
+        let free = MAX_PLAYLIST_ENTRIES.saturating_sub(self.session.state().total_entries());
+        let did_not_fit = fresh.len().saturating_sub(free);
+        fresh.truncate(free);
+        let added = fresh.len();
+        if added > 0 {
+            match self.session.enqueue(tree.dest, fresh) {
+                Ok((ids, action)) => {
+                    self.submit(action);
+                    self.request_enrichment(&ids);
+                }
+                Err(error) => {
+                    self.status = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        let mut parts = Vec::new();
+        if added > 0 {
+            parts.push(format!("added {added}"));
+        }
+        if already > 0 {
+            parts.push(format!("{already} already queued"));
+        }
+        if !tree.unreadable.is_empty() {
+            parts.push(format!("{} unreadable", tree.unreadable.len()));
+        }
+        if did_not_fit > 0 {
+            parts.push(format!("{did_not_fit} did not fit"));
+        }
+        if tree.scan_limit_reached {
+            parts.push("scan limit reached".to_owned());
+        }
+        self.status = Some(if parts.is_empty() {
+            "nothing to add".to_owned()
+        } else {
+            parts.join(" · ")
+        });
+    }
+
     fn remove(&mut self, id: QueueEntryId) {
-        if self.session.state().queue().active() == Some(id) {
+        // Scoped to ownership (M8 §5): a cursor alone is not the playback a
+        // pending seek belongs to.
+        if self.session.owns_entry(id) {
             self.router.cancel();
         }
         let progress = self.latest_progress();
@@ -1002,14 +1153,96 @@ impl PlayerRuntime {
         }
     }
 
-    fn clear_queue(&mut self) {
-        self.router.cancel();
-        if let Some(workers) = &self.metadata {
-            workers.cancel_all();
-        }
+    fn step_view(&mut self, step: isize) {
+        let playlists = self.session.state().playlists();
+        let Some(index) = playlists
+            .iter()
+            .position(|playlist| playlist.id() == self.viewed)
+        else {
+            return;
+        };
+        let len = playlists.len() as isize;
+        let next = (index as isize + step).rem_euclid(len) as usize;
+        self.viewed = playlists[next].id();
+    }
+
+    /// Clears or deletes one playlist. Side effects are scoped (M8 §5): a
+    /// pending seek is cancelled only if the playlist owns playback, and the
+    /// metadata workers — which can only cancel everything — are re-asked
+    /// for every entry that still lacks tags. Every one of them waits for the
+    /// session to accept the change, because a refusal — a playlist that is
+    /// gone, or the last one, which cannot be deleted — changes nothing (§4).
+    /// Ownership is read before the call and used after it: once the entries
+    /// are gone, nothing owns playback any more.
+    fn vacate(&mut self, id: PlaylistId, delete: bool) {
+        let owning = self.session.owns_playlist(id);
+        let index = self
+            .session
+            .state()
+            .playlists()
+            .iter()
+            .position(|playlist| playlist.id() == id);
         let progress = self.latest_progress();
-        let removal = self.session.clear_queue(&progress, self.clock.sample());
-        self.apply_removal(removal);
+        let now = self.clock.sample();
+        let result = if delete {
+            self.session.delete_playlist(id, &progress, now)
+        } else {
+            self.session.clear_playlist(id, &progress, now)
+        };
+        match result {
+            Ok(removal) => {
+                if owning {
+                    self.router.cancel();
+                }
+                // ponytail: `MetadataWorkers` can only cancel everything, so
+                // this drops the backlog and re-offers every untitled entry
+                // below. Ceiling: clearing one playlist re-walks the others'
+                // pending probes, and each re-request costs a probe that was
+                // already queued. Upgrade path: per-media cancel in
+                // `MetadataWorkers`, so only this playlist's jobs go.
+                if let Some(workers) = &self.metadata {
+                    workers.cancel_all();
+                }
+                self.apply_removal(removal);
+                let remaining: Vec<QueueEntryId> = self
+                    .session
+                    .state()
+                    .playlists()
+                    .iter()
+                    .flat_map(|playlist| playlist.queue().entries())
+                    .map(QueueEntry::id)
+                    .collect();
+                self.request_enrichment(&remaining);
+                if delete && self.viewed == id {
+                    let playlists = self.session.state().playlists();
+                    let next = index.unwrap_or(0).min(playlists.len().saturating_sub(1));
+                    self.viewed = playlists[next].id();
+                }
+            }
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    fn toggle_shuffle(&mut self, id: PlaylistId) {
+        let on = self
+            .session
+            .state()
+            .playlist(id)
+            .is_some_and(|playlist| playlist.shuffle().is_some());
+        let seed = if on {
+            None
+        } else {
+            let mut bytes = [0u8; 8];
+            if getrandom::fill(&mut bytes).is_err() {
+                self.status = Some("Shuffle unavailable: no randomness source".to_owned());
+                return;
+            }
+            Some(u64::from_le_bytes(bytes))
+        };
+        match self.session.set_shuffle(id, seed) {
+            Ok(action) => self.submit(action),
+            Err(error) => self.status = Some(error.to_string()),
+        }
     }
 
     /// Asks the metadata workers about each of `ids` that is a local file
@@ -1019,9 +1252,11 @@ impl PlayerRuntime {
         let Some(workers) = &self.metadata else {
             return;
         };
-        let queue = self.session.state().queue();
+        let state = self.session.state();
         let mut requested: Vec<&MediaId> = Vec::new();
-        for entry in ids.iter().filter_map(|id| queue.get(*id)) {
+        // Across every playlist: an add into a playlist that is not playing
+        // would otherwise never be offered to the workers.
+        for entry in ids.iter().filter_map(|id| state.find_entry(*id)) {
             let QueueSource::LocalFile(path) = entry.source() else {
                 continue;
             };
@@ -1038,15 +1273,23 @@ impl PlayerRuntime {
     }
 
     /// Applies finished enrichment through `Session`, which updates every
-    /// occurrence of the media still queued — none, if it was removed.
+    /// occurrence of the media still queued — none, if it was removed. The
+    /// whole batch costs one submit, and at most [`MAX_ENRICHMENT_PER_PUMP`]
+    /// results are taken per pump: a folder add hands back thousands of
+    /// results, and an unbounded drain would stall a frame. Whatever is left
+    /// waits in the workers' result channel for the next pump.
     fn apply_enrichment(&mut self) {
         let Some(workers) = &self.metadata else {
             return;
         };
-        while let Some(result) = workers.try_result() {
+        let mut batch = Vec::new();
+        while batch.len() < MAX_ENRICHMENT_PER_PUMP
+            && let Some(result) = workers.try_result()
+        {
             match result.outcome {
-                EnrichOutcome::Tags(tags) => {
-                    let update = DisplayUpdate {
+                EnrichOutcome::Tags(tags) => batch.push((
+                    result.media,
+                    DisplayUpdate {
                         title: tags.title,
                         artist: tags.artist,
                         album: tags.album,
@@ -1055,10 +1298,8 @@ impl PlayerRuntime {
                             value,
                             source: DurationSource::Decoded(tags.duration_provenance),
                         }),
-                    };
-                    let action = self.session.update_display(&result.media, update);
-                    self.submit(action);
-                }
+                    },
+                )),
                 EnrichOutcome::Failed(message) => {
                     tracing::debug!(%message, "no tags for a queued file");
                 }
@@ -1066,6 +1307,10 @@ impl PlayerRuntime {
                     tracing::debug!("the tag probe panicked; the entry keeps its name");
                 }
             }
+        }
+        if !batch.is_empty() {
+            let action = self.session.update_displays(&batch);
+            self.submit(action);
         }
     }
 
@@ -1086,7 +1331,12 @@ impl PlayerRuntime {
         if self.session.adopted().is_none() {
             self.mirror = None;
         }
-        self.selection_hint = removal.selection;
+        // `remove_entry` resolves owners across playlists, so the successor
+        // it names may sit in a playlist the listener is not looking at; the
+        // hint only ever names a row of the viewed one.
+        self.selection_hint = removal
+            .selection
+            .filter(|id| self.session.state().owner_of(*id) == Some(self.viewed));
     }
 
     fn latest_progress(&self) -> Progress {
@@ -1132,7 +1382,7 @@ impl PlayerRuntime {
         let display = entry.display();
         let unloaded = NowPlaying {
             entry: Some(entry.id()),
-            title: entry_title(entry),
+            title: entry_plain_title(entry),
             artist: display.artist.as_deref().map(displayable),
             album: display.album.as_deref().map(displayable),
             year: display.year.as_deref().map(displayable),
@@ -1226,8 +1476,10 @@ fn new_entry(item: EnqueueItem) -> Result<NewQueueEntry, String> {
 mod tests {
     use super::*;
     use crate::clock::SystemClock;
+    use crate::media::id::AbsolutePath;
     use crate::persistence::writer::StateSink;
     use crate::playback::output::null_output::NullOutput;
+    use crate::queue::{IdAllocator, Queue};
 
     const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
 
@@ -1257,7 +1509,11 @@ mod tests {
     #[test]
     fn a_refused_automatic_start_leaves_the_loaded_track_paused_and_says_so() {
         let mut runtime = runtime();
-        runtime.handle(AppCommand::Enqueue(vec![EnqueueItem::Path(FIVE.into())]));
+        let dest = runtime.viewed();
+        runtime.handle(AppCommand::Enqueue {
+            dest,
+            items: vec![EnqueueItem::Path(FIVE.into())],
+        });
         let id = runtime.view().rows[0].id;
 
         runtime.load_entry_starting(id, |_, _| Admission::Busy);
@@ -1283,5 +1539,32 @@ mod tests {
         assert_eq!(view.phase, PlaybackPhase::Paused, "{view:?}");
         assert_eq!(view.status.as_deref(), Some(PLAYER_BUSY));
         let _ = runtime.shutdown();
+    }
+
+    #[test]
+    fn now_playing_title_stays_plain_even_though_the_row_combines_artist_and_title() {
+        let path = AbsolutePath::new("/music/file.flac".into())
+            .unwrap_or_else(|error| panic!("absolute: {error}"));
+        let new = NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata {
+                title: Some("So What".to_owned()),
+                artist: Some("Miles Davis".to_owned()),
+                ..DisplayMetadata::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("valid: {error}"));
+        let mut queue = Queue::default();
+        let ids = queue
+            .enqueue(vec![new], &mut IdAllocator::default())
+            .unwrap_or_else(|error| panic!("fits: {error}"));
+        let entry = queue
+            .get(ids[0])
+            .cloned()
+            .unwrap_or_else(|| panic!("just enqueued"));
+
+        let now = runtime().now_playing(&entry, &PersistedState::default());
+        assert_eq!(now.title, "So What");
     }
 }

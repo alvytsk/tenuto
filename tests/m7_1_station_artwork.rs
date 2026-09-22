@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use runtime::enqueue;
 use support::server::{Script, TestServer};
 use tenuto::application::runtime::{AppCommand, EnqueueItem, LibraryStores, PlayerRuntime};
 use tenuto::artwork::worker::{CoverSource, default_loader};
@@ -162,10 +163,10 @@ fn listing_enqueueing_and_restoring_a_station_request_no_logo() {
         Some(stores(root.path())),
         runtime::null_engine(),
     );
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::from_input(
-            &station_server.url("/radio"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&station_server.url("/radio"))],
+    );
     rig.runtime.pump();
     assert!(
         rig.runtime.active_cover().is_none(),
@@ -219,10 +220,10 @@ fn playing_a_station_requests_its_logo_exactly_once() {
         Some(stores(root.path())),
         runtime::null_engine(),
     );
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::from_input(
-            &station_server.url("/radio"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&station_server.url("/radio"))],
+    );
     let station = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
 
@@ -260,10 +261,10 @@ fn a_remote_url_no_station_claims_still_uses_its_embedded_cover() {
         Some(stores(root.path())),
         runtime::null_engine(),
     );
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::from_input(
-            &server.url("/a.flac"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&server.url("/a.flac"))],
+    );
     let remote = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(remote));
 
@@ -310,10 +311,10 @@ fn a_station_with_no_logo_falls_back_to_the_embedded_cover() {
         Some(stores(root.path())),
         runtime::null_engine(),
     );
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::from_input(
-            &server.url("/radio"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&server.url("/radio"))],
+    );
     let station = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
 
@@ -369,10 +370,10 @@ fn a_re_probed_logo_replaces_the_old_one_on_the_next_load() {
         Some(stores(root.path())),
         runtime::null_engine(),
     );
-    rig.runtime
-        .handle(AppCommand::Enqueue(vec![EnqueueItem::from_input(
-            &station_server.url("/radio"),
-        )]));
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&station_server.url("/radio"))],
+    );
     let station = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
 

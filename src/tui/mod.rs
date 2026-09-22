@@ -31,6 +31,7 @@ pub mod layout;
 pub mod render;
 pub mod spectrum;
 pub mod state;
+pub mod tabs;
 pub mod theme;
 
 use std::any::Any;
@@ -48,7 +49,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui_image::picker::{Picker, ProtocolType};
 
-use crate::application::browse::{BrowseRequest, BrowseWorker};
+use crate::application::browse::{BrowseRequest, BrowseResult, BrowseWorker, TreeCollected};
 use crate::application::enrich::default_probe;
 use crate::application::runtime::{
     AppCommand, CoverKey, FlushReport, LibraryStores, PlayerRuntime, RuntimeParts,
@@ -373,7 +374,15 @@ fn run_loop(
             return Ending::Failed(LifecycleError::Terminal(error).into());
         }
         runtime.pump();
-        browsing.poll();
+        // A finished folder walk belongs to the application, not the
+        // browser that asked for it (M8 §8): it lands here even if the
+        // browser has since closed or moved to another directory.
+        // No `take_selection_hint` here: only a removal ever sets one
+        // (`PlayerRuntime::apply_removal`), and the unconditional
+        // `ui.reconcile` below covers what an add changes.
+        for tree in browsing.poll() {
+            runtime.handle(AppCommand::AddTree(tree));
+        }
         // Every pass, so the worker's one-slot result channel never stalls it.
         artwork.poll(runtime);
         if let Some(ending) = interrupted(signals, cleanup) {
@@ -610,13 +619,15 @@ struct Browsing {
 
 impl Browsing {
     /// Opens the browser at the active local entry's directory, else the
-    /// current working directory, and asks for its listing.
+    /// current working directory, and asks for its listing. Captures the
+    /// viewed playlist as the destination every add from this browser lands
+    /// in, for as long as it stays open (M8 §8).
     fn open(&mut self, runtime: &PlayerRuntime, ui: &mut UiState) {
         let cwd = runtime
             .active_local_dir()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
-        self.state = Some(BrowserState::new(cwd.clone()));
+        self.state = Some(BrowserState::new(cwd.clone(), runtime.viewed()));
         ui.overlay = Overlay::Browser;
         self.request(BrowseRequest::Directory(cwd));
     }
@@ -634,20 +645,27 @@ impl Browsing {
             .request(request);
     }
 
-    /// Hands every finished read to the open browser, and sends the read a
-    /// mutation's answer asks for; an answer that finishes after the
-    /// browser closed is dropped.
-    fn poll(&mut self) {
+    /// Hands every finished read to the open browser and returns the folder
+    /// walks, which belong to the application: an add the listener asked for
+    /// must land even if the browser has since closed or moved (M8 §8).
+    fn poll(&mut self) -> Vec<TreeCollected> {
         let Some(worker) = &self.worker else {
-            return;
+            return Vec::new();
         };
+        let mut trees = Vec::new();
         while let Some(result) = worker.try_result() {
-            if let Some(state) = &mut self.state
-                && let Some(follow_up) = state.apply(result)
-            {
-                worker.request(follow_up);
+            match result {
+                BrowseResult::TreeCollected(tree) => trees.push(tree),
+                result => {
+                    if let Some(state) = &mut self.state
+                        && let Some(follow_up) = state.apply(result)
+                    {
+                        worker.request(follow_up);
+                    }
+                }
             }
         }
+        trees
     }
 }
 
@@ -753,7 +771,10 @@ fn handle_event(front: &mut Front<'_>, hits: &HitMap, event: Event) -> io::Resul
                 front.browsing.close(front.ui);
                 return Ok(());
             };
-            browser.sync_queue(&view.rows);
+            // The destination's rows, not the viewed playlist's: while the
+            // two usually agree, the browser's ticks and Enter-to-remove
+            // must always follow where its own adds land (M8 §8).
+            browser.sync_queue(&front.runtime.rows_of(browser.dest));
             let effects = browser.handle_key(key);
             for effect in effects {
                 apply_browser_effect(effect, front)?;
@@ -784,8 +805,8 @@ fn apply_browser_effect(effect: BrowserEffect, front: &mut Front<'_>) -> io::Res
             front.browsing.request(request);
             Ok(())
         }
-        BrowserEffect::Enqueue(items) => {
-            apply_effect(Effect::App(AppCommand::Enqueue(items)), front)
+        BrowserEffect::Enqueue { dest, items } => {
+            apply_effect(Effect::App(AppCommand::Enqueue { dest, items }), front)
         }
         BrowserEffect::Remove(id) => apply_effect(Effect::App(AppCommand::Remove(id)), front),
         BrowserEffect::Close => apply_effect(Effect::CloseBrowser, front),
@@ -995,5 +1016,98 @@ mod tests {
         let mut waits = Vec::new();
         assert_eq!(pass(&mut idle, &mut waits, |_| Drain::Continue), 0);
         assert_eq!(waits, vec![INPUT_POLL]);
+    }
+
+    // ---------------------------------------------------- Browsing::poll
+
+    use crate::playlist::PlaylistId;
+
+    fn one_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"").unwrap_or_else(|error| panic!("write: {error}"));
+        path
+    }
+
+    /// Polls `browsing` until it returns at least one tree, or panics past a
+    /// generous deadline — the same bounded-wait shape `tests/m5_browser.rs`
+    /// uses for `BrowseWorker::try_result`.
+    fn poll_for_a_tree(browsing: &mut Browsing) -> Vec<TreeCollected> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let trees = browsing.poll();
+            if !trees.is_empty() {
+                return trees;
+            }
+            assert!(Instant::now() < deadline, "no tree ever arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_tree_lands_once_the_browser_that_asked_for_it_has_closed() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let file = one_file(dir.path(), "track.mp3");
+        let dest = PlaylistId::from_raw_for_tests(1);
+
+        let mut browsing = Browsing {
+            state: Some(BrowserState::new(dir.path().to_path_buf(), dest)),
+            worker: Some(BrowseWorker::spawn(None)),
+        };
+        browsing.request(BrowseRequest::CollectTree {
+            roots: vec![dir.path().to_path_buf()],
+            dest,
+        });
+        // Closed before the worker has necessarily answered: the request was
+        // already in flight, and its answer must still reach the caller.
+        browsing.close(&mut UiState::new(false));
+        assert!(
+            browsing.state.is_none(),
+            "precondition: the browser is closed before the tree is drained"
+        );
+
+        let trees = poll_for_a_tree(&mut browsing);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+        assert_eq!(trees[0].dest, dest);
+        assert_eq!(trees[0].items, vec![file]);
+        assert!(
+            browsing.state.is_none(),
+            "still closed once the tree has landed"
+        );
+    }
+
+    #[test]
+    fn a_tree_lands_in_its_captured_destination_though_the_browser_moved_elsewhere() {
+        let asked_dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let file = one_file(asked_dir.path(), "track.flac");
+        let dest = PlaylistId::from_raw_for_tests(7);
+        let elsewhere = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+
+        let mut browsing = Browsing {
+            state: Some(BrowserState::new(asked_dir.path().to_path_buf(), dest)),
+            worker: Some(BrowseWorker::spawn(None)),
+        };
+        browsing.request(BrowseRequest::CollectTree {
+            roots: vec![asked_dir.path().to_path_buf()],
+            dest,
+        });
+        // Moved to a different directory rather than closed: the captured
+        // destination must not follow the browser there. A different
+        // destination proves the point: even the new browser's own capture
+        // does not retroactively touch the tree already in flight.
+        let elsewhere_dest = PlaylistId::from_raw_for_tests(9);
+        browsing.state = Some(BrowserState::new(
+            elsewhere.path().to_path_buf(),
+            elsewhere_dest,
+        ));
+
+        let trees = poll_for_a_tree(&mut browsing);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+        assert_eq!(trees[0].dest, dest);
+        assert_eq!(trees[0].items, vec![file]);
+        assert_eq!(
+            browsing.state.as_ref().map(|state| &state.cwd),
+            Some(&elsewhere.path().to_path_buf()),
+            "the browser is still looking at the other directory"
+        );
     }
 }

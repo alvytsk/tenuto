@@ -18,7 +18,7 @@ fn over_capacity() -> serde_json::Value {
     json!({ "schema_version": 3, "current_media": "local:/music/a.flac", "volume": 0.3,
         "checkpoints": { "local:/music/a.flac": { "position": { "secs": 5, "nanos": 0 }, "completed": true,
             "touch_seq": 3, "updated_at": "2026-09-14T10:00:00Z" } },
-        "queue": (1..=300).map(|i| json!({ "id": i, "media": format!("local:/music/t{i}.flac"),
+        "queue": (1..=5000).map(|i| json!({ "id": i, "media": format!("local:/music/t{i}.flac"),
             "source": { "kind": "local", "path": format!("/music/t{i}.flac") } })).collect::<Vec<_>>(),
         "active_entry": 1 })
 }
@@ -35,7 +35,7 @@ fn a_repaired_queue_is_backed_up_byte_for_byte_and_writing_stays_enabled() {
     let repair = outcome.queue_repair.expect("repair reported");
     assert_eq!(
         repair.reset,
-        QueueReset::WholeQueue(QueueProblem::OverCapacity { found: 300 })
+        QueueReset::WholeQueue(QueueProblem::OverCapacity { found: 5000 })
     );
     let QueueBackup::Saved(backup) = repair.backup else {
         panic!("backup must succeed")
@@ -111,11 +111,11 @@ fn invalid_base_state_and_newer_versions_keep_their_existing_handling() {
     assert!(matches!(outcome.reason, LoadReason::Quarantined { .. }));
     assert!(outcome.queue_repair.is_none());
 
-    let path = write_state(dir.path(), json!({ "schema_version": 4, "queue": 7 }));
+    let path = write_state(dir.path(), json!({ "schema_version": 5, "queue": 7 }));
     let outcome = StateStore::new(path, Arc::new(FakeClock::new())).load();
     assert!(matches!(
         outcome.reason,
-        LoadReason::UnsupportedVersion { found: 4 }
+        LoadReason::UnsupportedVersion { found: 5 }
     ));
     assert!(!outcome.writable);
 }

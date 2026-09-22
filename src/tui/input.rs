@@ -14,9 +14,9 @@ use ratatui::layout::Rect;
 use crate::application::runtime::{AppCommand, EnqueueItem};
 use crate::application::transport::QUEUE_EMPTY;
 use crate::application::view::PlayerView;
-use crate::queue::{Direction, DisplayDuration, DurationSource, QueueEntryId};
+use crate::queue::{Direction, DisplayDuration, DurationSource};
 use crate::tui::render::{HitMap, TransportButton};
-use crate::tui::state::{Overlay, UiState};
+use crate::tui::state::{InputPurpose, Overlay, UiState};
 
 const VOLUME_STEP: f32 = 0.05;
 const SEEK_STEP: i64 = 10;
@@ -52,8 +52,9 @@ pub fn handle_key(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Eff
         return vec![Effect::FullRedraw];
     }
     match ui.overlay {
-        Overlay::Input => input_overlay(key, ui),
-        Overlay::ConfirmClear => confirm_overlay(key, ui),
+        Overlay::Input(purpose) => input_overlay(key, ui, purpose),
+        Overlay::ConfirmClear(id) => confirm_overlay(key, ui, AppCommand::ClearPlaylist(id)),
+        Overlay::ConfirmDelete(id) => confirm_overlay(key, ui, AppCommand::DeletePlaylist(id)),
         Overlay::Help => help_overlay(key, ui),
         // Every other key belongs to the browser: `tui::run` forwards it to
         // `BrowserState::handle_key` (see `routes_to_browser`), whose own
@@ -102,7 +103,7 @@ pub fn handle_mouse(
     }
 }
 
-/// A transport button first, then a queue row — selecting it, or on the
+/// A playlist tab first, then a transport button, then a queue row — selecting it, or on the
 /// already-selected row, playing it — then the progress bar.
 fn left_click(
     event: MouseEvent,
@@ -111,8 +112,11 @@ fn left_click(
     view: &PlayerView,
 ) -> Vec<Effect> {
     let point = (event.column, event.row).into();
+    if let Some((_, id)) = hits.tabs.iter().find(|(rect, _)| rect.contains(point)) {
+        return vec![Effect::App(AppCommand::View(*id))];
+    }
     if let Some((_, button)) = hits.buttons.iter().find(|(rect, _)| rect.contains(point)) {
-        return vec![transport_effect(*button, ui.selected)];
+        return vec![transport_effect(*button, view)];
     }
     if let Some((_, id)) = hits.rows.iter().find(|(rect, _)| rect.contains(point)) {
         return if ui.selected == Some(*id) {
@@ -127,14 +131,15 @@ fn left_click(
         .collect()
 }
 
-fn transport_effect(button: TransportButton, selected: Option<QueueEntryId>) -> Effect {
+fn transport_effect(button: TransportButton, view: &PlayerView) -> Effect {
     Effect::App(match button {
-        TransportButton::Previous => AppCommand::Previous { selected },
+        TransportButton::Previous => AppCommand::Previous,
         TransportButton::SeekBack => AppCommand::SeekBy(-SEEK_STEP),
         TransportButton::SeekForward => AppCommand::SeekBy(SEEK_STEP),
-        TransportButton::PlayPause => AppCommand::PlayPause { selected },
+        TransportButton::PlayPause => AppCommand::PlayPause,
         TransportButton::Stop => AppCommand::Stop,
-        TransportButton::Next => AppCommand::Next { selected },
+        TransportButton::Next => AppCommand::Next,
+        TransportButton::Shuffle => AppCommand::ToggleShuffle(view.viewed),
     })
 }
 
@@ -194,7 +199,7 @@ pub(crate) fn blocks_ordinary_bindings(key: &KeyEvent) -> bool {
 /// act as shortcuts here); a control character is dropped rather than
 /// stored, since typed input is user text that later reaches the screen and
 /// must never carry a raw control character.
-fn input_overlay(key: KeyEvent, ui: &mut UiState) -> Vec<Effect> {
+fn input_overlay(key: KeyEvent, ui: &mut UiState, purpose: InputPurpose) -> Vec<Effect> {
     match key.code {
         KeyCode::Backspace => {
             ui.input.pop();
@@ -207,9 +212,14 @@ fn input_overlay(key: KeyEvent, ui: &mut UiState) -> Vec<Effect> {
             if trimmed.is_empty() {
                 Vec::new()
             } else {
-                vec![Effect::App(AppCommand::Enqueue(vec![
-                    EnqueueItem::from_input(&trimmed),
-                ]))]
+                vec![Effect::App(match purpose {
+                    InputPurpose::AddUrl(dest) => AppCommand::Enqueue {
+                        dest,
+                        items: vec![EnqueueItem::from_input(&trimmed)],
+                    },
+                    InputPurpose::NewPlaylist => AppCommand::CreatePlaylist(trimmed),
+                    InputPurpose::Rename(id) => AppCommand::RenamePlaylist(id, trimmed),
+                })]
             }
         }
         KeyCode::Esc => {
@@ -225,12 +235,13 @@ fn input_overlay(key: KeyEvent, ui: &mut UiState) -> Vec<Effect> {
     }
 }
 
-/// `y` (unmodified or shifted) clears the queue; any other key, including a
-/// Ctrl/Alt chord on `y`, closes the confirmation without effect.
-fn confirm_overlay(key: KeyEvent, ui: &mut UiState) -> Vec<Effect> {
+/// `y` (unmodified or shifted) runs `on_yes`, which carries the playlist the
+/// confirmation captured when it opened; any other key, including a Ctrl/Alt
+/// chord on `y`, closes the confirmation without effect.
+fn confirm_overlay(key: KeyEvent, ui: &mut UiState, on_yes: AppCommand) -> Vec<Effect> {
     ui.overlay = Overlay::None;
     if key.code == KeyCode::Char('y') && !blocks_ordinary_bindings(&key) {
-        vec![Effect::App(AppCommand::ClearQueue)]
+        vec![Effect::App(on_yes)]
     } else {
         Vec::new()
     }
@@ -253,9 +264,7 @@ fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect>
         return Vec::new();
     }
     match key.code {
-        KeyCode::Char(' ') => vec![Effect::App(AppCommand::PlayPause {
-            selected: ui.selected,
-        })],
+        KeyCode::Char(' ') => vec![Effect::App(AppCommand::PlayPause)],
         KeyCode::Enter => match ui.selected {
             Some(id) => vec![Effect::App(AppCommand::PlayEntry(id))],
             None => vec![Effect::Notice(QUEUE_EMPTY)],
@@ -276,26 +285,35 @@ fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect>
         KeyCode::Char('-' | '_') => vec![Effect::App(AppCommand::AdjustVolume(-VOLUME_STEP))],
         KeyCode::Char('+' | '=') => vec![Effect::App(AppCommand::AdjustVolume(VOLUME_STEP))],
         KeyCode::Char('s') => vec![Effect::App(AppCommand::Stop)],
-        KeyCode::Char('p') => vec![Effect::App(AppCommand::Play {
-            selected: ui.selected,
-        })],
-        KeyCode::Char('[') => vec![Effect::App(AppCommand::Previous {
-            selected: ui.selected,
-        })],
-        KeyCode::Char(']') => vec![Effect::App(AppCommand::Next {
-            selected: ui.selected,
-        })],
+        KeyCode::Char('p') => vec![Effect::App(AppCommand::Play)],
+        KeyCode::Char('[') => vec![Effect::App(AppCommand::Previous)],
+        KeyCode::Char(']') => vec![Effect::App(AppCommand::Next)],
         KeyCode::Char('d') => ui
             .selected
             .map_or_else(Vec::new, |id| vec![Effect::App(AppCommand::Remove(id))]),
         KeyCode::Char('b') => vec![Effect::OpenBrowser],
-        KeyCode::Char('a') => {
-            ui.overlay = Overlay::Input;
-            ui.input.clear();
+        KeyCode::Char('a') => open_input(ui, InputPurpose::AddUrl(view.viewed), ""),
+        KeyCode::Char('c') => {
+            ui.overlay = Overlay::ConfirmClear(view.viewed);
             Vec::new()
         }
-        KeyCode::Char('c') => {
-            ui.overlay = Overlay::ConfirmClear;
+        KeyCode::Tab => vec![Effect::App(AppCommand::ViewNext)],
+        KeyCode::BackTab => vec![Effect::App(AppCommand::ViewPrevious)],
+        KeyCode::Char('z') => vec![Effect::App(AppCommand::ToggleShuffle(view.viewed))],
+        KeyCode::Char('n') => open_input(ui, InputPurpose::NewPlaylist, ""),
+        KeyCode::Char('r') => {
+            let name = view
+                .tabs
+                .iter()
+                .find(|tab| tab.id == view.viewed)
+                .map_or("", |tab| tab.name.as_str());
+            open_input(ui, InputPurpose::Rename(view.viewed), name)
+        }
+        KeyCode::Char('D') if view.tabs.len() <= 1 => {
+            vec![Effect::Notice("The last playlist cannot be deleted")]
+        }
+        KeyCode::Char('D') => {
+            ui.overlay = Overlay::ConfirmDelete(view.viewed);
             Vec::new()
         }
         KeyCode::Char('?') => {
@@ -310,6 +328,15 @@ fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect>
         KeyCode::Char('q') => vec![Effect::Quit],
         _ => Vec::new(),
     }
+}
+
+/// Opens the input overlay for `purpose`, with `initial` already typed (the
+/// current name, for a rename).
+fn open_input(ui: &mut UiState, purpose: InputPurpose, initial: &str) -> Vec<Effect> {
+    ui.overlay = Overlay::Input(purpose);
+    ui.input.clear();
+    ui.input.push_str(initial);
+    Vec::new()
 }
 
 /// Moves the selection by one row, never wrapping; an empty queue selects

@@ -20,9 +20,10 @@ use crate::media::id::{AbsolutePath, MediaId};
 use crate::media::tags::{LocalTags, probe_local_tags};
 use crate::playback::error::PlaybackError;
 
-/// Queued jobs beyond the ones in hand; one per queue entry the queue can
-/// hold.
-const REQUEST_CAPACITY: usize = 256;
+/// Queued jobs beyond the ones in hand; one per entry the playlists can
+/// hold, so a folder add of a whole library — or the re-request `vacate`
+/// makes after `cancel_all` — never silently drops a probe (M8 §5).
+const REQUEST_CAPACITY: usize = crate::queue::MAX_PLAYLIST_ENTRIES;
 /// Finished results waiting for the runtime; a runtime that stops draining
 /// holds a handful rather than a queue's worth, and the workers wait
 /// instead. Results carry no cover bytes (see [`Worker::serve`]).

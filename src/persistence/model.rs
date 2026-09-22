@@ -11,9 +11,12 @@ use super::queue_codec::{self, QueueReset};
 use crate::media::id::MediaId;
 use crate::playback::checkpoint::PlaybackCheckpoint;
 use crate::playback::volume::Volume;
-use crate::queue::{Queue, QueueEntryId};
+use crate::playlist::{MAX_PLAYLISTS, Playlist, PlaylistError, PlaylistId, clean_name};
+use crate::queue::{
+    IdAllocator, MAX_PLAYLIST_ENTRIES, NewQueueEntry, Queue, QueueEntry, QueueEntryId, QueueError,
+};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Counting the current entry, which is never evictable (D2).
 pub const MAX_ENTRIES: usize = 512;
@@ -59,13 +62,25 @@ pub struct PersistedState {
     current_media: Option<MediaId>,
     volume: f32,
     checkpoints: BTreeMap<MediaId, PersistedCheckpoint>,
-    queue: Queue,
+    /// Never empty (M8 P1).
+    playlists: Vec<Playlist>,
+    /// Always names a member of `playlists`.
+    playing: PlaylistId,
     next_seq: u64,
+    /// The one allocator for every queue entry ID (M8 §4): outside `Queue`
+    /// so every playlist shares it. Written as `next_entry_id` (a number, or
+    /// `null` once exhausted) and read back raised past every ID the file
+    /// holds, so an ID is never handed out twice across a restart.
+    entry_ids: IdAllocator,
+    /// The one allocator for every playlist ID (M8 §4), persisted as
+    /// `next_playlist_id` under the same rule.
+    playlist_ids: IdAllocator,
 }
 
-/// The state file's shape before the queue is validated: `queue` and
-/// `active_entry` are held as raw JSON so a damaged queue can be recovered
-/// field-by-field without ever touching `checkpoints` (M5 §6, task brief).
+/// The state file's shape before the queue is validated: the playlist fields
+/// (and schema 3's `queue`/`active_entry`, kept for migration) are held as
+/// raw JSON so damaged queue data can be recovered field-by-field without
+/// ever touching `checkpoints` (M5 §6, M8 §6).
 #[derive(Deserialize)]
 pub(super) struct RawState {
     schema_version: u32,
@@ -79,6 +94,22 @@ pub(super) struct RawState {
     queue: Option<serde_json::Value>,
     #[serde(default)]
     active_entry: Option<serde_json::Value>,
+    #[serde(default)]
+    playlists: Option<serde_json::Value>,
+    #[serde(default)]
+    playing: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    next_entry_id: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    next_playlist_id: Option<serde_json::Value>,
+}
+
+/// Keeps `null` apart from an absent key: `Option<Value>` alone folds both
+/// into `None`, and a `null` counter means "exhausted" (M8 §4).
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 fn full_gain() -> f32 {
@@ -86,9 +117,11 @@ fn full_gain() -> f32 {
 }
 
 impl RawState {
-    /// `accept_queue` is false for schema 1/2 files and for read-only
-    /// snapshots, which never examine queue data (task brief recovery rules
-    /// 1-2).
+    /// Three shapes reach here: a schema 1/2 file (and any read-only
+    /// snapshot, which never examines queue data) starts from an empty
+    /// `Default` playlist; a schema 3 file recovers its one queue and
+    /// migrates it into that playlist; schema 4 recovers its playlists
+    /// directly (M8 §6).
     pub(super) fn into_state(self, accept_queue: bool) -> (PersistedState, Option<QueueReset>) {
         let next_seq = self
             .checkpoints
@@ -96,25 +129,39 @@ impl RawState {
             .map(|entry| entry.touch_seq)
             .max()
             .map_or(1, |highest| highest.saturating_add(1));
-        let (queue, reset) = if accept_queue && self.schema_version >= SCHEMA_VERSION {
-            queue_codec::recover_queue(
+        let recovered = if !accept_queue || self.schema_version < 3 {
+            queue_codec::migrate_queue(Queue::default(), self.current_media, None)
+        } else if self.schema_version == 3 {
+            let (queue, reset) = queue_codec::recover_queue(
                 self.queue.as_ref(),
                 self.active_entry.as_ref(),
                 self.current_media.as_ref(),
-            )
+            );
+            queue_codec::migrate_queue(queue, self.current_media, reset)
         } else {
-            (Queue::default(), None)
+            queue_codec::recover_playlists(
+                queue_codec::RawPlaylists {
+                    playlists: self.playlists.as_ref(),
+                    playing: self.playing.as_ref(),
+                    next_entry_id: self.next_entry_id.as_ref(),
+                    next_playlist_id: self.next_playlist_id.as_ref(),
+                },
+                self.current_media,
+            )
         };
         (
             PersistedState {
                 schema_version: self.schema_version,
-                current_media: self.current_media,
+                current_media: recovered.current_media,
                 volume: self.volume,
                 checkpoints: self.checkpoints,
-                queue,
+                playlists: recovered.playlists,
+                playing: recovered.playing,
                 next_seq,
+                entry_ids: recovered.entry_ids,
+                playlist_ids: recovered.playlist_ids,
             },
-            reset,
+            recovered.reset,
         )
     }
 }
@@ -133,16 +180,21 @@ impl Serialize for PersistedState {
             current_media: &'a Option<MediaId>,
             volume: f32,
             checkpoints: &'a BTreeMap<MediaId, PersistedCheckpoint>,
-            queue: Vec<queue_codec::QueueEntryDto>,
-            active_entry: Option<u64>,
+            playlists: Vec<queue_codec::PlaylistDto>,
+            playing: u64,
+            /// `None` serializes as `null`: an exhausted namespace (M8 §4).
+            next_entry_id: Option<u64>,
+            next_playlist_id: Option<u64>,
         }
         Out {
             schema_version: self.schema_version,
             current_media: &self.current_media,
             volume: self.volume,
             checkpoints: &self.checkpoints,
-            queue: queue_codec::encode(&self.queue),
-            active_entry: self.queue.active().map(QueueEntryId::get),
+            playlists: queue_codec::encode_playlists(&self.playlists),
+            playing: self.playing.get(),
+            next_entry_id: self.entry_ids.next(),
+            next_playlist_id: self.playlist_ids.next(),
         }
         .serialize(serializer)
     }
@@ -150,13 +202,17 @@ impl Serialize for PersistedState {
 
 impl Default for PersistedState {
     fn default() -> Self {
+        let playing = PlaylistId::from_raw(1);
         Self {
             schema_version: SCHEMA_VERSION,
             current_media: None,
             volume: Volume::FULL.as_gain(),
             checkpoints: BTreeMap::new(),
-            queue: Queue::default(),
+            playlists: vec![Playlist::new(playing, "Default".into())],
+            playing,
             next_seq: 1,
+            entry_ids: IdAllocator::default(),
+            playlist_ids: IdAllocator::starting_at(Some(2)),
         }
     }
 }
@@ -195,16 +251,153 @@ impl PersistedState {
         self.schema_version = SCHEMA_VERSION;
     }
 
-    /// The playback queue (M5 §5), decoded independently of `checkpoints` so
-    /// a damaged queue never costs a saved checkpoint.
+    pub fn playlists(&self) -> &[Playlist] {
+        &self.playlists
+    }
+
+    pub fn playing(&self) -> PlaylistId {
+        self.playing
+    }
+
+    fn index_of(&self, id: PlaylistId) -> Option<usize> {
+        self.playlists
+            .iter()
+            .position(|playlist| playlist.id() == id)
+    }
+
+    /// `playlists` is never empty and `playing` always names a member; index
+    /// 0 is the fallback that keeps this total without an `unwrap`.
+    fn playing_index(&self) -> usize {
+        self.index_of(self.playing).unwrap_or(0)
+    }
+
+    pub fn playlist(&self, id: PlaylistId) -> Option<&Playlist> {
+        self.index_of(id).map(|index| &self.playlists[index])
+    }
+
+    pub(crate) fn playlist_mut(&mut self, id: PlaylistId) -> Option<&mut Playlist> {
+        self.index_of(id).map(|index| &mut self.playlists[index])
+    }
+
+    pub fn playing_playlist(&self) -> &Playlist {
+        &self.playlists[self.playing_index()]
+    }
+
+    /// The *playing* playlist's queue: a convenience for transport and
+    /// advance. Everything else names its playlist or looks an entry's
+    /// owner up (M8 §5).
     pub fn queue(&self) -> &Queue {
-        &self.queue
+        self.playing_playlist().queue()
     }
 
     /// Mutable access for `Session`, which is the only thing allowed to
-    /// change what is queued (§3).
+    /// change what is queued (§3). The playing playlist's.
     pub(crate) fn queue_mut(&mut self) -> &mut Queue {
-        &mut self.queue
+        let index = self.playing_index();
+        self.playlists[index].queue_mut()
+    }
+
+    pub fn owner_of(&self, entry: QueueEntryId) -> Option<PlaylistId> {
+        self.playlists
+            .iter()
+            .find(|playlist| playlist.queue().get(entry).is_some())
+            .map(Playlist::id)
+    }
+
+    pub fn find_entry(&self, entry: QueueEntryId) -> Option<&QueueEntry> {
+        self.playlists
+            .iter()
+            .find_map(|playlist| playlist.queue().get(entry))
+    }
+
+    pub fn total_entries(&self) -> usize {
+        self.playlists
+            .iter()
+            .map(|playlist| playlist.queue().len())
+            .sum()
+    }
+
+    /// All or nothing, against the global cap, with IDs from the one
+    /// allocator (M8 P2, P7).
+    pub(crate) fn enqueue(
+        &mut self,
+        dest: PlaylistId,
+        batch: Vec<NewQueueEntry>,
+    ) -> Result<Vec<QueueEntryId>, QueueError> {
+        let index = self
+            .index_of(dest)
+            .ok_or(QueueError::UnknownPlaylist(dest.get()))?;
+        let available = MAX_PLAYLIST_ENTRIES.saturating_sub(self.total_entries());
+        if batch.len() > available {
+            return Err(QueueError::Capacity {
+                requested: batch.len(),
+                available,
+            });
+        }
+        self.playlists[index]
+            .queue_mut()
+            .enqueue(batch, &mut self.entry_ids)
+    }
+
+    pub(crate) fn create_playlist(&mut self, name: &str) -> Result<PlaylistId, PlaylistError> {
+        let name = clean_name(name).ok_or(PlaylistError::InvalidName)?;
+        if self.playlists.len() >= MAX_PLAYLISTS {
+            return Err(PlaylistError::TooMany);
+        }
+        let raw = self
+            .playlist_ids
+            .reserve(1)
+            .map_err(|_| PlaylistError::IdExhausted)?;
+        let id = PlaylistId::from_raw(*raw.start());
+        self.playlists.push(Playlist::new(id, name));
+        Ok(id)
+    }
+
+    pub(crate) fn rename_playlist(
+        &mut self,
+        id: PlaylistId,
+        name: &str,
+    ) -> Result<(), PlaylistError> {
+        let name = clean_name(name).ok_or(PlaylistError::InvalidName)?;
+        self.playlist_mut(id)
+            .ok_or(PlaylistError::Unknown(id))?
+            .set_name(name);
+        Ok(())
+    }
+
+    /// Removing the playing playlist moves `playing` to the next playlist,
+    /// else the previous, and re-points `current_media` at that playlist's
+    /// cursor — or clears it — so the cursor is never judged against the
+    /// deleted playlist's media (M8 §5). Checkpoints are untouched.
+    pub(crate) fn remove_playlist(&mut self, id: PlaylistId) -> Result<Playlist, PlaylistError> {
+        let index = self.index_of(id).ok_or(PlaylistError::Unknown(id))?;
+        if self.playlists.len() == 1 {
+            return Err(PlaylistError::LastPlaylist);
+        }
+        let removed = self.playlists.remove(index);
+        if self.playing == id {
+            let next = index.min(self.playlists.len() - 1);
+            self.playing = self.playlists[next].id();
+            self.repoint_current_media();
+        }
+        Ok(removed)
+    }
+
+    /// Re-points `current_media` at the playing playlist's cursor, or clears
+    /// it when that playlist has none (M8 §5). Reached through
+    /// `remove_playlist` and by recovery.
+    pub(super) fn repoint_current_media(&mut self) {
+        let queue = self.queue();
+        self.current_media = queue
+            .active()
+            .and_then(|id| queue.get(id))
+            .map(|entry| entry.media().clone());
+    }
+
+    pub(crate) fn set_playing(&mut self, id: PlaylistId) {
+        if self.index_of(id).is_some() {
+            self.playing = id;
+        }
     }
 
     pub fn current_media(&self) -> Option<&MediaId> {
@@ -396,5 +589,165 @@ mod tests {
         assert!(!evicted, "the current entry must never be evicted");
         assert_eq!(state.checkpoints.len(), 1, "nothing was removed");
         assert!(state.entry_for(&only).is_some());
+    }
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+    use crate::media::id::AbsolutePath;
+    use crate::playlist::{MAX_PLAYLISTS, PlaylistError};
+    use crate::queue::{
+        DisplayMetadata, MAX_PLAYLIST_ENTRIES, NewQueueEntry, QueueError, QueueSource,
+    };
+
+    fn entry(name: &str) -> NewQueueEntry {
+        let path = AbsolutePath::new(format!("/music/{name}.flac").into())
+            .unwrap_or_else(|error| panic!("absolute: {error}"));
+        NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata::default(),
+        )
+        .unwrap_or_else(|error| panic!("valid: {error}"))
+    }
+
+    #[test]
+    fn a_fresh_state_has_one_playing_playlist_named_default() {
+        let state = PersistedState::default();
+        assert_eq!(state.playlists().len(), 1);
+        assert_eq!(state.playlists()[0].name(), "Default");
+        assert_eq!(state.playing(), state.playlists()[0].id());
+    }
+
+    #[test]
+    fn entry_ids_are_unique_across_playlists_and_owner_lookup_finds_them() {
+        let mut state = PersistedState::default();
+        let a = state.playing();
+        let b = state.create_playlist("B").expect("room");
+        let in_a = state.enqueue(a, vec![entry("x")]).expect("fits");
+        let in_b = state.enqueue(b, vec![entry("x")]).expect("fits");
+        assert_ne!(in_a[0], in_b[0]);
+        assert_eq!(state.owner_of(in_a[0]), Some(a));
+        assert_eq!(state.owner_of(in_b[0]), Some(b));
+        assert_eq!(state.total_entries(), 2);
+        assert!(
+            state.queue().get(in_b[0]).is_none(),
+            "queue() is the playing playlist only"
+        );
+    }
+
+    #[test]
+    fn the_cap_is_global_and_a_refused_batch_changes_nothing() {
+        let mut state = PersistedState::default();
+        let a = state.playing();
+        let b = state.create_playlist("B").expect("room");
+        state
+            .enqueue(
+                a,
+                (0..MAX_PLAYLIST_ENTRIES - 1)
+                    .map(|i| entry(&format!("t{i}")))
+                    .collect(),
+            )
+            .expect("fits");
+        let before = state.clone();
+        assert_eq!(
+            state.enqueue(b, vec![entry("y"), entry("z")]),
+            Err(QueueError::Capacity {
+                requested: 2,
+                available: 1
+            })
+        );
+        assert_eq!(state.total_entries(), before.total_entries());
+        assert_eq!(state.entry_ids, before.entry_ids, "no ID was burned");
+    }
+
+    #[test]
+    fn enqueue_into_a_deleted_playlist_is_refused() {
+        let mut state = PersistedState::default();
+        let b = state.create_playlist("B").expect("room");
+        state.remove_playlist(b).expect("another exists");
+        assert_eq!(
+            state.enqueue(b, vec![entry("x")]),
+            Err(QueueError::UnknownPlaylist(b.get()))
+        );
+    }
+
+    #[test]
+    fn playlist_ids_are_never_reused() {
+        let mut state = PersistedState::default();
+        let b = state.create_playlist("B").expect("room");
+        state.remove_playlist(b).expect("another exists");
+        let c = state.create_playlist("C").expect("room");
+        assert!(c.get() > b.get());
+    }
+
+    #[test]
+    fn limits_and_names() {
+        let mut state = PersistedState::default();
+        assert_eq!(
+            state.create_playlist("   "),
+            Err(PlaylistError::InvalidName)
+        );
+        for i in 1..MAX_PLAYLISTS {
+            state.create_playlist(&format!("P{i}")).expect("room");
+        }
+        assert_eq!(
+            state.create_playlist("one too many"),
+            Err(PlaylistError::TooMany)
+        );
+        let only = PersistedState::default();
+        let mut only = only;
+        assert_eq!(
+            only.remove_playlist(only.playing()).map(|_| ()),
+            Err(PlaylistError::LastPlaylist)
+        );
+    }
+
+    #[test]
+    fn deleting_the_playing_playlist_moves_playing_and_repoints_current_media() {
+        let mut state = PersistedState::default();
+        let a = state.playing();
+        let b = state.create_playlist("B").expect("room");
+        let in_b = state.enqueue(b, vec![entry("kept")]).expect("fits");
+        let _ = state
+            .playlist_mut(b)
+            .map(|p| p.queue_mut().set_active(Some(in_b[0])));
+        state.set_current_media(entry_media("old"));
+
+        state.remove_playlist(a).expect("another exists");
+
+        assert_eq!(state.playing(), b);
+        assert_eq!(
+            state.queue().active(),
+            Some(in_b[0]),
+            "the cursor is not judged against the old media"
+        );
+        assert_eq!(state.current_media(), Some(&entry_media("kept")));
+    }
+
+    #[test]
+    fn deleting_the_playing_playlist_clears_current_media_when_the_next_has_no_cursor() {
+        let mut state = PersistedState::default();
+        let a = state.playing();
+        state.create_playlist("B").expect("room");
+        state.set_current_media(entry_media("old"));
+        state.remove_playlist(a).expect("another exists");
+        assert_eq!(state.current_media(), None);
+    }
+
+    #[test]
+    fn deleting_another_playlist_touches_neither_playing_nor_current_media() {
+        let mut state = PersistedState::default();
+        let a = state.playing();
+        let b = state.create_playlist("B").expect("room");
+        state.set_current_media(entry_media("old"));
+        state.remove_playlist(b).expect("another exists");
+        assert_eq!(state.playing(), a);
+        assert_eq!(state.current_media(), Some(&entry_media("old")));
+    }
+
+    fn entry_media(name: &str) -> MediaId {
+        entry(name).media().clone()
     }
 }

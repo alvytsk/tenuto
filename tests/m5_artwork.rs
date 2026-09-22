@@ -253,7 +253,9 @@ fn a_remote_streams_embedded_front_cover_becomes_the_active_cover_source() {
     )
     .expect("entry");
     let mut session = Session::new(PersistedState::default());
-    session.enqueue(vec![entry]).expect("fits");
+    session
+        .enqueue(session.state().playing(), vec![entry])
+        .expect("fits");
     let mut rig = rig_with(session.state().clone());
 
     rig.runtime.pump();

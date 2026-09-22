@@ -2,7 +2,7 @@
 
 Tenuto is a keyboard-first terminal audio player for local files, finite remote audio over HTTP, live HTTP radio, and podcast episodes from RSS or Atom feeds. It ships as one Rust binary, `tenuto`, with a plain `play` command and a full-screen `tui` player.
 
-This document describes the system as built through milestone 7.1. It uses the C4 model: context, containers, components, one runtime sequence, and deployment. The design decisions behind each part live in the specs under [`superpowers/specs/`](superpowers/specs/). The acceptance records live in [`m3-acceptance.md`](m3-acceptance.md), [`m5-acceptance.md`](m5-acceptance.md), [`m6-acceptance.md`](m6-acceptance.md), [`m7-acceptance.md`](m7-acceptance.md) and [`m7.1-acceptance.md`](m7.1-acceptance.md). Known debt lives in [`m1-known-debt.md`](m1-known-debt.md).
+This document describes the system as built through milestone 8. It uses the C4 model: context, containers, components, one runtime sequence, and deployment. The design decisions behind each part live in the specs under [`superpowers/specs/`](superpowers/specs/). The acceptance records live in [`m3-acceptance.md`](m3-acceptance.md), [`m5-acceptance.md`](m5-acceptance.md), [`m6-acceptance.md`](m6-acceptance.md), [`m7-acceptance.md`](m7-acceptance.md), [`m7.1-acceptance.md`](m7.1-acceptance.md) and [`m8-acceptance.md`](m8-acceptance.md). Known debt lives in [`m1-known-debt.md`](m1-known-debt.md).
 
 ## 1. Scope and invariants
 
@@ -34,6 +34,7 @@ Other fixed rules:
 - A partial success never exits zero.
 - Every URL in a message or a log line has passed `redact_url` first.
 - Runtime code forbids `unsafe` and denies `unwrap` and `expect`.
+- **A fresh load's starting point is a choice `resume_intent_for` makes per media kind, not a weakening of the position contract above.** Since M8, a local file's or a plain URL's *fresh load* always starts at position zero, whatever checkpoint is on record; a podcast episode still resumes it. The checkpoint is unaffected either way — it is still recorded and still read back — and the position contract still governs everything downstream of that starting point: once loaded, stop, pause and transport recreation continue to preserve it exactly as before. Pausing and pressing Stop then Play is not a fresh load and always continues mid-track.
 
 ## 2. System context
 
@@ -67,7 +68,7 @@ flowchart TB
     subgraph host["Listener's machine"]
         direction TB
         bin["tenuto binary<br/>CLI commands and the TUI player"]
-        state[("state.json<br/>$XDG_STATE_HOME/tenuto<br/>checkpoints, queue, volume<br/>schema 3, one atomic snapshot")]
+        state[("state.json<br/>$XDG_STATE_HOME/tenuto<br/>checkpoints, playlists, volume<br/>schema 4, one atomic snapshot")]
         lock[("state.lock<br/>player profile lock")]
         subs[("subscriptions.json<br/>$XDG_DATA_HOME/tenuto<br/>durable user data")]
         slock[("subscriptions.lock<br/>subscription writer lock")]
@@ -117,7 +118,7 @@ flowchart TB
     subgraph appl["Application"]
         runtime["application/runtime.rs<br/>PlayerRuntime: owns engine, Session,<br/>writer, HttpService, workers"]
         session["session.rs<br/>checkpoint policy, load correlation,<br/>sole owner of PersistedState"]
-        queue["queue.rs, resume.rs<br/>queue data, resume decision"]
+        queue["queue.rs, resume.rs, playlist.rs<br/>queue data, resume decision, named playlists"]
         library["library.rs<br/>list, resolve, subscribe,<br/>refresh, unsubscribe"]
         workers["application/browse, enrich<br/>artwork/worker<br/>background workers"]
     end
@@ -178,7 +179,7 @@ flowchart TB
 | `library` | The application seam for feeds: `list_feeds`, `list_episodes`, `resolve_episode`, `subscribe`, `unsubscribe`, `refresh`, `refresh_all`. Async where the network is involved. | Print, `block_on`, open a device or a terminal |
 | `application::runtime` | One owner for the engine, `Session`, the writer, the `HttpService` and the workers. Driven by `AppCommand` values. Pumped once per front-end iteration. | Read a key or draw a frame |
 | `session` | Decide what to checkpoint and when. Allocate and track `LoadRequestId` tokens. Build every state snapshot. | Perform I/O or own a thread |
-| `queue`, `resume` | Pure data and policy: queue occurrences with stable IDs, and the resume decision from a position and a completion flag. | Import persistence |
+| `queue`, `resume`, `playlist` | Pure data and policy: queue occurrences with stable IDs, the resume decision from a position and a completion flag, and a named, optionally shuffled playlist wrapping a queue. | Import persistence |
 | `playback` | The decode worker, the CPAL stream's whole lifecycle, position accounting, the command and event protocol, the spectrum tap and worker. | Depend on persistence or block on Tokio |
 | `http` | Produce encoded bytes and the evidence that classifies them. One fetch task per source generation. One capped whole-document fetch per call. | Own a decoder, a resampler or a stream |
 | `feed`, `subscription` | Parse a document, bind items to `MediaId::PodcastEpisode`, store the cache and the subscription list. | Touch playback state |
@@ -186,6 +187,8 @@ flowchart TB
 | `lifecycle` | Profile lock, signal listener, panic containment, fd-2 redirect, terminal cleanup, input thread, test hooks. | Contain business logic |
 | `media` | Validating identities, capabilities, metadata, tag and VBR-header reading. | Perform network I/O |
 | `tui` | Startup, event loop, teardown, layout tiers, drawing, the browser and its feed management, artwork placement, spectrum bars. | Mutate `PersistedState` except through `Session`; decode, read directories or probe tags inline |
+
+**The playlist model (M8).** A `Playlist` wraps today's `Queue` with an identity, a name and an optional shuffle; `PersistedState` holds a `Vec<Playlist>` in place of the old single queue. Entry IDs and playlist IDs are each their own global, monotonic counter allocated by `PersistedState` — never by a `Queue` or a `Playlist` itself — so an entry ID is unique across every playlist, not just within one. `PersistedState` also remembers which playlist is `playing` and that playlist's cursor (`current_media`); a cursor is adopted, not merely selected, and ownership survives moving between playlists (§9.1). The *viewed* playlist — which tab the front end is looking at — is transient runtime state kept by `application::runtime`, never written to disk.
 
 ## 5. Execution contexts
 
@@ -213,7 +216,7 @@ Only artwork and metadata jobs are contained. `lifecycle::panic::run_contained` 
 
 ## 6. Sequence: play a podcast episode from the terminal player
 
-The listener presses Enter on a queued episode. The diagram shows the path from the key to the first checkpoint.
+The listener presses Enter on an episode already added to the viewed playlist. The diagram shows the path from the key to the first checkpoint.
 
 ```mermaid
 sequenceDiagram
@@ -229,7 +232,7 @@ sequenceDiagram
     participant O as CPAL callback
     participant W as tenuto-state
 
-    L->>T: Enter on a queue row
+    L->>T: Enter on a playlist row
     T->>R: AppCommand::PlayEntry
     R->>C: look up the episode's current enclosure
     C-->>R: enclosure URL, or the saved fallback URL
@@ -263,7 +266,7 @@ Rules the sequence relies on:
 - **Correlation.** Every `Load` carries a `LoadRequestId`. `Loaded`, the `Loading` state change, and a load's own `Failed` echo it. `Session` adopts an entry only on a `Loaded` whose token is registered and whose entry still exists with the same media. A late outcome for a removed entry cannot resurrect it. Each accepted load gets exactly one of `Loaded`, `LoadCancelled`, or `Failed { request: Some }`.
 - **Order.** The application drains events, then samples `Progress` once. The sample that follows a transition event is strictly newer than the transition. `Session::tick` ignores progress whose token is not the adopted one.
 - **No implicit start.** `PlayLoaded` plays only while the worker still owns that token and is paused after a successful open. A failed load never triggers a reopen.
-- **No network before play.** Restoring or enqueueing an episode reads the local cache only. The cover art request goes out only after playback has opened a connection.
+- **No network before play.** Restoring a playlist or adding an episode to one reads the local cache only. The cover art request goes out only after playback has opened a connection.
 
 ## 7. Playback engine contracts
 
@@ -388,16 +391,16 @@ What is played and what is checkpointed are different values on purpose. A podca
 
 ### 9.1 Playback state
 
-`state.json` is one atomic snapshot: current media, one checkpoint per media identity capped at 512, volume, the queue capped at 256 occurrences, and the active entry. The writer creates a temporary file in the destination directory, writes it, fsyncs it, renames it over the destination, and fsyncs the parent directory where supported.
+`state.json` is one atomic snapshot: current media, one checkpoint per media identity capped at 512, volume, every playlist with its own cursor, which playlist is playing, and the two ID allocators (M8 §4) — the playlists capped together at 4,096 entries and 32 playlists. The writer creates a temporary file in the destination directory, writes it, fsyncs it, renames it over the destination, and fsyncs the parent directory where supported.
 
 `Session` captures a checkpoint every 5 s while playing and on pause, stop, track change and successful seek. The writer coalesces over 2 s. Worst-case loss is bounded end to end by those two numbers. A single accepted update sequence orders snapshots. Timestamps never do. There is no merge algorithm.
 
 Schema rules:
 
-- `schema_version` is 3. Schemas 1 and 2 load with an empty queue.
+- `schema_version` is 4. Schemas 1 and 2 load with a single, empty `Default` playlist. A schema 3 file's one queue and active entry migrate into a `Default` playlist on load (§4.5); a schema 4 file loads its playlists directly. A version above 4, or below 1, is genuinely unreadable rather than migratable.
 - `PersistedCheckpoint` carries `estimated` beside `position`. An estimated location may drive a resume. It never overwrites an established position.
-- A malformed file or a newer schema is preserved. Garbage moves aside as `state.json.rejected-<stamp>`. A newer schema stays in place with writing disabled for the session.
-- Queue recovery is queue-only. `queue_codec::recover_queue` decodes `queue` and `active_entry` from raw JSON. A bad entry, duplicate IDs, a source that mismatches its identity, or an over-capacity queue resets the queue and copies the original bytes to `state.json.queue-recovery-<stamp>`. Checkpoints, volume and current media survive.
+- A malformed file or a newer schema is preserved. Garbage moves aside as `state.json.rejected-<stamp>`. A newer schema — including a schema 4 file read by a build that only knows schema 3 — stays in place with writing disabled for the session.
+- Playlist recovery is playlist-only. `queue_codec` decodes each playlist (or, from a schema 3 file, the one queue and active entry) from raw JSON. A bad entry, duplicate entry or playlist IDs, a source that mismatches its identity, or an over-capacity playlist resets the affected playlist data and copies the original bytes to `state.json.queue-recovery-<stamp>`. Checkpoints, volume and current media survive.
 - A positive checkpoint whose resume capability resolves to `Unsupported` becomes protected when playback falls back to zero. Only an established restart, an established seek, or verified completion ends protection.
 
 ### 9.2 Subscriptions and cache

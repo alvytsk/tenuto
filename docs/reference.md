@@ -6,11 +6,11 @@ The rules the player and the feed commands follow, stated precisely. The [README
 
 | Command | Action |
 |---|---|
-| _(no arguments)_ | Open the full-screen player on the saved queue |
+| _(no arguments)_ | Open the full-screen player on the saved playlists |
 | `play <path-or-url>` | Play one file or URL with a status line and a few keys |
 | `play <slug> <index>` | Play a subscribed feed's episode by its 1-based index |
 | `play ... --probe-only` | Open the source, print what was found, and exit without a device or a terminal |
-| `tui [--mouse on\|off] [--artwork auto\|blocks\|off]` | Open the full-screen player on the saved queue |
+| `tui [--mouse on\|off] [--artwork auto\|blocks\|off]` | Open the full-screen player on the saved playlists |
 | `subscribe <url> [--as <slug>]` | Fetch a feed once, store the subscription, cache its episodes |
 | `feeds` | List every subscription |
 | `episodes <slug> [-n N] [--reverse]` | List a feed's cached episodes with your progress |
@@ -40,7 +40,7 @@ A file with no such header lands on a rough estimate. The landing can be in a su
 tenuto tui [--mouse on|off] [--artwork auto|blocks|off]
 ```
 
-`tui` restores the queue, the active entry, the volume and every checkpoint. It never starts playing on its own. No track is loaded and nothing is fetched until you press a playback key. Local files' tags and the active local entry's cover are read in the background. The audio device is created on the first load, so the player opens on a machine with no output device.
+`tui` restores every playlist, the playing one's active entry, the volume and every checkpoint. It never starts playing on its own. No track is loaded and nothing is fetched until you press a playback key. Local files' tags and the active local entry's cover are read in the background. The audio device is created on the first load, so the player opens on a machine with no output device.
 
 Options:
 
@@ -48,36 +48,53 @@ Options:
 - `--artwork auto` asks the terminal which image protocol it supports and falls back to colored half-blocks after 250 ms without an answer. `blocks` always uses half-blocks. `off` never loads artwork and shows only the placeholder.
 - Under tmux, `auto` and `blocks` run `tmux set -p allow-passthrough on` for the current pane. `off` avoids that.
 
-The layout adapts to the terminal size. At 80 columns by 28 rows and above the player shows the cover with the track information, the spectrum and the time beside it, then progress and transport, above the queue. The spectrum takes the rows the information leaves, so it is taller when a track has only a title. Below 80 columns or 28 rows it is compact: a smaller cover beside the title, the artist, a spectrum of three or four rows and the time. Below 22 rows the compact player shrinks to a small cover and a one-row spectrum. Below 50 columns or 18 rows it is minimal, with no cover and no spectrum. Below 30 columns or 8 rows it asks for a larger window, while space and `q` keep working. Either dimension alone drops a tier.
+The layout adapts to the terminal size. At 80 columns by 28 rows and above the player shows the cover with the track information, the spectrum and the time beside it, then progress and transport, above the viewed playlist. The spectrum takes the rows the information leaves, so it is taller when a track has only a title. Below 80 columns or 28 rows it is compact: a smaller cover beside the title, the artist, a spectrum of three or four rows and the time. Below 22 rows the compact player shrinks to a small cover and a one-row spectrum. Below 50 columns or 18 rows it is minimal, with no cover and no spectrum. Below 30 columns or 8 rows it asks for a larger window, while space and `q` keep working. Either dimension alone drops a tier.
 
 ### Keys
 
 | Key | Action |
 |---|---|
-| Space | Pause or resume. Before anything is loaded, load the restored active entry, or the selected row. After the last entry ended, replay it |
-| Enter | Play the selected queue entry |
+| Space | Pause or resume. Before anything is loaded (or after a failed load), resume the *playing* playlist's remembered entry, or its first entry in playback order if it has none — never a row you have selected elsewhere. After the last entry ended, replay it |
+| Enter | Play the selected row of the *viewed* playlist, whichever playlist that is |
 | Up, Down, `j`, `k` | Move the selection. Playback does not change |
 | `J`, `K` | Move the selected entry down or up |
 | Left, Right | Seek backward or forward 10 seconds. A burst of presses becomes one seek |
 | Home | Restart the track from the beginning |
 | `-`, `_`, `+`, `=` | Volume down or up by 5% |
 | `s`, `p` | Stop, play |
-| `[`, `]` | Previous or next queue entry. Never wraps |
+| `[`, `]` | Previous or next entry, in the playing playlist's playback order (or, while a track is loading, the playlist that request came from). Never wraps; with no current track they do nothing |
 | `d` | Remove the selected entry |
-| `a` | Type a path or an `http(s)://` URL to enqueue |
-| `c` | Clear the queue after a `y` confirmation |
+| `a` | Type a path or an `http(s)://` URL to add to the viewed playlist |
+| `c` | Clear the viewed playlist after a `y` confirmation |
 | `b` | Open the browser |
+| Tab, Shift-Tab | View the next or previous playlist |
+| `n` | Create a playlist |
+| `r` | Rename the viewed playlist |
+| `D` | Delete the viewed playlist after a `y` confirmation; refused outright if it is the only one |
+| `z` | Toggle shuffle on the viewed playlist |
 | `?` | Show the key help |
 | `m` | Toggle mouse capture |
 | Ctrl-L | Redraw the screen and re-place the cover |
 | Esc | Close the open overlay or cancel typing |
 | `q`, Ctrl-C | Quit |
 
-Ctrl-C quits and Ctrl-L redraws from anywhere, including while typing and inside overlays. Every other key belongs to what is open. While typing after `a`, printable keys are text, Enter enqueues and Esc cancels. The clear confirmation takes `y` and treats any other key as no. A Ctrl or Alt chord never fires a plain shortcut.
+Ctrl-C quits and Ctrl-L redraws from anywhere, including while typing and inside overlays. Every other key belongs to what is open. While typing after `a`, `n` or `r`, printable keys are text, Enter submits and Esc cancels. The clear and delete confirmations take `y` and treat any other key as no. A Ctrl or Alt chord never fires a plain shortcut.
 
-Seeking before anything is loaded answers `Play a track before seeking`. While a track is loading it answers `Still loading`. After the last entry ended, Left and Right answer `Track ended; press play to replay`. With an empty queue, the playback keys answer `Queue is empty`.
+Seeking before anything is loaded answers `Play a track before seeking`. While a track is loading it answers `Still loading`. After the last entry ended, Left and Right answer `Track ended; press play to replay`. An empty *playing* playlist answers `Queue is empty` on Space, `p`, Home and seeking — unless a track is already Playing, Paused or Reconnecting, which keep taking those commands even after their playlist is emptied out from under them; only a Stopped track falls back to the notice. Enter always follows the *viewed* playlist and answers `Queue is empty` only when that one has nothing to select, whatever state the playing playlist is in.
 
-With mouse capture on, a click selects a queue row and a second click on the selected row plays it. The wheel moves the selection over the queue. The transport buttons act like their keys. A click on the progress bar seeks, only for a loaded track whose duration the decoder confirmed. The mouse does nothing while an overlay is open.
+With mouse capture on, a click selects a row of the viewed playlist and a second click on the selected row plays it. The wheel moves the selection over that playlist. A click on a tab of the strip views that playlist; the one-row strip of the smallest layout is keyboard-only. The transport buttons act like their keys, and the `SHFL` button after them toggles shuffle on the viewed playlist as `z` does, lit while it is on. A playlist or a browser listing longer than its pane shows a scrollbar thumb on its right border; it is display only. A click on the progress bar seeks, only for a loaded track whose duration the decoder confirmed. The mouse does nothing while an overlay is open.
+
+### Playlists
+
+The queue is now one of several named playlists, shown as tabs above the list. At most 32 playlists exist at once, each named 1 to 40 characters after trimming — names may repeat, since a playlist's identity is its ID, not its name; deleting the last one is refused. Together they hold at most 4,096 entries, not 4,096 each.
+
+Two playlists matter independently: the one you are *viewing* (what the list shows, what `Enter`, `a`, `c`, `r`, `D` and `z` act on) and the one that is *playing* (what Space, `p`, `[` and `]` act on, and what a track ending advances). They are usually the same tab, but switching tabs with `Tab`/`Shift-Tab` only changes which one you are viewing — playback keeps running on whichever playlist it was already on. Enter on another tab's row starts playing that playlist, which makes it both viewed and playing at once. The view starts on the playing playlist each time the player opens; which tab you had open is not remembered across a restart.
+
+Deleting the viewed playlist with `D` moves the view to the adjacent one — the tab that took its place in the strip, or the one before it if the deleted tab was last. Deleting the *playing* playlist follows the same rule for `playing`: whatever it had adopted is released and playback stops, and the `▶` mark moves to that same adjacent playlist.
+
+On the tab strip, the playing playlist's name is prefixed with `▶`; the viewed tab is bold; a shuffled playlist's name is suffixed with `·shfl`. An existing queue from before this feature becomes a playlist named `Default`.
+
+`z` toggles shuffle on the viewed playlist. The list still displays in its own order; only playback order — next, previous and what plays next when a track ends — follows the shuffle. Turning it off resumes in list order from wherever playback is. The shuffled order survives a restart. Adding to a playlist while its shuffle is on reshuffles it with the current track first, so everything added lies ahead; tracks already played on this pass come round again. Removing entries leaves the order of the rest alone.
 
 ### The browser
 
@@ -87,8 +104,9 @@ With mouse capture on, a click selects a queue row and a second click on the sel
 |---|---|
 | Up, Down, `j`, `k` | Move |
 | Tab | Switch between Files, Podcasts and Radio |
-| Enter | Open a directory or a feed. Enqueue a file, an episode or a station. On a row already queued, remove it from the queue |
-| Space | Mark several rows to enqueue together. Rows already queued are skipped |
+| Enter | Open a directory or a feed. Add a file, an episode or a station to the playlist the browser opened on. On Files with rows marked, add all of them the way `a` does. On a row already queued, remove it instead |
+| Space | Mark several rows to add together. On Files a directory can be marked too. Rows already queued are skipped |
+| `a` (Files) | Add the marked rows, or the row under the cursor, to the playlist the browser opened on — files and folders alike, recursively, in this listing's own order; strictly additive |
 | Backspace, Left | Go up one level |
 | `a` (Podcasts) | Subscribe by URL |
 | `r`, `R` (Podcasts) | Refresh the highlighted feed, or every feed |
@@ -98,7 +116,9 @@ With mouse capture on, a click selects a queue row and a second click on the sel
 | `d` (Radio) | Remove the station under the cursor, after a `y` confirmation |
 | `b`, Esc | Close the browser |
 
-A row already in the queue shows a green `✓`. A feed's episodes are listed newest first, with undated ones after the dated ones in feed order. `tenuto episodes` keeps feed order, so its indices do not move. Directories are read one level at a time. Nothing indexes a library recursively.
+A row already in a playlist shows a green `✓`. So does a directory on Files when that playlist holds a file from anywhere inside it — any file, not every file, and not one reached through a symlink; `a` on such a directory still adds whatever is missing. A feed's episodes are listed newest first, with undated ones after the dated ones in feed order. `tenuto episodes` keeps feed order, so its indices do not move. A directory listing is read one level at a time; `a` on Files is the exception, walking a folder's whole tree to add it. Whichever playlist was viewed when the browser opened is where every add in that session lands, even if you switch playlists — or the browser is still open when a folder walk finishes — before it does.
+
+A folder add reports what happened in the status line, made of the parts that apply, in order: `added N`, `N already queued`, `N unreadable`, `N did not fit`, and `scan limit reached` (which never carries a count, since an unfinished walk cannot know how many files it never reached). Nothing at all to add reports `nothing to add`; a playlist deleted before the walk finished reports `Playlist was deleted; nothing added`. The walk follows the same one-level-at-a-time order the listing itself uses at every depth — subdirectories first, then that level's own audio files, each by case-insensitive name — so a truncated walk keeps what the listing would show first. A directory reached through a symlink is never walked, including a symlink picked directly as a root; a file reached through a symlink is added once, and the same file reached by two different paths (an alias) counts and adds only once.
 
 Opening the browser never refreshes a feed. The Podcasts tab lists what was last cached. Updating it is an explicit act: `r` or `R` in the browser, or `tenuto refresh` from a shell. Enqueueing or restoring a URL or an episode makes no network request. Only playing it does. The same holds for Radio: opening the tab and listing saved stations makes no request; only `a`, `r` and playing a station do.
 
@@ -112,15 +132,17 @@ A station's logo, when its identity carries one and it decodes, shows in the pla
 
 `stations.json` is written atomically, exactly as `subscriptions.json` is. A file this build cannot parse is quarantined to `stations.json.rejected-<timestamp>` and the station list starts empty rather than being silently truncated; a file from a newer schema version is left in place with station writes disabled for the session.
 
-### The queue
+### Playlist entries
 
-Enqueueing appends and never changes what is playing. The queue is saved in `state.json` with the checkpoints and survives a restart. The same track may appear twice. Duplicates share one listening history but keep their own places. When a track ends, the next entry starts from its own resume point. A finished entry replays from the beginning. The last entry simply ends. There is no wrap, shuffle or repeat. A load that fails leaves the queue alone and waits for you.
+Adding appends to the playlist you added to and never changes what is playing. Every playlist is saved in `state.json` with the checkpoints and survives a restart. The same track may appear twice, in the same playlist or different ones. Duplicates share one listening history but keep their own places. When a track ends, the next entry in its playlist's playback order starts from its own resume point. A finished entry replays from the beginning. The playlist's last entry in that order simply ends — there is no wrap or repeat. A load that fails leaves every playlist alone and waits for you.
 
-The queue holds at most 256 occurrences. An enqueue that would go past that is refused whole with `Queue is full (256 entries)`. Checkpoints keep their own cap of 512 media. A queued track's history can still be evicted by enough other listening. The entry stays queued and then starts from zero.
+All playlists together hold at most 4,096 entries. A single add that would go past that is refused whole with `Playlists are full (4096 entries in total)`. A folder add is different: it takes however many still fit and reports the rest as `did not fit` rather than refusing the whole batch. Checkpoints keep their own, separate cap of 512 media, unrelated to the entry cap. A queued track's history can still be evicted by enough other listening. The entry stays queued and then starts from zero.
 
-A queue entry for a podcast episode remembers the episode, not a list position. Before loading it, the player looks the episode up in the local feed cache and uses its current enclosure. When the episode, the subscription or the cache is gone, it plays the URL it last saw and says `Using saved episode source`.
+An entry for a podcast episode remembers the episode, not a list position. Before loading it, the player looks the episode up in the local feed cache and uses its current enclosure. When the episode, the subscription or the cache is gone, it plays the URL it last saw and says `Using saved episode source`.
 
-Before the active entry is loaded, the progress line and the queue rows show saved history, not a live position:
+**Resuming.** A podcast episode resumes from its checkpoint on every fresh load, exactly as before M8. A local file or a plain URL — including from `tenuto play` — always starts from the beginning on a fresh load, even with a checkpoint on record; only pausing and pressing Stop then Play still continue mid-track, and a checkpoint is still written for it either way. Reaching the end of a track marks it complete regardless of kind; reopening a completed track starts from the beginning.
+
+Before the active entry is loaded, the progress line and its playlist's rows show saved history, not a live position:
 
 | Label | Meaning |
 |---|---|
@@ -255,7 +277,7 @@ An item with a GUID keeps its position when the show moves its audio to another 
 
 | Location | Contents |
 |---|---|
-| `$XDG_STATE_HOME/tenuto/state.json` | Checkpoints, volume, the queue and its active entry |
+| `$XDG_STATE_HOME/tenuto/state.json` | Checkpoints, volume, every playlist and which one is playing |
 | `$XDG_STATE_HOME/tenuto/state.lock` | The player lock. Empty, never deleted |
 | `$XDG_STATE_HOME/tenuto/logs/` | One log per `tui` run. The five most recent earlier ones are kept |
 | `$XDG_DATA_HOME/tenuto/subscriptions.json` | Subscriptions. Durable user data |
@@ -267,9 +289,9 @@ On macOS these resolve to the platform's own data, cache and local-data director
 
 ### Playback state
 
-`state.json` holds one checkpoint per media identity, capped at 512 entries, plus the queue. It is replaced atomically, so a crash mid-write cannot leave a truncated file. Reaching the end of a track marks it complete. Reopening a completed track starts from the beginning.
+`state.json` holds one checkpoint per media identity, capped at 512 entries, plus every playlist, capped together at 4,096 entries. It is replaced atomically, so a crash mid-write cannot leave a truncated file. Reaching the end of a track marks it complete. Reopening a completed track starts from the beginning.
 
-A file this build cannot read is preserved. Garbage is moved aside as `state.json.rejected-<timestamp>`. A file from a newer build is left where it is, with writing disabled for that session. If only the queue part is damaged, only the queue is reset. The original bytes are copied to `state.json.queue-recovery-<timestamp>` first, and the player says what was reset.
+`state.json` is schema 4. A schema 3 file (one queue, one active entry) migrates on first load into a single playlist named `Default`. A file this build cannot read is preserved. Garbage is moved aside as `state.json.rejected-<timestamp>`. A file from a build newer than this one — including a schema-4 file read by an older build — is left where it is, with writing disabled for that session, so the player runs but does not save. If only the playlist data is damaged, only that part is reset. The original bytes are copied to `state.json.queue-recovery-<timestamp>` first, and the player says what was reset.
 
 Deleting `state.json` forgets every remembered position. There is no supported way to edit it by hand. A checkpoint key this build cannot parse makes the whole file unreadable.
 

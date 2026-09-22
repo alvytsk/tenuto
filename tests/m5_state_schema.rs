@@ -19,17 +19,20 @@ fn history() -> serde_json::Value {
 }
 
 #[test]
-fn schema_three_round_trips_the_queue_and_active_entry() {
-    assert_eq!(SCHEMA_VERSION, 3);
+fn schema_three_migrates_its_queue_into_the_default_playlist() {
+    assert_eq!(SCHEMA_VERSION, 4);
     let file = json!({ "schema_version": 3, "current_media": "local:/music/a.flac", "volume": 0.5,
         "checkpoints": history(), "queue": [entry(4, "a"), entry(9, "a")], "active_entry": 9 });
     let state: PersistedState = serde_json::from_value(file).expect("valid");
     assert_eq!(state.queue().len(), 2);
     assert_eq!(state.queue().active().map(|id| id.get()), Some(9));
+    // `from_value` decodes without the store's version stamp, so the label is
+    // still the file's; only `StateStore::load` migrates it.
     let back = serde_json::to_value(&state).expect("serializes");
     assert_eq!(back["schema_version"], 3);
-    assert_eq!(back["active_entry"], 9);
-    assert_eq!(back["queue"][1]["id"], 9);
+    assert_eq!(back["playlists"][0]["active_entry"], 9);
+    assert_eq!(back["playlists"][0]["entries"][1]["id"], 9);
+    assert_eq!(back["playing"], 1);
 }
 
 #[test]
@@ -73,8 +76,8 @@ fn every_whole_queue_problem_is_classified() {
             QueueProblem::SourceMismatch,
         ),
         (
-            serde_json::Value::Array((1..=257).map(|i| entry(i, &format!("t{i}"))).collect()),
-            QueueProblem::OverCapacity { found: 257 },
+            serde_json::Value::Array((1..=4097).map(|i| entry(i, &format!("t{i}"))).collect()),
+            QueueProblem::OverCapacity { found: 4097 },
         ),
     ];
     for (queue, problem) in cases {
@@ -123,7 +126,7 @@ fn a_duplicate_occurrence_is_never_inferred_active_from_media() {
 #[test]
 fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
     use tenuto::media::id::MediaId;
-    use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueError, QueueSource};
+    use tenuto::queue::{DisplayMetadata, IdAllocator, NewQueueEntry, QueueError, QueueSource};
     let file = json!({ "schema_version": 3, "queue": [entry(u64::MAX, "a")] });
     let state: PersistedState = serde_json::from_value(file).expect("valid maximum ID");
     let mut queue = state.queue().clone();
@@ -137,7 +140,14 @@ fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
         DisplayMetadata::default(),
     )
     .expect("entry");
-    assert_eq!(queue.enqueue(vec![item]), Err(QueueError::IdExhausted));
+    // Mirrors `RawState::into_state`, which raises the shared allocator past
+    // every recovered entry's ID: the maximum has already been observed.
+    let mut ids = IdAllocator::default();
+    ids.observe(u64::MAX);
+    assert_eq!(
+        queue.enqueue(vec![item], &mut ids),
+        Err(QueueError::IdExhausted)
+    );
     assert_eq!(queue, before);
     assert_eq!(queue.entries()[0].id().get(), u64::MAX);
 }

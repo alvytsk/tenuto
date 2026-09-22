@@ -16,6 +16,7 @@
 //! issued during a refresh-all waits behind it; a second worker for
 //! mutations is the upgrade if that wait ever matters.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -36,6 +37,8 @@ use crate::library::{
     list_stations, refresh, refresh_all, remove_station, reprobe_station, subscribe, unsubscribe,
 };
 use crate::media::id::MediaId;
+use crate::playlist::PlaylistId;
+use crate::queue::MAX_PLAYLIST_ENTRIES;
 
 /// The extensions a listing classifies as audio, compared ASCII
 /// case-insensitively.
@@ -110,6 +113,113 @@ fn is_audio(path: &Path) -> bool {
         })
 }
 
+/// A folder add's outcome (M8 §8): every audio file `collect_tree` found
+/// under the selected roots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeCollected {
+    pub dest: PlaylistId,
+    /// Audio files in walk order, deduplicated by resolved `MediaId`.
+    pub items: Vec<PathBuf>,
+    /// Directories that could not be read. Logged, counted in the notice.
+    pub unreadable: Vec<PathBuf>,
+    /// The walk stopped at the limit: unvisited files may exist, and no
+    /// count of them is known.
+    pub scan_limit_reached: bool,
+}
+
+/// Every audio file under `roots`, for a folder add (M8 §8). Depth-first,
+/// each level in `list_directory`'s own order, so the walk and the listing
+/// the listener is looking at agree; that order also decides what a
+/// truncated walk keeps. Filename order, not album track order.
+pub fn collect_tree(roots: &[PathBuf], dest: PlaylistId, limit: usize) -> TreeCollected {
+    let mut walk = Walk {
+        limit,
+        full: limit == 0,
+        seen: HashSet::new(),
+        tree: TreeCollected {
+            dest,
+            items: Vec::new(),
+            unreadable: Vec::new(),
+            scan_limit_reached: false,
+        },
+    };
+    for root in roots {
+        if walk.full {
+            // Whatever is left was never looked at.
+            walk.tree.scan_limit_reached = true;
+            break;
+        }
+        // `metadata` follows symlinks, so a root that links to a directory
+        // lands in `directory`, which is where directory symlinks are refused.
+        if std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
+            walk.directory(root);
+        } else if is_audio(root) {
+            walk.file(root);
+        }
+    }
+    walk.tree
+}
+
+struct Walk {
+    limit: usize,
+    /// `limit` candidates are held: stop now, do not keep reading the tree.
+    full: bool,
+    seen: HashSet<MediaId>,
+    tree: TreeCollected,
+}
+
+impl Walk {
+    fn file(&mut self, path: &Path) {
+        let Ok((media, _)) = resolve_path(path) else {
+            return;
+        };
+        if !self.seen.insert(media) {
+            return;
+        }
+        self.tree.items.push(path.to_path_buf());
+        self.full = self.tree.items.len() >= self.limit;
+    }
+
+    /// The one entry point for traversing a directory, so the one place a
+    /// directory symlink is refused — as a descendant or as a selected root.
+    /// That refusal is what rules out a cycle (M8 §8).
+    ///
+    /// ponytail: recursion depth equals directory depth; a tree thousands of
+    /// levels deep would overflow the worker's stack. An explicit stack is
+    /// the upgrade.
+    fn directory(&mut self, path: &Path) {
+        let is_link =
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if is_link {
+            return;
+        }
+        let entries = match list_directory(path) {
+            Ok(entries) => entries,
+            Err(_) => {
+                self.tree.unreadable.push(path.to_path_buf());
+                return;
+            }
+        };
+        let mut entries = entries.into_iter();
+        while let Some(entry) = entries.next() {
+            match entry.kind {
+                EntryKind::Directory => self.directory(&entry.path),
+                EntryKind::Audio => self.file(&entry.path),
+                EntryKind::Other => {}
+            }
+            if self.full {
+                // Stop here. Anything audio-or-directory still unvisited at
+                // this level means files may exist that were never seen; the
+                // callers above make the same check on their own levels.
+                if entries.any(|rest| rest.kind != EntryKind::Other) {
+                    self.tree.scan_limit_reached = true;
+                }
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BrowseRequest {
     Directory(PathBuf),
@@ -144,6 +254,11 @@ pub enum BrowseRequest {
     ReprobeStation {
         slug: String,
     },
+    /// A Files-tab folder add (M8 §8): the recursive walk behind `a`.
+    CollectTree {
+        roots: Vec<PathBuf>,
+        dest: PlaylistId,
+    },
 }
 
 /// A request's answer, naming what it was for so a caller can tell a late
@@ -167,6 +282,8 @@ pub enum BrowseResult {
         request: BrowseRequest,
         outcome: Result<String, String>,
     },
+    /// A folder add's outcome (M8 §8).
+    TreeCollected(TreeCollected),
 }
 
 /// One background thread answering [`BrowseRequest`]s in order. It exits
@@ -245,6 +362,12 @@ fn answer_with(request: BrowseRequest, message: &str) -> BrowseResult {
             request,
             outcome: Err(message.to_owned()),
         },
+        BrowseRequest::CollectTree { roots, dest } => BrowseResult::TreeCollected(TreeCollected {
+            dest,
+            items: Vec::new(),
+            unreadable: roots,
+            scan_limit_reached: false,
+        }),
     }
 }
 
@@ -293,6 +416,9 @@ fn answer(
                 Err(text) => tracing::info!(request = %describe(&request), "failed: {text}"),
             }
             BrowseResult::Mutation { request, outcome }
+        }
+        BrowseRequest::CollectTree { roots, dest } => {
+            BrowseResult::TreeCollected(collect_tree(&roots, dest, MAX_PLAYLIST_ENTRIES))
         }
     }
 }
@@ -351,7 +477,8 @@ fn mutate(
         BrowseRequest::Directory(_)
         | BrowseRequest::Feeds
         | BrowseRequest::Episodes { .. }
-        | BrowseRequest::Stations => Err("not a mutation".to_owned()),
+        | BrowseRequest::Stations
+        | BrowseRequest::CollectTree { .. } => Err("not a mutation".to_owned()),
     }
 }
 
@@ -384,5 +511,6 @@ fn describe(request: &BrowseRequest) -> String {
         BrowseRequest::AddStation { url } => format!("AddStation({})", redact_url(url)),
         BrowseRequest::RemoveStation { slug } => format!("RemoveStation({})", slug),
         BrowseRequest::ReprobeStation { slug } => format!("ReprobeStation({})", slug),
+        BrowseRequest::CollectTree { roots, .. } => format!("CollectTree({} roots)", roots.len()),
     }
 }

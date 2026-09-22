@@ -129,7 +129,7 @@ fn an_unsupported_version_is_a_visible_error_and_the_file_is_untouched()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("state.json");
-    let newer = br#"{"schema_version":4,"checkpoints":{}}"#;
+    let newer = br#"{"schema_version":5,"checkpoints":{}}"#;
     std::fs::write(&path, newer)?;
     let before = std::fs::metadata(&path)?.modified()?;
 

@@ -32,8 +32,9 @@ use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDispo
 use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
+use crate::playlist::{Playlist, PlaylistError, PlaylistId, Shuffle, splitmix64};
 use crate::queue::{
-    Direction, DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueError,
+    Direction, DisplayDuration, DurationSource, NewQueueEntry, Queue, QueueEntryId, QueueError,
     QueueSource,
 };
 use url::Url;
@@ -320,7 +321,7 @@ impl Session {
             return Err(RegisterLoadError::Busy);
         }
         if let LoadTarget::Queue(id) = target {
-            match self.state.queue().get(id) {
+            match self.state.find_entry(id) {
                 None => return Err(RegisterLoadError::UnknownEntry),
                 Some(entry) if entry.media() != media => {
                     return Err(RegisterLoadError::MediaMismatch);
@@ -385,8 +386,7 @@ impl Session {
         match pending.target {
             LoadTarget::Queue(id) => self
                 .state
-                .queue()
-                .get(id)
+                .find_entry(id)
                 .is_some_and(|entry| entry.media() == media)
                 .then_some(pending.target),
             LoadTarget::Legacy => Some(pending.target),
@@ -415,15 +415,68 @@ impl Session {
 
     // --------------------------------------------------------------- queue
 
-    /// Enqueues `batch` all-or-nothing. `Ordinary` submit on success; the
-    /// queue is untouched on failure, so nothing is submitted for it.
-    /// Touches neither adoption nor any pending load's target.
+    /// Enqueues `batch` all-or-nothing into `dest`. `Ordinary` submit on
+    /// success; the queue is untouched on failure, so nothing is submitted
+    /// for it. Touches neither adoption nor any pending load's target.
+    ///
+    /// A shuffled `dest` is reshuffled with its cursor pinned first, so
+    /// every added track lies ahead of the playing one; tracks already
+    /// played this pass come round again. The next seed is derived from the
+    /// old one, which keeps `Session` free of a randomness source.
     pub fn enqueue(
         &mut self,
+        dest: PlaylistId,
         batch: Vec<NewQueueEntry>,
     ) -> Result<(Vec<QueueEntryId>, Action), QueueError> {
-        let ids = self.state.queue_mut().enqueue(batch)?;
+        let ids = self.state.enqueue(dest, batch)?;
+        if !ids.is_empty()
+            && let Some(playlist) = self.state.playlist_mut(dest)
+            && let Some(shuffle) = playlist.shuffle()
+        {
+            let first = playlist.queue().active();
+            playlist.set_shuffle(Some(Shuffle {
+                seed: splitmix64(shuffle.seed),
+                first,
+            }));
+        }
         Ok((ids, self.submit(Urgency::Ordinary)))
+    }
+
+    /// Creates a new, empty playlist named `name`. `Ordinary` submit on
+    /// success; nothing is submitted on failure.
+    pub fn create_playlist(&mut self, name: &str) -> Result<(PlaylistId, Action), PlaylistError> {
+        let id = self.state.create_playlist(name)?;
+        Ok((id, self.submit(Urgency::Ordinary)))
+    }
+
+    /// Renames an existing playlist. `Ordinary` submit on success; nothing is
+    /// submitted on failure.
+    pub fn rename_playlist(&mut self, id: PlaylistId, name: &str) -> Result<Action, PlaylistError> {
+        self.state.rename_playlist(id, name)?;
+        Ok(self.submit(Urgency::Ordinary))
+    }
+
+    /// `Some(seed)` turns shuffle on, pinning the playlist's *own* cursor
+    /// first; `None` turns it off. No engine command either way, so a
+    /// playing track keeps playing (M8 §7).
+    pub fn set_shuffle(
+        &mut self,
+        id: PlaylistId,
+        seed: Option<u64>,
+    ) -> Result<Action, PlaylistError> {
+        let playlist = self
+            .state
+            .playlist_mut(id)
+            .ok_or(PlaylistError::Unknown(id))?;
+        let first = playlist.queue().active();
+        playlist.set_shuffle(seed.map(|seed| Shuffle { seed, first }));
+        Ok(self.submit(Urgency::Ordinary))
+    }
+
+    /// The queue that holds `id`, in whichever playlist owns it (M8 §5).
+    fn owner_queue_mut(&mut self, id: QueueEntryId) -> Option<&mut Queue> {
+        let owner = self.state.owner_of(id)?;
+        self.state.playlist_mut(owner).map(Playlist::queue_mut)
     }
 
     /// Moves one entry a step in `direction`. `Ordinary` submit only when the
@@ -436,7 +489,10 @@ impl Session {
         id: QueueEntryId,
         direction: Direction,
     ) -> Result<Action, QueueError> {
-        let moved = self.state.queue_mut().move_entry(id, direction)?;
+        let moved = self
+            .owner_queue_mut(id)
+            .ok_or(QueueError::UnknownEntry(id))?
+            .move_entry(id, direction)?;
         Ok(if moved {
             self.submit(Urgency::Ordinary)
         } else {
@@ -444,61 +500,128 @@ impl Session {
         })
     }
 
-    /// Removes one entry. Unknown `id` is an error raised before anything
-    /// changes. Every pending load targeting `id` is invalidated first, so a
-    /// `Loaded` already in flight for it can never resurrect it (M5 §6). If
-    /// `id` is the active entry, its checkpoint is captured through the same
-    /// gated path `shutdown_snapshot` uses (`capture_current`) before
-    /// adoption is cleared — `current_media` and the checkpoints already on
-    /// record are left exactly as they are.
+    /// Whether the adopted load is for `id` (M8 §5). A cursor is only a
+    /// remembered entry; this is what ownership means.
+    pub fn owns_entry(&self, id: QueueEntryId) -> bool {
+        self.adopted
+            .is_some_and(|adopted| adopted.target == LoadTarget::Queue(id))
+    }
+
+    /// Whether `id` is the playlist that owns the adopted entry (M8 §5).
+    pub fn owns_playlist(&self, id: PlaylistId) -> bool {
+        match self.adopted.map(|adopted| adopted.target) {
+            Some(LoadTarget::Queue(entry)) => self.state.owner_of(entry) == Some(id),
+            _ => false,
+        }
+    }
+
+    /// Removes one entry, wherever it is queued. Unknown `id` is an error
+    /// raised before anything changes. Every pending load targeting `id` is
+    /// invalidated first, so a `Loaded` already in flight for it can never
+    /// resurrect it (M5 §6). Playback is released only when `id` is the
+    /// *owned* entry — a cursor alone is not ownership (M8 §5) — and its
+    /// checkpoint is then captured through the same gated path
+    /// `shutdown_snapshot` uses (`capture_current`); `current_media` and the
+    /// checkpoints already on record are left exactly as they are.
     pub fn remove_entry(
         &mut self,
         id: QueueEntryId,
         progress: &Progress,
         now: ClockSample,
     ) -> Result<Removal, QueueError> {
-        if self.state.queue().get(id).is_none() {
+        if self.state.find_entry(id).is_none() {
             return Err(QueueError::UnknownEntry(id));
         }
         self.invalidate_pending(|target| target == LoadTarget::Queue(id));
-        let was_active = self.state.queue().active() == Some(id);
-        if was_active {
+        let owned = self.owns_entry(id);
+        if owned {
             self.release_active(progress, now);
         }
-        let removed = self.state.queue_mut().remove(id)?;
+        // `Queue::remove` clears the cursor itself when `id` was the cursor.
+        let removed = self
+            .owner_queue_mut(id)
+            .ok_or(QueueError::UnknownEntry(id))?
+            .remove(id)?;
         Ok(Removal {
             action: self.submit(Urgency::Forced),
-            stop_playback: was_active,
+            stop_playback: owned,
             selection: removed.selection,
         })
     }
 
-    /// Clears the whole queue. Same active-entry capture as `remove_entry`
-    /// (`release_active`); every pending load still targeting a queue entry
-    /// is invalidated first, so none of them can resurrect an entry that no
-    /// longer exists (M5 §6). `current_media` and every checkpoint already on
-    /// record are left exactly as they are — queue membership does not pin a
-    /// checkpoint.
-    pub fn clear_queue(&mut self, progress: &Progress, now: ClockSample) -> Removal {
-        self.invalidate_pending(|target| matches!(target, LoadTarget::Queue(_)));
-        let was_active = self.state.queue().active().is_some();
-        if was_active {
+    /// Invalidates the pending loads into `id`, before its entries go, and
+    /// releases playback only if `id` owns it (M8 §5). Loads for other
+    /// playlists are untouched.
+    fn vacate(&mut self, id: PlaylistId, progress: &Progress, now: ClockSample) -> bool {
+        let entries: Vec<QueueEntryId> = self
+            .state
+            .playlist(id)
+            .map(|playlist| playlist.queue().entries().iter().map(|e| e.id()).collect())
+            .unwrap_or_default();
+        self.invalidate_pending(
+            |target| matches!(target, LoadTarget::Queue(entry) if entries.contains(&entry)),
+        );
+        let owning = self.owns_playlist(id);
+        if owning {
             self.release_active(progress, now);
         }
-        self.state.queue_mut().clear();
-        Removal {
-            action: self.submit(Urgency::Forced),
-            stop_playback: was_active,
-            selection: None,
+        owning
+    }
+
+    /// Empties one playlist, keeping it. `current_media` and every checkpoint
+    /// already on record are left exactly as they are — queue membership does
+    /// not pin a checkpoint.
+    pub fn clear_playlist(
+        &mut self,
+        id: PlaylistId,
+        progress: &Progress,
+        now: ClockSample,
+    ) -> Result<Removal, PlaylistError> {
+        if self.state.playlist(id).is_none() {
+            return Err(PlaylistError::Unknown(id));
         }
+        let owning = self.vacate(id, progress, now);
+        if let Some(playlist) = self.state.playlist_mut(id) {
+            playlist.queue_mut().clear();
+        }
+        Ok(Removal {
+            action: self.submit(Urgency::Forced),
+            stop_playback: owning,
+            selection: None,
+        })
+    }
+
+    /// Deletes one playlist. The `LastPlaylist` refusal (P1) precedes
+    /// `vacate`, so a refused delete releases nothing. Deleting the playing
+    /// playlist moves `playing` to the adjacent one and re-points
+    /// `current_media` at its cursor (M8 §5).
+    pub fn delete_playlist(
+        &mut self,
+        id: PlaylistId,
+        progress: &Progress,
+        now: ClockSample,
+    ) -> Result<Removal, PlaylistError> {
+        if self.state.playlist(id).is_none() {
+            return Err(PlaylistError::Unknown(id));
+        }
+        if self.state.playlists().len() == 1 {
+            return Err(PlaylistError::LastPlaylist);
+        }
+        let owning = self.vacate(id, progress, now);
+        self.state.remove_playlist(id)?;
+        Ok(Removal {
+            action: self.submit(Urgency::Forced),
+            stop_playback: owning,
+            selection: None,
+        })
     }
 
     /// Marks every pending load whose target satisfies `matches` as
     /// invalidated, so a `Loaded` that later arrives for it is never adopted
-    /// (M5 §6). Shared by `remove_entry` (one queue id) and `clear_queue`
-    /// (every queue target) — `LoadTarget::Legacy` never matches either
-    /// caller's predicate, so a legacy load is never invalidated by a queue
-    /// mutation.
+    /// (M5 §6). Shared by `remove_entry` (one queue id) and `vacate` (the
+    /// targeted playlist's entries) — `LoadTarget::Legacy` never matches
+    /// either caller's predicate, so a legacy load is never invalidated by a
+    /// queue mutation.
     fn invalidate_pending(&mut self, matches: impl Fn(LoadTarget) -> bool) {
         for pending in self.pending.values_mut() {
             if matches(pending.target) {
@@ -509,9 +632,9 @@ impl Session {
 
     /// Releases whatever this session currently has adopted: captures its
     /// checkpoint through the same gated path `shutdown_snapshot` uses
-    /// (`capture_current`), then clears `adopted` and `last_sample`. Shared
-    /// by `remove_entry` and `clear_queue` — both need exactly this release
-    /// when the entry they are acting on was active.
+    /// (`capture_current`), then clears `adopted` and `last_sample`. Called
+    /// only for an owned entry or an owning playlist — the ownership check
+    /// lives in its callers (M8 §5).
     fn release_active(&mut self, progress: &Progress, now: ClockSample) {
         self.capture_current(progress, now);
         self.adopted = None;
@@ -535,20 +658,47 @@ impl Session {
     /// metadata it already wrote (the plan's metadata-enrichment workers do
     /// this repeatedly) does not push an empty write on every call.
     pub fn update_display(&mut self, media: &MediaId, update: DisplayUpdate) -> Action {
-        if update == DisplayUpdate::default() {
-            return Action::None;
+        if self.apply_display(media, &update) {
+            self.submit(Urgency::Ordinary)
+        } else {
+            Action::None
+        }
+    }
+
+    /// [`update_display`](Self::update_display) for a batch, with **one**
+    /// submit for the whole of it rather than one per update: the snapshot a
+    /// submit carries is a full clone of the state, so the metadata workers'
+    /// results — which arrive in bursts of hundreds after a folder add — must
+    /// not pay for one clone each.
+    pub fn update_displays(&mut self, updates: &[(MediaId, DisplayUpdate)]) -> Action {
+        let mut changed = false;
+        for (media, update) in updates {
+            changed |= self.apply_display(media, update);
+        }
+        if changed {
+            self.submit(Urgency::Ordinary)
+        } else {
+            Action::None
+        }
+    }
+
+    /// The mutation half of [`update_display`](Self::update_display):
+    /// whether anything actually changed, with no submit of its own.
+    fn apply_display(&mut self, media: &MediaId, update: &DisplayUpdate) -> bool {
+        if *update == DisplayUpdate::default() {
+            return false;
         }
         let ids: Vec<QueueEntryId> = self
             .state
-            .queue()
-            .entries()
+            .playlists()
             .iter()
+            .flat_map(|playlist| playlist.queue().entries())
             .filter(|entry| entry.media() == media)
             .map(|entry| entry.id())
             .collect();
         let mut changed = false;
         for id in ids {
-            let Some(entry) = self.state.queue_mut().get_mut(id) else {
+            let Some(entry) = self.owner_queue_mut(id).and_then(|queue| queue.get_mut(id)) else {
                 continue;
             };
             let display = entry.display_mut();
@@ -583,11 +733,7 @@ impl Session {
                 changed = true;
             }
         }
-        if changed {
-            self.submit(Urgency::Ordinary)
-        } else {
-            Action::None
-        }
+        changed
     }
 
     /// Replaces one entry's podcast fallback URL. Unknown `id` is an error;
@@ -604,9 +750,8 @@ impl Session {
         url: Url,
     ) -> Result<Action, QueueError> {
         let entry = self
-            .state
-            .queue_mut()
-            .get_mut(id)
+            .owner_queue_mut(id)
+            .and_then(|queue| queue.get_mut(id))
             .ok_or(QueueError::UnknownEntry(id))?;
         if let QueueSource::Podcast { fallback } = entry.source()
             && *fallback == url
@@ -622,7 +767,7 @@ impl Session {
     /// actually reported it: `MediaMetadata`'s absent fields must never blank
     /// out what the entry already displayed.
     fn absorb_load_metadata(&mut self, id: QueueEntryId, metadata: &MediaMetadata) {
-        let Some(entry) = self.state.queue_mut().get_mut(id) else {
+        let Some(entry) = self.owner_queue_mut(id).and_then(|queue| queue.get_mut(id)) else {
             return;
         };
         let display = entry.display_mut();
@@ -899,10 +1044,12 @@ impl Session {
                 // Both provenances advance (§6); only a queue target has
                 // anywhere to advance to.
                 if let LoadTarget::Queue(id) = adopted.target {
-                    self.advance = Some(match self.state.queue().neighbor(id, Direction::Down) {
-                        Some(next) => Advance::Next(next),
-                        None => Advance::EndOfQueue,
-                    });
+                    let next = self
+                        .state
+                        .owner_of(id)
+                        .and_then(|owner| self.state.playlist(owner))
+                        .and_then(|playlist| playlist.neighbor(id, Direction::Down));
+                    self.advance = Some(next.map_or(Advance::EndOfQueue, Advance::Next));
                 }
                 self.submit(Urgency::Forced)
             }
@@ -946,21 +1093,27 @@ impl Session {
         capabilities: &MediaCapabilities,
         now: ClockSample,
     ) -> Action {
-        let previous_active = self.state.queue().active();
+        let previous = (self.state.playing(), self.state.queue().active());
         let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
-        let active = match target {
-            LoadTarget::Queue(id) => Some(id),
-            LoadTarget::Legacy => None,
-        };
-        // The registration was validated against the queue a moment ago in
-        // `observe`.
-        let _ = self.state.queue_mut().set_active(active);
-        if let LoadTarget::Queue(id) = target {
-            self.absorb_load_metadata(id, metadata);
+        match target {
+            LoadTarget::Queue(id) => {
+                // Validated against its owner a moment ago in `observe`.
+                if let Some(owner) = self.state.owner_of(id) {
+                    self.state.set_playing(owner);
+                }
+                let _ = self.state.queue_mut().set_active(Some(id));
+                self.absorb_load_metadata(id, metadata);
+            }
+            // A legacy load belongs to no playlist: it clears the playing
+            // playlist's cursor, as it cleared the one queue's before M8.
+            LoadTarget::Legacy => {
+                let _ = self.state.queue_mut().set_active(None);
+            }
         }
         self.adopted = Some(AdoptedLoad { request, target });
         self.adopted_rev_floor = self.session_rev;
-        if switched_media || previous_active != active {
+        let now_at = (self.state.playing(), self.state.queue().active());
+        if switched_media || previous != now_at {
             self.submit(Urgency::Forced)
         } else {
             Action::None
@@ -1415,11 +1568,11 @@ impl Session {
             .record_estimated(media, position, now.wall, completed);
     }
 
-    /// `resume_intent_for(self.state.entry_for(media))`, defaulting to a
-    /// start of zero for a media with no stored entry at all — no entry is
+    /// `resume_intent_for(media, self.state.entry_for(media))`, defaulting to
+    /// a start of zero for a media with no stored entry at all — no entry is
     /// not itself a resume intent to resolve, it is the absence of one.
     pub fn resume_intent(&self, media: &MediaId) -> ResumeIntent {
-        resume_intent_for(self.state.entry_for(media))
+        resume_intent_for(media, self.state.entry_for(media))
             .unwrap_or(ResumeIntent::StartAt(Duration::ZERO))
     }
 
@@ -1454,7 +1607,21 @@ impl Session {
 /// position exactly as before wherever that path is actually taken — the
 /// `resume_candidate` branch below, reached whenever there is no estimate
 /// to prefer.
-pub fn resume_intent_for(entry: Option<&PersistedCheckpoint>) -> Option<ResumeIntent> {
+///
+/// M8 §7 ("Start from zero"): a local file or a plain URL never resumes on a
+/// fresh load, whatever the checkpoint says — the checkpoint is still
+/// written (the queue's "played" marker depends on it), only what a fresh
+/// load does with it changes. A fresh-load policy only: pause and Stop →
+/// Play are engine commands that never reach this function, so the position
+/// contract (docs/architecture.md §1) holds unweakened for them. A podcast
+/// episode is unaffected — it still resumes exactly as before.
+pub fn resume_intent_for(
+    media: &MediaId,
+    entry: Option<&PersistedCheckpoint>,
+) -> Option<ResumeIntent> {
+    if matches!(media, MediaId::LocalFile(_) | MediaId::RemoteUrl(_)) {
+        return None;
+    }
     let entry = entry?;
     if entry.completed {
         return resume_candidate(entry.position, entry.completed).map(ResumeIntent::Candidate);

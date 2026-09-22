@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 
-use super::{centered_box, clock, row};
+use super::{centered_box, clock, draw_scrollbar, row};
 use crate::application::browse::EntryKind;
 use crate::commands::displayable;
 use crate::media::display::fit_to_width;
@@ -17,8 +17,8 @@ use crate::tui::browser::{BrowserState, BrowserTab, NoticeKind};
 use crate::tui::layout::{inset, take_left, take_right, visible_rows};
 use crate::tui::theme::Theme;
 
-const HINTS: &str =
-    "enter open/add/remove · space mark · tab files/podcasts/radio · ⌫ back · b close";
+const HINTS: &str = "enter open/add/remove · space mark · tab files/podcasts/radio · \
+    a add · ⌫ back · b close";
 const PODCAST_HINTS: &str = "enter open/add/remove · space mark · tab files/podcasts/radio · \
     a subscribe · r/R refresh · d remove · ⌫ back · b close";
 const NO_FEEDS: &str = "No subscriptions — press a to add a feed URL";
@@ -157,6 +157,9 @@ fn draw_list(buffer: &mut Buffer, area: Rect, browser: &BrowserState, theme: &Th
         Some(browser.cursor),
         usize::from(rows.height),
     );
+    // `area` is the box's inside, so the column after it is the border.
+    let track = Rect::new(area.right(), rows.y, 1, rows.height);
+    draw_scrollbar(buffer, track, browser.len(), window.start, theme);
     let mut y = rows.y;
     for index in window {
         let Some(cells) = row_cells(browser, index, theme) else {
@@ -167,7 +170,7 @@ fn draw_list(buffer: &mut Buffer, area: Rect, browser: &BrowserState, theme: &Th
             row(rows, y),
             cells,
             browser.marked.contains(&index),
-            browser.queued_at(index).is_some(),
+            browser.ticked(index),
             index == browser.cursor,
             theme,
         );

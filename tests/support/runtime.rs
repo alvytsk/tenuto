@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tenuto::application::enrich::TagProbe;
-use tenuto::application::runtime::{EngineFactory, LibraryStores, PlayerRuntime, RuntimeParts};
+use tenuto::application::runtime::{
+    AppCommand, EngineFactory, EnqueueItem, LibraryStores, PlayerRuntime, RuntimeParts,
+};
 use tenuto::application::view::PlayerView;
 use tenuto::clock::{Clock, SystemClock};
 use tenuto::http::limits::Limits;
@@ -131,6 +133,14 @@ pub fn pump_for(runtime: &mut PlayerRuntime, span: Duration) {
         runtime.pump();
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Adds into whichever playlist the runtime is viewing — what a pre-M8
+/// `AppCommand::Enqueue(items)` meant, now that the command names its
+/// destination.
+pub fn enqueue(runtime: &mut PlayerRuntime, items: Vec<EnqueueItem>) {
+    let dest = runtime.viewed();
+    runtime.handle(AppCommand::Enqueue { dest, items });
 }
 
 pub fn row_ids(runtime: &PlayerRuntime) -> Vec<QueueEntryId> {
