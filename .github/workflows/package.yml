@@ -1,0 +1,115 @@
+name: Linux packages
+
+# Builds the x86_64 tarball and .deb once on Ubuntu 22.04, then installs
+# those exact files on every tested distro (Linux packages spec §5.1).
+# Called by ci.yml on every PR and by release.yml; never publishes.
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: "Full SHA of the commit to package"
+        required: true
+        type: string
+    outputs:
+      version:
+        description: "Package version read from Cargo.toml at sha"
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (ubuntu:22.04)
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            git ca-certificates curl build-essential pkg-config libasound2-dev dpkg-dev binutils jq
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 1
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install pinned Rust toolchain
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install 1.98.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked --version 3.8.0
+      - name: Build, inspect and package
+        id: build
+        run: bash scripts/release/build-artifacts.sh "${{ inputs.sha }}" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64-${{ inputs.sha }}
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-inputs-${{ inputs.sha }}
+          path: |
+            scripts/release/
+            tests/fixtures/sine.wav
+          if-no-files-found: error
+          overwrite: true
+
+  install-deb:
+    name: Install .deb (${{ matrix.image }})
+    needs: build
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04"]
+    steps:
+      # No checkout: installing git would pull in ca-certificates as a
+      # recommended package and defeat the dependency check.
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64-${{ inputs.sha }}
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: test-inputs-${{ inputs.sha }}
+          path: inputs
+      - run: bash inputs/scripts/release/verify-deb-install.sh dist "${{ needs.build.outputs.version }}" inputs/tests/fixtures/sine.wav
+
+  install-tarball:
+    name: Install tarball (${{ matrix.image }})
+    needs: build
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "debian:12", alsa: libasound2 }
+          - { image: "debian:13", alsa: libasound2t64 }
+          - { image: "ubuntu:22.04", alsa: libasound2 }
+          - { image: "ubuntu:24.04", alsa: libasound2t64 }
+          - { image: "ubuntu:26.04", alsa: libasound2t64 }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64-${{ inputs.sha }}
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: test-inputs-${{ inputs.sha }}
+          path: inputs
+      - run: bash inputs/scripts/release/verify-tarball-install.sh dist "${{ needs.build.outputs.version }}" inputs/tests/fixtures/sine.wav "${{ matrix.alsa }}"

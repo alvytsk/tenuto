@@ -76,8 +76,8 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
-  package:
-    name: Package
+  crate:
+    name: Crate package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -100,3 +100,31 @@ jobs:
           size=$(stat -c%s "$crate")
           echo "$crate is $size bytes"
           test "$size" -lt 10485760
+
+  linux-packages:
+    name: Linux packages
+    uses: ./.github/workflows/package.yml
+    with:
+      sha: ${{ github.sha }}
+
+  release-scripts:
+    name: Release scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash scripts/release/test.sh
+      # Stubs check only the arguments the spec lists; this runs the real gh
+      # against this repository so a wrong flag fails here, not at a tag.
+      - name: Live rehearsal-lookup probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          bash scripts/release/find-rehearsal.sh 0000000000000000000000000000000000000000
+          code=$?
+          set -e
+          echo "find-rehearsal exited $code"
+          test "$code" -eq 1
