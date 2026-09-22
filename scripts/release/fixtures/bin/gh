@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Argument-validating stand-in for gh (Linux packages spec §9.2). It accepts
+# only the exact invocations the release scripts are specified to make, so a
+# wrong subcommand or flag fails here as it would against the real gh.
+set -uo pipefail
+args="$*"
+sha_re='^[0-9a-f]{40}$'
+
+if [ "$args" = "api repos/${GITHUB_REPOSITORY:-}/actions/workflows/release.yml --jq .id" ]; then
+  [ "${STUB_GH_API_FAIL:-0}" = 1 ] && { echo "HTTP 404: Not Found" >&2; exit 1; }
+  echo "${STUB_GH_WORKFLOW_ID-4242}"
+  exit 0
+fi
+
+if [ $# -eq 16 ] && [ "$1 $2 $3 $4 $5 $6 $7 $8" = "run list --workflow release.yml --event workflow_dispatch --branch main" ] \
+   && [ "$9" = "--commit" ] && [[ "${10}" =~ $sha_re ]] \
+   && [ "${11} ${12} ${13} ${14} ${15} ${16}" = "--status success --limit 200 --json databaseId,headSha,headBranch,event,conclusion,workflowDatabaseId,displayTitle,url" ]; then
+  [ "${STUB_GH_RUNS_FAIL:-0}" = 1 ] && { echo "HTTP 502" >&2; exit 1; }
+  sed "s/@SHA@/${10}/g" "${STUB_GH_RUNS:?STUB_GH_RUNS not set}"
+  exit 0
+fi
+
+if [ $# -eq 5 ] && [ "$1 $2" = "release view" ] && [ "$4 $5" = "--json isDraft" ]; then
+  case "${STUB_GH_RELEASE:-none}" in
+    none) echo "release not found" >&2; exit 1 ;;
+    draft) echo '{"isDraft":true}'; exit 0 ;;
+    published) echo '{"isDraft":false}'; exit 0 ;;
+    error) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;;
+  esac
+fi
+
+echo "unknown flag: $args" >&2
+exit 1
