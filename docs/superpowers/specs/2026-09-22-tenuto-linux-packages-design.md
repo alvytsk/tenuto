@@ -72,20 +72,20 @@ Jobs:
    - The tarball (§8.2).
    - Byte identity: the SHA-256 of `target/release/tenuto`, of `./usr/bin/tenuto` extracted from the `.deb` (`dpkg-deb -x`), and of the binary extracted from the tarball must all be equal.
    - Writes `SHA256SUMS` (tarball and `.deb`) and `build-info.txt` (source SHA, version, rustc version, cargo-deb version, the `.deb` `Depends` line, the `check-elf.sh` report, the binary's SHA-256).
-   - Uploads one artifact, `linux-x86_64-<sha>`, with the four files.
+   - Uploads one artifact, `linux-x86_64-<sha>`, with the four files. It also uploads a second, never-published artifact, `test-inputs-<sha>`, with `scripts/release/smoke-test.sh` and `tests/fixtures/sine.wav` from the same checkout.
 2. **`install-deb`**, which `needs: build`, in a matrix of `container:` `debian:12`, `debian:13`, `ubuntu:22.04`, `ubuntu:24.04`, `ubuntu:26.04`, `fail-fast: false`.
    - Downloads the artifact and runs `sha256sum -c SHA256SUMS`.
-   - Fetches the test inputs with a sparse checkout of `inputs.sha`: `scripts/release/` and `tests/fixtures/sine.wav` only.
+   - Downloads `test-inputs-<sha>`. There is no checkout: installing `git` in the container would pull in `ca-certificates` as a recommended package and invalidate the next check.
    - Asserts `ca-certificates` is **not** installed yet, then runs `apt-get update && apt-get install -y ./tenuto_<ver>-1_amd64.deb`, which resolves ALSA and `ca-certificates` from the distro's own archive.
    - `dpkg -s tenuto` and `dpkg -s ca-certificates` must both report `Status: install ok installed`, and `/etc/ssl/certs/ca-certificates.crt` must exist and be non-empty.
-   - `scripts/release/smoke-test.sh /usr/bin/tenuto <ver> tests/fixtures/sine.wav`.
+   - `smoke-test.sh /usr/bin/tenuto <ver> sine.wav` from the downloaded test inputs.
    - `apt-get remove -y tenuto`, then `/usr/bin/tenuto` must not exist.
 3. **`install-tarball`**, which `needs: build`, in the same five-container matrix.
    - Installs only the runtime prerequisites the README lists for the tarball: the ALSA runtime library, named per matrix entry (`libasound2` on Debian 12 and Ubuntu 22.04, `libasound2t64` on Debian 13, Ubuntu 24.04 and 26.04), and `ca-certificates`. No toolchain, no `-dev` packages.
    - Asserts `/etc/ssl/certs/ca-certificates.crt` exists and is non-empty.
-   - Verifies checksums, fetches the same sparse checkout, extracts the tarball and runs `smoke-test.sh` on the extracted `tenuto`.
+   - Verifies checksums, downloads `test-inputs-<sha>`, extracts the tarball and runs `smoke-test.sh` on the extracted `tenuto`.
 
-No test container installs Rust or rebuilds anything. The release binary and packages under test come only from the artifact; the checkout supplies only the test script and one audio fixture.
+No test container installs Rust or rebuilds anything. The release binary and packages under test come only from the release artifact. The test-inputs artifact supplies only the test script and one audio fixture.
 
 ### 5.2 `ci.yml`
 
