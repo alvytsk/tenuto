@@ -445,7 +445,7 @@ One recorded inaccuracy: `main.rs` labels every error log line `playback failed`
 
 ## 11. Deployment
 
-There is one deployable: a statically linked `tenuto` binary per platform. No installer, no service, no configuration file is required.
+There is one deployable: a `tenuto` binary per platform. On Linux it links glibc and ALSA dynamically: the x86_64 release binary needs glibc 2.34 or newer and the shared libraries `ld-linux-x86-64.so.2`, `libasound.so.2`, `libc.so.6`, `libgcc_s.so.1` and `libm.so.6`, as reported by `scripts/release/check-elf.sh`. HTTPS also needs the system CA bundle (`ca-certificates`). No installer, no service, no configuration file is required.
 
 ```mermaid
 flowchart TB
@@ -487,20 +487,34 @@ Build requirements:
 | Rust | 1.98.1, pinned in `rust-toolchain.toml`, with `rustfmt` and `clippy` |
 | Linux | `libasound2-dev` for CPAL. The runtime `libasound.so.2` alone is not enough |
 | Lock file | `Cargo.lock` is committed. Every command runs with `--locked` |
-| Gates | `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked` on Linux, and on macOS as a non-blocking leg, `cargo doc --locked --no-deps` with `RUSTDOCFLAGS=-D warnings`, `cargo publish --dry-run --locked` |
+| Gates | `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked` on Linux, and on macOS as a non-blocking leg, `cargo doc --locked --no-deps` with `RUSTDOCFLAGS=-D warnings`, `cargo publish --dry-run --locked`, and the Linux package build on Ubuntu 22.04 with installation and smoke tests of the .deb and the tarball on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04 (`.github/workflows/package.yml`) |
 
 Key dependencies: Symphonia for demux and decode, CPAL for output, rtrb for the callback ring, rubato for resampling, crossbeam-channel for the protocol, Tokio and reqwest with rustls for HTTP, quick-xml for feeds, Ratatui and crossterm for the terminal, ratatui-image and image for cover art, rustfft for the spectrum.
 
 The crate ships to crates.io as `tenuto`, the same name as the published
-binary and the library target. A release is a pull request that bumps
-the manifest version and adds the changelog entry, followed by
-`cargo publish --locked` from a clean checkout of `main` with a
-maintainer's own crates.io token. No tags are pushed; the changelog
-links compare commits. `.github/workflows/release.yml` is a manual
-rehearsal only (`workflow_dispatch`: the suite plus a publish dry run);
-the tag-triggered Trusted Publishing path it was written for was never
-configured on crates.io and is not used. The package excludes `/tests`
-and `/docs`, so the 17 MB of audio fixtures stay out of it.
+binary and the library target. The package excludes `/tests`, `/docs` and
+`/scripts`, so the 17 MB of audio fixtures stay out of it.
+
+A release has five steps:
+
+1. Merge the release PR (version bump and changelog entry) into `main`.
+2. Dispatch `.github/workflows/release.yml` on `main` with `sha` set to that
+   merge commit, which must be `main`'s HEAD. This rehearsal runs the suite,
+   a publish dry run, the Linux packages and their install matrix, and checks
+   the changelog entry. It publishes nothing.
+3. `cargo publish --locked` from a clean checkout of that commit, with a
+   maintainer's own crates.io token.
+4. Push `vX.Y.Z` pointing at that commit.
+5. The tag run checks the tag against `Cargo.toml` and requires a successful
+   rehearsal of the same commit. It then rebuilds and reinstalls the packages
+   on every tested distro, and publishes a GitHub Release with the tarball,
+   the `.deb`, `SHA256SUMS` and `build-info.txt` that run tested.
+
+Tags are immutable. A transient failure is rerun on the same tag. A source or
+packaging fix is a new patch release, which also costs a crates.io version.
+If `publish` fails part-way, it may leave a draft release: inspect it, delete
+it, and rerun the job. A published release is never overwritten. Archive
+metadata is normalized; reproducible builds are not guaranteed.
 
 ## 12. Decisions and limits
 

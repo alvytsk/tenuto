@@ -21,6 +21,33 @@ cargo install tenuto
 On Linux, install `libasound2-dev` first. CPAL needs the ALSA headers, and
 the runtime `libasound.so.2` alone is not enough.
 
+### Prebuilt packages (x86_64 Linux)
+
+Each [GitHub Release](https://github.com/alvytsk/tenuto/releases) carries
+a `.deb`, a tarball, `SHA256SUMS` and `build-info.txt`. Verify the download
+first:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+**Debian and Ubuntu.** Tested on Debian 12 and 13; Ubuntu 22.04, 24.04 and 26.04.
+
+```sh
+sudo apt install ./tenuto_<version>-1_amd64.deb
+```
+
+**Tarball.** Built on Ubuntu 22.04 and tested on the same five releases. It
+needs glibc 2.34 or newer, the ALSA runtime library (`libasound2`, or
+`libasound2t64` on Debian 13 and Ubuntu 24.04 and later) and
+`ca-certificates`. The binary links exactly `ld-linux-x86-64.so.2`,
+`libasound.so.2`, `libc.so.6`, `libgcc_s.so.1` and `libm.so.6`.
+
+```sh
+tar -xzf tenuto-<version>-x86_64-unknown-linux-gnu.tar.gz
+./tenuto-<version>-x86_64-unknown-linux-gnu/tenuto --version
+```
+
 Linux is the verified platform. The crate also builds on macOS and CI runs
 the suite there, but one playback test still fails on macOS, so it is not
 claimed as supported yet. Windows is neither built nor claimed.
