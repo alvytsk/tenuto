@@ -445,7 +445,7 @@ One recorded inaccuracy: `main.rs` labels every error log line `playback failed`
 
 ## 11. Deployment
 
-There is one deployable: a `tenuto` binary per platform. On Linux it links glibc and ALSA dynamically: the x86_64 release binary needs glibc 2.34 or newer and the shared libraries `ld-linux-x86-64.so.2`, `libasound.so.2`, `libc.so.6`, `libgcc_s.so.1` and `libm.so.6`, as reported by `scripts/release/check-elf.sh`. HTTPS also needs the system CA bundle (`ca-certificates`). No installer, no service, no configuration file is required.
+There is one deployable: a `tenuto` binary per platform. On Linux it links glibc and ALSA dynamically: the x86_64 release binary needs glibc 2.34 or newer (the current release's figure; each release's exact requirements are in its `build-info.txt`) and the shared libraries `ld-linux-x86-64.so.2`, `libasound.so.2`, `libc.so.6`, `libgcc_s.so.1` and `libm.so.6`, as reported by `scripts/release/check-elf.sh`. HTTPS also needs the system CA bundle (`ca-certificates`). No installer, no service, no configuration file is required.
 
 ```mermaid
 flowchart TB
