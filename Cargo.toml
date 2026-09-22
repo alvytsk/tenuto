@@ -10,7 +10,7 @@ readme       = "README.md"
 keywords     = ["audio", "player", "podcast", "tui", "terminal"]
 categories   = ["multimedia::audio", "command-line-utilities"]
 authors      = ["Alexey Vymyatnin <alvy.tsk@gmail.com>"]
-exclude      = ["/tests", "/docs", "/.github", "/.claude", "/rust-toolchain.toml"]
+exclude      = ["/tests", "/docs", "/.github", "/.claude", "/rust-toolchain.toml", "/scripts"]
 
 [dependencies]
 thiserror = "2"
