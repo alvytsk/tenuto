@@ -42,11 +42,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
       - id: resolve
         env:
           EVENT: ${{ github.event_name }}
           INPUT_SHA: ${{ inputs.sha }}
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = workflow_dispatch ]; then
@@ -109,6 +111,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64-${{ needs.validate.outputs.sha }}
