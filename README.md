@@ -24,8 +24,8 @@ the runtime `libasound.so.2` alone is not enough.
 ### Prebuilt packages (x86_64 Linux)
 
 Each [GitHub Release](https://github.com/alvytsk/tenuto/releases) carries
-a `.deb`, a tarball, `SHA256SUMS` and `build-info.txt`. Verify the download
-first:
+a `.deb`, a tarball, `SHA256SUMS` and `build-info.txt`, from the next
+release on. Verify the download first:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
