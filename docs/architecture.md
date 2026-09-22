@@ -487,7 +487,7 @@ Build requirements:
 | Rust | 1.98.1, pinned in `rust-toolchain.toml`, with `rustfmt` and `clippy` |
 | Linux | `libasound2-dev` for CPAL. The runtime `libasound.so.2` alone is not enough |
 | Lock file | `Cargo.lock` is committed. Every command runs with `--locked` |
-| Gates | `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked` on Linux, and on macOS as a non-blocking leg, `cargo doc --locked --no-deps` with `RUSTDOCFLAGS=-D warnings`, `cargo publish --dry-run --locked`, and the Linux package build on Ubuntu 22.04 with installation and smoke tests of the .deb and the tarball on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04 (`.github/workflows/package.yml`) |
+| Gates | `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked` on Linux, and on macOS as a non-blocking leg, `cargo doc --locked --no-deps` with `RUSTDOCFLAGS=-D warnings`, `cargo publish --dry-run --locked`, the Linux package build on Ubuntu 22.04 with installation and smoke tests of the .deb and the tarball on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04 (`.github/workflows/package.yml`), and `scripts/release/test.sh` plus a live `gh` rehearsal-lookup probe against this repository (`release-scripts` in `ci.yml`) |
 
 Key dependencies: Symphonia for demux and decode, CPAL for output, rtrb for the callback ring, rubato for resampling, crossbeam-channel for the protocol, Tokio and reqwest with rustls for HTTP, quick-xml for feeds, Ratatui and crossterm for the terminal, ratatui-image and image for cover art, rustfft for the spectrum.
 
@@ -515,6 +515,34 @@ packaging fix is a new patch release, which also costs a crates.io version.
 If `publish` fails part-way, it may leave a draft release: inspect it, delete
 it, and rerun the job. A published release is never overwritten. Archive
 metadata is normalized; reproducible builds are not guaranteed.
+
+**Running the packaging locally.** Build inside `ubuntu:22.04` with `git
+ca-certificates curl build-essential pkg-config libasound2-dev dpkg-dev
+binutils jq`, Rust 1.98.1 via rustup, and `cargo-deb` 3.8.0 installed:
+
+```sh
+docker run --rm -v "$PWD":/src -w /src ubuntu:22.04 bash -euc '
+  apt-get update -qq && apt-get install -y -qq git ca-certificates curl \
+    build-essential pkg-config libasound2-dev dpkg-dev binutils jq
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+  . "$HOME/.cargo/env"; rustup toolchain install 1.98.1 --profile minimal
+  cargo install cargo-deb --locked --version 3.8.0
+  bash scripts/release/build-artifacts.sh <sha> target/dist'
+```
+
+Then, per tested distro, install-test the built artifacts in a clean
+container with the repository mounted read-only:
+
+```sh
+docker run --rm -v "$PWD":/src:ro debian:12 \
+  bash /src/scripts/release/verify-deb-install.sh /src/target/dist <ver> \
+  /src/tests/fixtures/sine.wav
+```
+
+Swap the image for each of Debian 12 and 13 and Ubuntu 22.04, 24.04 and
+26.04, and repeat with `verify-tarball-install.sh` and that distro's ALSA
+package (Linux packages spec §5.1). `bash scripts/release/test.sh` runs
+the script tests without a container.
 
 ## 12. Decisions and limits
 
