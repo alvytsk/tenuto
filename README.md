@@ -39,7 +39,7 @@ sudo apt install ./tenuto_<version>-1_amd64.deb
 
 **Tarball.** Built on Ubuntu 22.04 and tested on the same five releases. It
 needs glibc 2.34 or newer, the ALSA runtime library (`libasound2`, or
-`libasound2t64` on Debian 13 and Ubuntu 24.04 and later) and
+`libasound2t64` on Debian 13 and Ubuntu 24.04 and 26.04) and
 `ca-certificates`. The binary links exactly `ld-linux-x86-64.so.2`,
 `libasound.so.2`, `libc.so.6`, `libgcc_s.so.1` and `libm.so.6`.
 
