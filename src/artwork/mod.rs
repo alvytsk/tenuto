@@ -6,6 +6,7 @@
 //! be exercised from plain unit and integration tests.
 
 pub mod decode;
+pub mod default;
 pub mod resolve;
 pub mod svg;
 pub mod worker;
