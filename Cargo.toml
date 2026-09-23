@@ -1,6 +1,6 @@
 [package]
 name         = "tenuto"
-version      = "0.1.2"
+version      = "0.2.0"
 edition      = "2024"
 rust-version = "1.98.1"
 description  = "A keyboard-first terminal audio player for local files, HTTP media and podcasts"
