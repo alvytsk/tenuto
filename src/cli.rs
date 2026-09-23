@@ -5,7 +5,11 @@ use std::num::NonZeroUsize;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "tenuto", about = "A keyboard-first terminal audio player")]
+#[command(
+    name = "tenuto",
+    version,
+    about = "A keyboard-first terminal audio player"
+)]
 pub struct Cli {
     /// The subcommand to run. Absent means a bare `tenuto`, which opens
     /// the full-screen player on the saved queue with the same defaults
@@ -26,7 +30,8 @@ pub enum MouseMode {
 /// How `tenuto tui` draws cover art: `auto` asks the terminal which image
 /// protocol it supports and falls back to colored half-blocks, `blocks`
 /// always uses half-blocks without asking, and `off` shows only the
-/// placeholder and never loads artwork.
+/// placeholder and never loads artwork — not even the built-in covers, so
+/// it stays a mode that puts no image on the screen at all.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
 pub enum ArtworkMode {
     #[default]

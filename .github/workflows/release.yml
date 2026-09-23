@@ -1,35 +1,172 @@
-name: Release rehearsal
+name: Release
 
-# Publishing is done by hand: `cargo publish --locked` from a clean checkout
-# of main with a maintainer's own token (docs/architecture.md, section 11).
-# This workflow only rehearses it on demand. The tag-triggered Trusted
-# Publishing path it started as was never configured on crates.io; if that
-# changes, the version at 2167690 has the full tag-verify-and-publish job.
+# Rehearsal (workflow_dispatch on main, sha = main's HEAD) and release (a v*
+# tag on a rehearsed main commit). Only the tag run's publish job writes.
+# Sequence and recovery: docs/architecture.md §11 and the Linux packages
+# spec §4.
 
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full SHA of the main commit to rehearse (must be main's HEAD)"
+        required: true
+        type: string
+  push:
+    tags: ["v*"]
+
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release rehearsal {0}', inputs.sha) || format('Release {0}', github.ref_name) }}
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rehearse:
-    name: Test and publish dry run
+  validate:
+    name: Validate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            [ "$GITHUB_REF" = refs/heads/main ] || { echo "rehearsals run on main, not $GITHUB_REF"; exit 1; }
+            [[ "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character SHA"; exit 1; }
+            [ "$INPUT_SHA" = "$GITHUB_SHA" ] || { echo "sha $INPUT_SHA is not main's HEAD at dispatch ($GITHUB_SHA)"; exit 1; }
+            sha=$INPUT_SHA
+          else
+            sha=$(git rev-parse "$GITHUB_REF^{commit}")
+          fi
+          git merge-base --is-ancestor "$sha" origin/main || { echo "$sha is not on main"; exit 1; }
+          version=$(git show "$sha:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
+          if [ "$EVENT" = push ]; then
+            bash scripts/release/check-tag.sh "$GITHUB_REF_NAME" "$version"
+            bash scripts/release/find-rehearsal.sh "$sha"
+          fi
+          git show "$sha:CHANGELOG.md" > "$RUNNER_TEMP/CHANGELOG.md"
+          bash scripts/release/changelog-section.sh "$version" "$RUNNER_TEMP/CHANGELOG.md"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  suite:
+    name: Test and publish dry run
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
       - name: Install ALSA development headers
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
-
       - uses: Swatinem/rust-cache@v2
-
       - run: cargo test --locked --no-fail-fast
-
       - run: cargo publish --dry-run --locked
+
+  package:
+    name: Linux packages
+    needs: validate
+    uses: ./.github/workflows/package.yml
+    with:
+      sha: ${{ needs.validate.outputs.sha }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, suite, package]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64-${{ needs.validate.outputs.sha }}
+          path: dist
+      - name: Verify checksums
+        run: cd dist && sha256sum -c SHA256SUMS
+      - name: Refuse to overwrite an existing release
+        run: bash scripts/release/guard-release.sh "$TAG"
+      - name: Release notes
+        run: bash scripts/release/changelog-section.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+      - name: Create draft and upload
+        run: |
+          gh release create "$TAG" --verify-tag --draft \
+            --title "tenuto $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            "dist/tenuto-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "dist/tenuto_$VERSION-1_amd64.deb" \
+            dist/SHA256SUMS dist/build-info.txt
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false
+
+  publish-crate:
+    name: Publish to crates.io
+    # Last, and only after the GitHub Release is live. This is the one step
+    # of a release that cannot be undone — yanking hides a version but never
+    # frees its number — so nothing irreversible happens until everything
+    # reversible has already succeeded. A failure here leaves the release
+    # intact and the version still free: fix and re-run this job alone.
+    needs: [validate, suite, package, publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Holds the run for a reviewer before it writes to crates.io, and is the
+    # environment named in the crate's trusted-publisher configuration.
+    environment: crates-io
+    permissions:
+      contents: read
+      # The OIDC token the action trades for a short-lived crates.io token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Refuse to replace a version already on crates.io
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: bash scripts/release/guard-crate.sh tenuto "$VERSION"
+      - name: Install ALSA development headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked

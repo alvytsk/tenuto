@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-23
+
 ### Added
 
+- A cover for a track that has none of its own: a record for local files and
+  finite remote media, a broadcast wave for a saved station or any stream
+  that never ends, a microphone for a podcast episode. It shows while the
+  real cover loads and stays when there is none. `--artwork off` still shows
+  only the shaded placeholder, as does an empty queue.
 - Playlists. The queue is now one of several named playlists, shown as tabs
   above the list: `Tab` and `Shift-Tab` switch the view, `n` creates one,
   `r` renames and `D` deletes it after a `y`. Playback stays on the playing
@@ -28,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a` adds the marked rows — or the row under the cursor — recursively, in
   the browser's own listing order. Directory symlinks are skipped, even
   when selected directly as a root.
+- `tenuto --version` prints the version.
+- Prebuilt x86_64 Linux packages on each GitHub Release from the next
+  release on: a `.deb`, tested on Debian 12 and 13 and Ubuntu 22.04, 24.04
+  and 26.04, and a tarball, with `SHA256SUMS` and `build-info.txt`.
 - Rows read `Artist – Title`, with the album below. Rows whose title line
   did not take the artist up — a podcast episode, or a file with no title
   tag — are unchanged, and still read `Artist · Album` underneath.
@@ -88,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interpolated between neighbouring bands, and ends at the right edge in
   line with the progress bar. The numbers under the bars count bars.
 
+### Internal
+
+- Releases publish to crates.io themselves, from the `v*` tag run, after the
+  GitHub Release and a maintainer's approval. No token is stored: the run
+  authenticates with crates.io Trusted Publishing.
+
 ## [0.1.2] - 2026-09-17
 
 ### Fixed
@@ -135,7 +152,8 @@ First release. Published to crates.io as `tenuto`.
 - Feed management from the player: subscribe, refresh and unsubscribe.
 - A bare `tenuto` opens the player.
 
-[Unreleased]: https://github.com/alvytsk/tenuto/compare/855fcb5...HEAD
+[Unreleased]: https://github.com/alvytsk/tenuto/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/alvytsk/tenuto/compare/855fcb5...v0.2.0
 [0.1.2]: https://github.com/alvytsk/tenuto/compare/29da62c...855fcb5
 [0.1.1]: https://github.com/alvytsk/tenuto/compare/2167690b3e89979eb61b05b3b3b9af6f69057eb2...29da62c
 [0.1.0]: https://github.com/alvytsk/tenuto/commit/2167690b3e89979eb61b05b3b3b9af6f69057eb2

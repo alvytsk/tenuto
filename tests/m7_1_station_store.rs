@@ -289,3 +289,35 @@ fn a_slug_is_derived_from_the_name_and_falls_back_to_the_host() {
         "a collision takes the first free suffix",
     );
 }
+
+#[test]
+fn is_station_answers_for_a_claimed_url_even_without_a_logo() {
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let store = StationStore::new(dir.path().join("stations.json"), clock());
+    store
+        .save(&StationSnapshot {
+            stations: vec![
+                station(
+                    "lofi",
+                    "https://radio.example/lofi/stream",
+                    Some(verified()),
+                ),
+                station("bare", "https://radio.example/bare/stream", None),
+            ],
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(
+        store.is_station(&media_of("https://radio.example/lofi/stream")),
+        "a station with a logo is a station"
+    );
+    assert!(
+        store.is_station(&media_of("https://radio.example/bare/stream")),
+        "a station is a station whether or not it stored a logo — this is \
+         what `logo_for` cannot answer",
+    );
+    assert!(
+        !store.is_station(&media_of("https://elsewhere.example/track.mp3")),
+        "a URL no station claims is not a station"
+    );
+}

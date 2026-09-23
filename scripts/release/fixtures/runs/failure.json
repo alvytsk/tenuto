@@ -1,0 +1,3 @@
+[
+  {"databaseId": 2, "headSha": "@SHA@", "headBranch": "main", "event": "workflow_dispatch", "conclusion": "failure", "workflowDatabaseId": 4242, "displayTitle": "Release rehearsal @SHA@", "url": "https://example.invalid/runs/2"}
+]

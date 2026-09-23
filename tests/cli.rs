@@ -61,3 +61,17 @@ fn help_is_a_successful_entry_point_on_stdout() -> Result<(), Box<dyn std::error
     assert!(String::from_utf8_lossy(&output.stdout).contains("play"));
     Ok(())
 }
+
+/// `--version` is what the package smoke test compares against the release
+/// tag (Linux packages spec §9.1), so its format is part of the contract:
+/// exactly `tenuto <version>` and a newline, exit 0.
+#[test]
+fn version_flag_prints_the_package_version() {
+    let profile = process::Profile::new().unwrap();
+    let output = profile.command().arg("--version").output().unwrap();
+    assert!(output.status.success(), "--version exits 0");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("tenuto {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}

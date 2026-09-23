@@ -1,6 +1,6 @@
 [package]
 name         = "tenuto"
-version      = "0.1.2"
+version      = "0.2.0"
 edition      = "2024"
 rust-version = "1.98.1"
 description  = "A keyboard-first terminal audio player for local files, HTTP media and podcasts"
@@ -10,7 +10,20 @@ readme       = "README.md"
 keywords     = ["audio", "player", "podcast", "tui", "terminal"]
 categories   = ["multimedia::audio", "command-line-utilities"]
 authors      = ["Alexey Vymyatnin <alvy.tsk@gmail.com>"]
-exclude      = ["/tests", "/docs", "/.github", "/.claude", "/rust-toolchain.toml"]
+exclude      = ["/tests", "/docs", "/.github", "/.claude", "/rust-toolchain.toml", "/scripts"]
+
+[package.metadata.deb]
+section              = "sound"
+priority             = "optional"
+revision             = "1"
+depends              = "$auto, ca-certificates"
+extended-description = "Plays local files, HTTP media, live radio and podcast episodes from the terminal, and resumes each where you stopped."
+assets = [
+  ["target/release/tenuto", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/tenuto/", "644"],
+  ["CHANGELOG.md", "usr/share/doc/tenuto/", "644"],
+  ["LICENSE", "usr/share/doc/tenuto/", "644"],
+]
 
 [dependencies]
 thiserror = "2"
