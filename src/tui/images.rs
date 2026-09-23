@@ -22,6 +22,7 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 
 use crate::artwork::decode::ArtworkError;
+use crate::artwork::default::{CoverKind, default_cover};
 use crate::cli::ArtworkMode;
 use crate::lifecycle::hooks::TestHook;
 use crate::media::id::MediaId;
@@ -234,8 +235,14 @@ pub struct CoverCache {
     placement_dirty: bool,
     /// Why the last preparation failed, until the loop takes it.
     failure: Option<ArtworkError>,
-    /// The `artwork-encoding-panic` hook, consumed by the first preparation.
+    /// The `artwork-encoding-panic` hook, consumed by the first preparation
+    /// of real artwork — a stand-in leaves it alone (see [`Self::standin`]).
     panic_next_encoding: bool,
+    /// Whether `image` is a built-in stand-in rather than the listener's own
+    /// cover. A stand-in is this player's decoration, so failing to encode
+    /// one reports nothing: "Cover art unavailable" would name a cover that
+    /// was never missing.
+    standin: bool,
     encoder: Encoder,
 }
 
@@ -254,16 +261,26 @@ impl CoverCache {
             placement_dirty: false,
             failure: None,
             panic_next_encoding: hook == TestHook::ArtworkEncodingPanic,
+            standin: false,
             encoder,
         }
     }
 
-    /// The decoded cover for `media`, or `None` for the placeholder. Either
-    /// way it replaces what was there, and a cover already on screen is
-    /// dropped and its placement cleaned up.
-    pub fn set_image(&mut self, media: MediaId, image: Option<Arc<DynamicImage>>) {
+    /// The decoded cover for `media`. When there is none, `kind`'s built-in
+    /// cover stands in, so a track with no artwork shows a record, a wave or
+    /// a microphone rather than the drawn placeholder; only a `kind` of
+    /// `None` — nothing is playing — falls through to that. Either way it
+    /// replaces what was there, and a cover already on screen is dropped and
+    /// its placement cleaned up.
+    pub fn set_image(
+        &mut self,
+        media: MediaId,
+        kind: Option<CoverKind>,
+        image: Option<Arc<DynamicImage>>,
+    ) {
         self.media = Some(media);
-        self.image = image;
+        self.standin = image.is_none();
+        self.image = image.or_else(|| kind.and_then(default_cover));
         self.failed = None;
         self.failure = None;
         self.drop_prepared();
@@ -301,7 +318,9 @@ impl CoverCache {
 
         let image = Arc::clone(image);
         let encoder = self.encoder;
-        let panic_now = std::mem::take(&mut self.panic_next_encoding);
+        // A stand-in leaves the hook for the real cover behind it: the hook
+        // names artwork, and a stand-in is not artwork.
+        let panic_now = !self.standin && std::mem::take(&mut self.panic_next_encoding);
         let candidate = prepare_contained(|| {
             if panic_now {
                 TestHook::ArtworkEncodingPanic.panic_at(TestHook::ArtworkEncodingPanic);
@@ -326,7 +345,9 @@ impl CoverCache {
                 self.drop_prepared();
                 self.placement_dirty = true;
                 self.failed = Some(key);
-                self.failure = Some(error);
+                if !self.standin {
+                    self.failure = Some(error);
+                }
                 false
             }
         }
@@ -470,13 +491,44 @@ mod tests {
         assert!(!has_status_report(b"\x1b[12;4R"));
     }
 
+    /// A stand-in is decoration this player chose, not artwork the listener
+    /// has. So a failure encoding one says nothing — "Cover art unavailable"
+    /// would name a cover that was never missing — and it leaves the real
+    /// cover's encoding to meet whatever the encoder does.
+    #[test]
+    fn a_stand_in_encodes_silently_and_leaves_the_failure_to_real_artwork() {
+        let picker = Picker::halfblocks();
+        let area = Some(Rect::new(0, 0, 14, 7));
+        let mut cache = CoverCache::new(TestHook::ArtworkEncodingPanic);
+
+        cache.set_image(media("a"), Some(CoverKind::Music), None);
+        assert!(
+            cache.prepare(Some(&picker), ArtworkMode::Blocks, area),
+            "the stand-in encodes rather than meeting the encoding panic"
+        );
+        assert!(
+            cache.take_failure().is_none(),
+            "a stand-in has no artwork to call unavailable"
+        );
+
+        cache.set_image(media("a"), Some(CoverKind::Music), square(8));
+        assert!(
+            !cache.prepare(Some(&picker), ArtworkMode::Blocks, area),
+            "the real cover meets the encoding panic the stand-in left alone"
+        );
+        assert!(
+            matches!(cache.take_failure(), Some(ArtworkError::Panicked)),
+            "and that one is reported"
+        );
+    }
+
     #[test]
     fn a_panicking_replacement_clears_the_cover_once_and_the_next_key_prepares() {
         let picker = Picker::halfblocks();
         let area = Some(Rect::new(0, 0, 14, 7));
         let mut cache = CoverCache::with_encoder(TestHook::None, counting_encoder);
 
-        cache.set_image(media("seed"), square(8));
+        cache.set_image(media("seed"), None, square(8));
         assert!(cache.prepare(Some(&picker), ArtworkMode::Blocks, area));
         assert!(cache.widget().is_some(), "seeded cover is prepared");
         assert!(
@@ -484,7 +536,7 @@ mod tests {
             "a first cover replaces nothing"
         );
 
-        cache.set_image(media("panics"), square(PANICKING_WIDTH));
+        cache.set_image(media("panics"), None, square(PANICKING_WIDTH));
         let before = ENCODINGS.load(Ordering::SeqCst);
         assert!(!cache.prepare(Some(&picker), ArtworkMode::Blocks, area));
         assert!(cache.widget().is_none(), "placeholder after the panic");
@@ -506,7 +558,7 @@ mod tests {
         assert_eq!(ENCODINGS.load(Ordering::SeqCst), before + 1);
         assert_eq!(cache.take_failure(), None, "and reported once");
 
-        cache.set_image(media("next"), square(8));
+        cache.set_image(media("next"), None, square(8));
         assert!(cache.prepare(Some(&picker), ArtworkMode::Blocks, area));
         assert!(cache.widget().is_some());
     }
@@ -517,12 +569,12 @@ mod tests {
         let area = Some(Rect::new(0, 0, 8, 4));
         let mut cache = CoverCache::new(TestHook::ArtworkEncodingPanic);
 
-        cache.set_image(media("first"), square(8));
+        cache.set_image(media("first"), None, square(8));
         assert!(!cache.prepare(Some(&picker), ArtworkMode::Blocks, area));
         assert!(cache.widget().is_none());
         assert!(cache.take_placement_cleanup());
 
-        cache.set_image(media("second"), square(8));
+        cache.set_image(media("second"), None, square(8));
         assert!(cache.prepare(Some(&picker), ArtworkMode::Blocks, area));
         assert!(cache.widget().is_some());
     }
@@ -532,7 +584,7 @@ mod tests {
         let picker = Picker::halfblocks();
         let area = Some(Rect::new(0, 0, 14, 7));
         let mut cache = CoverCache::new(TestHook::None);
-        cache.set_image(media("a"), square(8));
+        cache.set_image(media("a"), None, square(8));
         assert!(cache.prepare(Some(&picker), ArtworkMode::Blocks, area));
 
         assert!(!cache.prepare(None, ArtworkMode::Off, area));

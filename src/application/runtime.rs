@@ -26,6 +26,7 @@ use crate::application::view::{
     NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, playlist_tabs,
     queue_rows, saved_history,
 };
+use crate::artwork::default::CoverKind;
 use crate::artwork::worker::CoverSource;
 use crate::clock::Clock;
 use crate::commands::displayable;
@@ -216,6 +217,18 @@ pub(crate) fn shut_down_engine(
         session.reconcile_shutdown(&report, clock.sample()),
         Urgency::Forced,
     );
+}
+
+/// Which built-in cover stands in for an entry with no artwork of its own.
+/// A podcast is a podcast whatever its stream does; otherwise anything the
+/// station list claims, or anything the engine is holding open with no end,
+/// is radio; everything else is music.
+pub(crate) fn cover_kind(source: &QueueSource, station: bool, indefinite: bool) -> CoverKind {
+    match source {
+        QueueSource::Podcast { .. } => CoverKind::Podcast,
+        _ if station || indefinite => CoverKind::Radio,
+        _ => CoverKind::Music,
+    }
 }
 
 /// See [`PlayerRuntime::cover_key`].
@@ -511,6 +524,19 @@ impl PlayerRuntime {
             }
         };
         Some((entry.media().clone(), source))
+    }
+
+    /// Which built-in cover stands in for the active entry while it has no
+    /// artwork of its own. `None` when nothing is active, which is the one
+    /// case that still draws the plain placeholder.
+    pub fn active_cover_kind(&self) -> Option<CoverKind> {
+        let queue = self.session.state().queue();
+        let entry = queue.get(queue.active()?)?;
+        let station = self
+            .library
+            .as_ref()
+            .is_some_and(|library| library.stations.is_station(entry.media()));
+        Some(cover_kind(entry.source(), station, self.indefinite()))
     }
 
     /// The entry a removal suggests selecting next, once.
@@ -1482,6 +1508,61 @@ mod tests {
     use crate::queue::{IdAllocator, Queue};
 
     const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
+
+    fn local() -> QueueSource {
+        QueueSource::LocalFile(AbsolutePath::new(PathBuf::from(FIVE)).expect("an absolute path"))
+    }
+
+    fn remote() -> QueueSource {
+        QueueSource::RemoteUrl(
+            crate::media::id::NormalizedUrl::parse("https://example.test/track.mp3")
+                .expect("a valid url"),
+        )
+    }
+
+    fn podcast() -> QueueSource {
+        QueueSource::Podcast {
+            fallback: Url::parse("https://example.test/ep.mp3").expect("a valid url"),
+        }
+    }
+
+    #[test]
+    fn a_podcast_episode_shows_the_microphone() {
+        assert_eq!(cover_kind(&podcast(), false, false), CoverKind::Podcast);
+    }
+
+    #[test]
+    fn a_podcast_stays_a_podcast_even_when_its_stream_never_ends() {
+        assert_eq!(
+            cover_kind(&podcast(), false, true),
+            CoverKind::Podcast,
+            "an indefinite podcast is still a podcast, not radio"
+        );
+    }
+
+    #[test]
+    fn a_url_the_station_list_claims_shows_the_wave() {
+        assert_eq!(cover_kind(&remote(), true, false), CoverKind::Radio);
+    }
+
+    #[test]
+    fn an_unsaved_but_endless_stream_shows_the_wave() {
+        assert_eq!(
+            cover_kind(&remote(), false, true),
+            CoverKind::Radio,
+            "a shoutcast URL nobody saved is still radio"
+        );
+    }
+
+    #[test]
+    fn a_finite_remote_file_shows_the_record() {
+        assert_eq!(cover_kind(&remote(), false, false), CoverKind::Music);
+    }
+
+    #[test]
+    fn a_local_file_shows_the_record() {
+        assert_eq!(cover_kind(&local(), false, false), CoverKind::Music);
+    }
 
     struct NowhereSink;
 

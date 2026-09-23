@@ -516,7 +516,8 @@ impl Artwork {
                 Some((media, source))
                     if self.requested.as_ref() == Some(&(media.clone(), source.clone())) => {}
                 Some((media, source)) => {
-                    self.covers.set_image(media.clone(), None);
+                    self.covers
+                        .set_image(media.clone(), runtime.active_cover_kind(), None);
                     let hook = self.hook;
                     self.worker
                         .get_or_insert_with(|| ArtworkWorker::spawn(default_loader(hook)))
@@ -525,7 +526,8 @@ impl Artwork {
                 }
                 None => {
                     if let Some((previous, _)) = self.requested.take() {
-                        self.covers.set_image(previous, None);
+                        self.covers
+                            .set_image(previous, runtime.active_cover_kind(), None);
                     }
                 }
             }
@@ -547,7 +549,8 @@ impl Artwork {
                     None
                 }
             };
-            self.covers.set_image(result.media, image);
+            self.covers
+                .set_image(result.media, runtime.active_cover_kind(), image);
         }
     }
 

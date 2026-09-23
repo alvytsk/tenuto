@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A cover for a track that has none of its own: a record for local files and
+  finite remote media, a broadcast wave for a saved station or any stream
+  that never ends, a microphone for a podcast episode. It shows while the
+  real cover loads and stays when there is none. `--artwork off` still shows
+  only the shaded placeholder, as does an empty queue.
 - Playlists. The queue is now one of several named playlists, shown as tabs
   above the list: `Tab` and `Shift-Tab` switch the view, `n` creates one,
   `r` renames and `D` deletes it after a `y`. Playback stays on the playing

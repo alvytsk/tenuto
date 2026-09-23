@@ -377,6 +377,24 @@ impl StationStore {
             .and_then(|station| station.identity?.logo)
     }
 
+    /// Whether the saved list claims `media` at all. Distinct from
+    /// [`logo_for`], which answers only for a station that stored a logo: a
+    /// station without one is still a station, and choosing the built-in
+    /// cover for a queue entry turns on that difference.
+    ///
+    /// Reads the file, under the same contract as [`logo_for`] — called when
+    /// `cover_key` moves, never per frame.
+    ///
+    /// [`logo_for`]: Self::logo_for
+    pub fn is_station(&self, media: &MediaId) -> bool {
+        self.read_snapshot().is_ok_and(|snapshot| {
+            snapshot
+                .stations
+                .iter()
+                .any(|station| &station.media == media)
+        })
+    }
+
     fn parent(&self) -> &Path {
         self.path.parent().unwrap_or_else(|| Path::new("."))
     }
