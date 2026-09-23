@@ -37,26 +37,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            blocking: true
-          # Linux is the verified platform. The macOS leg reports but does
-          # not gate: it is still being brought to green (the runner is
-          # slower and has surfaced timing assumptions Linux never hit),
-          # and that is tracked separately from the release pipeline.
-          - os: macos-latest
-            blocking: false
-    continue-on-error: ${{ !matrix.blocking }}
+  # Linux and macOS are separate jobs rather than one matrix so that the
+  # expensive jobs can depend on Linux alone. `needs` waits for a whole
+  # matrix, so gating on a two-leg `test` would have made packaging wait for
+  # the slower, deliberately non-gating macOS leg — and a red macOS leg could
+  # then skip packaging entirely.
+  test-linux:
+    name: Test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - name: Install ALSA development headers
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
@@ -64,6 +55,21 @@ jobs:
       # --no-fail-fast: cargo otherwise stops at the first test binary that
       # fails, so a red leg only ever showed its first failing binary and
       # hid whatever the later ones would have reported.
+      - run: cargo test --locked --no-fail-fast
+
+  # Linux is the verified platform. The macOS leg reports but does not gate:
+  # it is still being brought to green (the runner is slower and has surfaced
+  # timing assumptions Linux never hit), and that is tracked separately from
+  # the release pipeline. Nothing depends on this job.
+  test-macos:
+    name: Test (macos-latest)
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
   doc:
@@ -82,6 +88,8 @@ jobs:
 
   crate:
     name: Crate package
+    # A crate that cannot pass its own tests is not worth packaging.
+    needs: test-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -107,6 +115,10 @@ jobs:
 
   linux-packages:
     name: Linux packages
+    # Eleven jobs — a container build plus ten distro installs — so they wait
+    # on the Linux suite rather than run beside a red one. Costs the suite's
+    # few minutes on a green run; saves the whole matrix on a red one.
+    needs: test-linux
     uses: ./.github/workflows/package.yml
     with:
       sha: ${{ github.sha }}
