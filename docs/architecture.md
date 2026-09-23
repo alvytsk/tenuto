@@ -495,26 +495,43 @@ The crate ships to crates.io as `tenuto`, the same name as the published
 binary and the library target. The package excludes `/tests`, `/docs` and
 `/scripts`, so the 17 MB of audio fixtures stay out of it.
 
-A release has five steps:
+A release has four steps:
 
 1. Merge the release PR (version bump and changelog entry) into `main`.
 2. Dispatch `.github/workflows/release.yml` on `main` with `sha` set to that
    merge commit, which must be `main`'s HEAD. This rehearsal runs the suite,
    a publish dry run, the Linux packages and their install matrix, and checks
    the changelog entry. It publishes nothing.
-3. `cargo publish --locked` from a clean checkout of that commit, with a
-   maintainer's own crates.io token.
-4. Push `vX.Y.Z` pointing at that commit.
-5. The tag run checks the tag against `Cargo.toml` and requires a successful
+3. Push `vX.Y.Z` pointing at that commit.
+4. The tag run checks the tag against `Cargo.toml` and requires a successful
    rehearsal of the same commit. It then rebuilds and reinstalls the packages
-   on every tested distro, and publishes a GitHub Release with the tarball,
-   the `.deb`, `SHA256SUMS` and `build-info.txt` that run tested.
+   on every tested distro, publishes a GitHub Release with the tarball, the
+   `.deb`, `SHA256SUMS` and `build-info.txt` that run tested, and finally —
+   after a reviewer approves the `crates-io` environment — publishes the
+   crate.
+
+Steps are ordered by what can be taken back. Everything reversible happens
+first: a release can be deleted and a tag can be re-cut. `cargo publish` is
+last because it is the only step that cannot, since yanking hides a version
+but never frees its number. `guard-crate.sh` refuses outright if the version
+is already there, a yanked one included.
 
 Tags are immutable. A transient failure is rerun on the same tag. A source or
 packaging fix is a new patch release, which also costs a crates.io version.
 If `publish` fails part-way, it may leave a draft release: inspect it, delete
-it, and rerun the job. A published release is never overwritten. Archive
-metadata is normalized; reproducible builds are not guaranteed.
+it, and rerun the job. A published release is never overwritten. A failed
+`publish-crate` leaves the tag and the release standing and the version still
+free — `cargo publish` uploads all-or-nothing — so fix the cause and rerun
+that job alone. Archive metadata is normalized; reproducible builds are not
+guaranteed.
+
+**Publishing credentials.** There is no crates.io token in the repository.
+`publish-crate` uses Trusted Publishing: `rust-lang/crates-io-auth-action`
+trades the run's OIDC identity for a token that lasts 30 minutes and is
+revoked when the job ends, which is why the job needs `id-token: write`. The
+trust runs the other way too — crates.io is configured with this repository,
+the workflow file `release.yml` and the `crates-io` environment, so renaming
+either breaks publishing until the crate's settings are updated to match.
 
 **Running the packaging locally.** Build inside `ubuntu:22.04` with `git
 ca-certificates curl build-essential pkg-config libasound2-dev dpkg-dev

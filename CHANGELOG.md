@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the browser's own listing order. Directory symlinks are skipped, even
   when selected directly as a root.
 - `tenuto --version` prints the version.
+- Releases publish to crates.io themselves, from the `v*` tag run, after the
+  GitHub Release and a maintainer's approval. No token is stored: the run
+  authenticates with crates.io Trusted Publishing.
 - Prebuilt x86_64 Linux packages on each GitHub Release from the next
   release on: a `.deb`, tested on Debian 12 and 13 and Ubuntu 22.04, 24.04
   and 26.04, and a tarball, with `SHA256SUMS` and `build-info.txt`.

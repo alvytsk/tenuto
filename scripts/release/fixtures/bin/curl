@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Argument-validating stand-in for curl (Linux packages spec §9.2), in the
+# same spirit as the gh stub beside it: it accepts only the exact invocation
+# guard-crate.sh is specified to make, so a wrong flag fails here as it would
+# against the real curl.
+set -uo pipefail
+
+body=""
+url=""
+seen_sS=0 seen_w=0 seen_ua=0 seen_timeout=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -sS) seen_sS=1; shift ;;
+    --max-time) seen_timeout=1; shift 2 ;;
+    -H) [[ "$2" == User-Agent:* ]] && seen_ua=1; shift 2 ;;
+    -o) body=$2; shift 2 ;;
+    -w) [ "$2" = '%{http_code}' ] && seen_w=1; shift 2 ;;
+    https://*) url=$1; shift ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+[ "$seen_sS" = 1 ] || { echo "curl stub: expected -sS" >&2; exit 2; }
+[ "$seen_w" = 1 ] || { echo "curl stub: expected -w %{http_code}" >&2; exit 2; }
+[ "$seen_timeout" = 1 ] || { echo "curl stub: expected --max-time" >&2; exit 2; }
+[ "$seen_ua" = 1 ] || { echo "curl stub: crates.io requires a User-Agent" >&2; exit 2; }
+[ -n "$body" ] || { echo "curl stub: expected -o <file>" >&2; exit 2; }
+[ "$url" = "https://crates.io/api/v1/crates/tenuto/0.1.3" ] || {
+  echo "curl stub: unexpected url $url" >&2; exit 2; }
+
+case "${STUB_CRATE:-absent}" in
+  absent)
+    printf '{"errors":[{"detail":"Not Found"}]}' >"$body"; echo 404 ;;
+  present)
+    printf '{"version":{"num":"0.1.3","yanked":false}}' >"$body"; echo 200 ;;
+  yanked)
+    printf '{"version":{"num":"0.1.3","yanked":true}}' >"$body"; echo 200 ;;
+  error)
+    printf '{"errors":[{"detail":"Internal Server Error"}]}' >"$body"; echo 500 ;;
+  curlfail)
+    # curl itself failed: no HTTP code was ever written.
+    echo "curl: (6) Could not resolve host: crates.io" >&2; exit 6 ;;
+esac
+exit 0

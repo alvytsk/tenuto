@@ -16,6 +16,11 @@ Every artifact is built once per run on Ubuntu 22.04 and installed, as built, on
 
 Out of scope for this iteration: aarch64 (the next step, on native ARM runners), `.rpm`, distro repositories (apt repo, AUR, Homebrew), AppImage/Flatpak/Snap, crates.io automation, and reproducible builds.
 
+> **Superseded, crates.io automation.** A later change moved the publish into
+> the tag run as a `publish-crate` job, using Trusted Publishing and a
+> reviewed `crates-io` environment. §4 below records the sequence as designed
+> here; `docs/architecture.md` §11 is the current one.
+
 ## 2. Existing foundations
 
 - `.github/workflows/ci.yml` runs fmt, clippy, the test suite (Linux blocking, macOS non-blocking), doc, and a `package` job that runs `cargo publish --dry-run --locked` and checks the `.crate` stays under 10 MB.
