@@ -197,7 +197,7 @@ Exit codes are a contract:
 
 ### 7.3 `changelog-section.sh <version>`
 
-Prints the body of `## [<version>] - YYYY-MM-DD` from `CHANGELOG.md`, up to the next `## ` heading, without the heading. Fails if the heading is missing, appears twice, or has an empty body. The output is the release notes.
+Prints the body of `## [<version>] - YYYY-MM-DD` from `CHANGELOG.md`, up to the next `## ` heading, without the heading. Fails if the heading is missing, appears twice, or has an empty body. Hard-wrapped lines are joined, because a GitHub release body renders every newline as a line break; list items, headings, quotes, tables, fenced code and hard breaks keep their own lines. The output is the release notes.
 
 ### 7.4 The `publish` job
 
