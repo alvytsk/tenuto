@@ -8,6 +8,25 @@ expect_equal $'### Fixed\n\n- A fix in 0.2.0.' "$OUT" "0.2.0 body"
 expect_exit 0 bash "$s" 0.1.0 "$FIXTURES/CHANGELOG.ok.md"
 expect_equal $'### Added\n\n- First release.' "$OUT" "0.1.0 body"
 
+# Wrapped lines are joined; list items, fences, tables and hard breaks are not.
+expect_exit 0 bash "$s" 0.2.0 "$FIXTURES/CHANGELOG.wrapped.md"
+expect_equal '### Added
+
+- A long entry wrapped over three lines.
+  - A nested item wrapped once.
+- A paragraph break  
+  kept by two spaces.
+
+A plain paragraph wrapped once.
+
+```
+code stays
+as is
+```
+
+| a | b |
+|---|---|' "$OUT" "wrapped body"
+
 expect_exit 1 bash "$s" 0.3.0 "$FIXTURES/CHANGELOG.ok.md"
 expect_contains "no section" "$ERR"
 expect_exit 1 bash "$s" Unreleased "$FIXTURES/CHANGELOG.ok.md"
