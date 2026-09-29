@@ -82,9 +82,17 @@ fn a_schema_3_queue_becomes_the_default_playlist_with_its_ids_and_cursor() {
     assert_eq!(state.playlists().len(), 1);
     assert_eq!(state.playlists()[0].name(), "Default");
     assert_eq!(state.playlists()[0].id().get(), 1);
-    assert_eq!(state.playing().get(), 1);
+    assert_eq!(state.playlists().playing().get(), 1);
     assert_eq!(ids(state, 0), [4, 9]);
-    assert_eq!(state.queue().active().map(|id| id.get()), Some(4));
+    assert_eq!(
+        state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active()
+            .map(|id| id.get()),
+        Some(4)
+    );
     assert_eq!(state.playlists()[0].shuffle(), None);
     assert_eq!(state.schema_version(), 4);
     kept_checkpoint(state);
@@ -143,7 +151,15 @@ fn only_the_playing_cursor_is_judged_against_current_media() {
         mismatch.reset,
         Some(QueueReset::ActiveReference(ActiveProblem::MediaMismatch))
     );
-    assert_eq!(mismatch.state.queue().active(), None);
+    assert_eq!(
+        mismatch
+            .state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        None
+    );
     kept_checkpoint(&mismatch.state);
 }
 
@@ -376,7 +392,7 @@ fn both_caps_truncate_in_file_order_and_say_so() {
             found: 4200
         }))
     );
-    assert_eq!(loaded.state.total_entries(), 4096);
+    assert_eq!(loaded.state.playlists().total_entries(), 4096);
     assert_eq!(ids(&loaded.state, 1).last(), Some(&4096));
     assert_eq!(
         loaded.state.playlists()[1].queue().active(),
@@ -397,8 +413,17 @@ fn a_dangling_playing_falls_back_to_the_first_playlist_and_repoints_current_medi
         loaded.reset,
         Some(QueueReset::Playlists(PlaylistProblem::DanglingPlaying))
     );
-    assert_eq!(loaded.state.playing().get(), 1);
-    assert_eq!(loaded.state.queue().active().map(|id| id.get()), Some(1));
+    assert_eq!(loaded.state.playlists().playing().get(), 1);
+    assert_eq!(
+        loaded
+            .state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active()
+            .map(|id| id.get()),
+        Some(1)
+    );
     assert_eq!(loaded.state.current_media(), Some(&support::media("b")));
     kept_checkpoint(&loaded.state);
 }
@@ -431,4 +456,137 @@ fn a_foreign_shuffle_first_becomes_none_without_a_report() {
     assert_eq!(loaded.reset, None, "a legal state is not damage");
     let shuffle = loaded.state.playlists()[0].shuffle().expect("kept");
     assert_eq!((shuffle.seed, shuffle.first), (7, None));
+}
+
+// ---- M9.1: first-problem precedence across several defects (spec §8.4) ----
+// Values captured from `main` at 67942e8; the PlaylistSet refactor must not
+// change a single one.
+
+fn playlist_ids(state: &PersistedState) -> Vec<u64> {
+    state.playlists().iter().map(|p| p.id().get()).collect()
+}
+
+#[test]
+fn precedence_a_repeated_playlist_id_outranks_malformed_entries_in_the_same_record() {
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": [track(1, "a")] },
+            { "id": 1, "name": "B", "entries": "oops" },
+        ]),
+        json!(1),
+        json!({}),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::DuplicatePlaylistId))
+    );
+    assert_eq!(playlist_ids(&loaded.state), [1, 2]);
+    assert!(
+        ids(&loaded.state, 1).is_empty(),
+        "B's malformed entries reset"
+    );
+    kept_checkpoint(&loaded.state);
+}
+
+#[test]
+fn precedence_the_cap_is_checked_before_a_duplicate_and_the_dropped_entry_costs_no_id() {
+    let first: Vec<Value> = (1..=4096).map(|i| track(i, &format!("t{i}"))).collect();
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": first },
+            { "id": 2, "name": "B", "entries": [track(1, "dup")] },
+        ]),
+        json!(1),
+        json!({ "current_media": null }),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::OverCapacity {
+            found: 4097
+        }))
+    );
+    assert!(ids(&loaded.state, 1).is_empty());
+    let saved =
+        serde_json::to_value(&loaded.state).unwrap_or_else(|error| panic!("serialize: {error}"));
+    assert_eq!(
+        saved["next_entry_id"],
+        json!(4097),
+        "a dropped duplicate consumes no fresh ID"
+    );
+}
+
+#[test]
+fn precedence_a_record_skipped_for_want_of_an_id_reports_nothing_about_its_entries() {
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": [track(1, "a")] },
+            { "id": "x", "name": "B", "entries": "oops" },
+        ]),
+        json!(1),
+        json!({ "next_playlist_id": null }),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::IdsExhausted))
+    );
+    assert_eq!(playlist_ids(&loaded.state), [1]);
+    kept_checkpoint(&loaded.state);
+}
+
+#[test]
+fn precedence_a_dangling_cursor_outranks_a_malformed_shuffle() {
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": [track(1, "a")],
+              "active_entry": 99, "shuffle": "bad" },
+        ]),
+        json!(1),
+        json!({}),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::ActiveReference(ActiveProblem::Dangling))
+    );
+    assert_eq!(loaded.state.playlists()[0].shuffle(), None);
+}
+
+#[test]
+fn precedence_too_many_playlists_outranks_an_early_record_defect() {
+    let mut records: Vec<Value> = (1..=33)
+        .map(|i| json!({ "id": i, "name": format!("P{i}") }))
+        .collect();
+    records[0]["entries"] = json!("oops");
+    let loaded = load(v4(json!(records), json!(1), json!({})));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::TooManyPlaylists {
+            found: 33
+        }))
+    );
+    assert_eq!(loaded.state.playlists().len(), 32);
+}
+
+#[test]
+fn the_playlist_cap_counts_input_records_even_when_one_is_skipped() {
+    let mut records: Vec<Value> = (1..=33)
+        .map(|i| json!({ "id": i, "name": format!("P{i}") }))
+        .collect();
+    records[4]["id"] = json!("x");
+    let loaded = load(v4(
+        json!(records),
+        json!(1),
+        json!({ "next_playlist_id": null }),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::TooManyPlaylists {
+            found: 33
+        }))
+    );
+    let expected: Vec<u64> = (1..=4).chain(6..=32).collect();
+    assert_eq!(
+        playlist_ids(&loaded.state),
+        expected,
+        "record 5 had no ID to take, and record 33 is past the 32 records looked at"
+    );
 }

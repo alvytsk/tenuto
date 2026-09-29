@@ -42,7 +42,14 @@ fn a_repaired_queue_is_backed_up_byte_for_byte_and_writing_stays_enabled() {
     };
     assert_eq!(std::fs::read(&backup).expect("backup"), original);
     assert_eq!(std::fs::read(&path).expect("original untouched"), original);
-    assert!(outcome.state.queue().is_empty());
+    assert!(
+        outcome
+            .state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .is_empty()
+    );
     assert_eq!(outcome.state.volume().percent(), 30);
     assert!(outcome.state.completed_for(&media("a")));
     assert_eq!(outcome.state.current_media(), Some(&media("a")));

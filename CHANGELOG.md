@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something in it changed. With a few thousand entries queued, the player
   idles at under 1% CPU with the browser open, down from about 4%.
 
+### Internal
+
+- The playlist rules live in one module, `PlaylistSet`: IDs, cursors,
+  shuffle, deletion and the recovery of a damaged `state.json`. The compiler
+  now keeps every change to a playlist inside it. Behavior and `state.json`
+  are unchanged.
+
 ## [0.2.0] - 2026-09-23
 
 ### Added

@@ -1,6 +1,6 @@
 //! The playback queue (M5 §5): ordered occurrences with stable IDs. Pure
 //! data and policy. It lives inside `PersistedState` and changes only
-//! through `Session`; it never renders, decodes or touches the filesystem.
+//! through `PlaylistSet`; it never renders, decodes or touches the filesystem.
 
 use std::time::Duration;
 use url::Url;
@@ -9,7 +9,7 @@ use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use crate::playback::provenance::PositionProvenance;
 
 /// The cap on entries across *all* playlists (M8 §4). Enforced by
-/// `PersistedState`, the one place IDs are allocated, never by a `Queue`.
+/// `PlaylistSet`, the one place IDs are allocated, never by a `Queue`.
 pub const MAX_PLAYLIST_ENTRIES: usize = 4096;
 
 /// The next ID to hand out, or `None` once `u64::MAX` has been handed out:
@@ -99,6 +99,48 @@ pub struct DisplayMetadata {
     pub duration: Option<DisplayDuration>,
 }
 
+/// A partial update to a queue entry's display metadata: a field left `None`
+/// leaves the entry's existing value alone. Distinct from `DisplayMetadata`
+/// itself, whose `None` means "nothing known" and would blank out a field a
+/// caller never meant to touch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DisplayUpdate {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<String>,
+    pub duration: Option<DisplayDuration>,
+}
+
+impl DisplayUpdate {
+    /// Writes each present field that differs from `display`; an absent one
+    /// leaves the entry's value alone. `true` when anything changed.
+    pub(in crate::playlist) fn apply_to(&self, display: &mut DisplayMetadata) -> bool {
+        let mut changed = false;
+        changed |= replace(&mut display.title, &self.title);
+        changed |= replace(&mut display.artist, &self.artist);
+        changed |= replace(&mut display.album, &self.album);
+        changed |= replace(&mut display.year, &self.year);
+        if let Some(duration) = self.duration
+            && display.duration != Some(duration)
+        {
+            display.duration = Some(duration);
+            changed = true;
+        }
+        changed
+    }
+}
+
+fn replace(field: &mut Option<String>, update: &Option<String>) -> bool {
+    match update {
+        Some(value) if field.as_ref() != Some(value) => {
+            *field = Some(value.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum QueueError {
     #[error(
@@ -181,10 +223,22 @@ impl QueueEntry {
     pub fn display(&self) -> &DisplayMetadata {
         &self.display
     }
-    pub(crate) fn display_mut(&mut self) -> &mut DisplayMetadata {
+    /// The only way an entry gets an ID: the set's allocator, or recovery's.
+    pub(in crate::playlist) fn from_new(id: QueueEntryId, new: NewQueueEntry) -> Self {
+        Self {
+            id,
+            media: new.media,
+            source: new.source,
+            display: new.display,
+        }
+    }
+    pub(in crate::playlist) fn display_mut(&mut self) -> &mut DisplayMetadata {
         &mut self.display
     }
-    pub(crate) fn set_source(&mut self, source: QueueSource) -> Result<(), QueueError> {
+    pub(in crate::playlist) fn set_source(
+        &mut self,
+        source: QueueSource,
+    ) -> Result<(), QueueError> {
         if !source_matches(&self.media, &source) {
             return Err(QueueError::SourceMismatch);
         }
@@ -228,13 +282,13 @@ impl Queue {
     pub fn get(&self, id: QueueEntryId) -> Option<&QueueEntry> {
         self.entries.iter().find(|e| e.id == id)
     }
-    pub(crate) fn get_mut(&mut self, id: QueueEntryId) -> Option<&mut QueueEntry> {
+    pub(in crate::playlist) fn get_mut(&mut self, id: QueueEntryId) -> Option<&mut QueueEntry> {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
     /// Appends `batch` with IDs from `ids`, all or nothing. Capacity is the
     /// caller's check: the cap is global (M8 P7), and a queue cannot see it.
-    pub fn enqueue(
+    pub(in crate::playlist) fn enqueue(
         &mut self,
         batch: Vec<NewQueueEntry>,
         ids: &mut IdAllocator,
@@ -247,18 +301,17 @@ impl Queue {
             .zip(batch)
             .map(|(raw, new)| {
                 let id = QueueEntryId(raw);
-                self.entries.push(QueueEntry {
-                    id,
-                    media: new.media,
-                    source: new.source,
-                    display: new.display,
-                });
+                self.entries.push(QueueEntry::from_new(id, new));
                 id
             })
             .collect())
     }
 
-    pub fn move_entry(
+    pub(in crate::playlist) fn clear_active(&mut self) {
+        self.active = None;
+    }
+
+    pub(in crate::playlist) fn move_entry(
         &mut self,
         id: QueueEntryId,
         direction: Direction,
@@ -277,7 +330,7 @@ impl Queue {
         }
     }
 
-    pub fn remove(&mut self, id: QueueEntryId) -> Result<Removed, QueueError> {
+    pub(in crate::playlist) fn remove(&mut self, id: QueueEntryId) -> Result<Removed, QueueError> {
         let index = self.index_of(id).ok_or(QueueError::UnknownEntry(id))?;
         let entry = self.entries.remove(index);
         let was_active = self.active == Some(id);
@@ -296,22 +349,16 @@ impl Queue {
         })
     }
 
-    pub fn clear(&mut self) -> Vec<QueueEntry> {
+    pub(in crate::playlist) fn clear(&mut self) -> Vec<QueueEntry> {
         self.active = None;
         std::mem::take(&mut self.entries)
     }
 
-    pub fn neighbor(&self, anchor: QueueEntryId, direction: Direction) -> Option<QueueEntryId> {
-        let index = self.index_of(anchor)?;
-        let target = match direction {
-            Direction::Up => index.checked_sub(1)?,
-            Direction::Down => index + 1,
-        };
-        self.entries.get(target).map(QueueEntry::id)
-    }
-
-    /// Only `Session` adopts or clears an occurrence (§3).
-    pub(crate) fn set_active(&mut self, id: Option<QueueEntryId>) -> Result<(), QueueError> {
+    /// Only `PlaylistSet` adopts or clears an occurrence (§3).
+    pub(in crate::playlist) fn set_active(
+        &mut self,
+        id: Option<QueueEntryId>,
+    ) -> Result<(), QueueError> {
         if let Some(id) = id
             && self.get(id).is_none()
         {
@@ -321,29 +368,13 @@ impl Queue {
         Ok(())
     }
 
-    /// Persistence's constructor, used only after `queue_codec` validated
-    /// uniqueness, identity and capacity.
-    pub(crate) fn from_parts(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
+    /// The set's recovery builder validates uniqueness, identity and
+    /// capacity before it calls this.
+    pub(in crate::playlist) fn from_parts(
+        entries: Vec<QueueEntry>,
+        active: Option<QueueEntryId>,
+    ) -> Self {
         Self { entries, active }
-    }
-
-    #[doc(hidden)]
-    pub fn from_parts_for_tests(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
-        Self::from_parts(entries, active)
-    }
-
-    pub(crate) fn entry_from_parts(
-        id: QueueEntryId,
-        media: MediaId,
-        source: QueueSource,
-        display: DisplayMetadata,
-    ) -> QueueEntry {
-        QueueEntry {
-            id,
-            media,
-            source,
-            display,
-        }
     }
 }
 

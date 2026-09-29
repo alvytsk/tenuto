@@ -32,7 +32,7 @@ fn queued(names: &[&str]) -> (Session, Vec<QueueEntryId>) {
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
         .enqueue(
-            session.state().playing(),
+            session.state().playlists().playing(),
             names.iter().map(|n| entry(n)).collect(),
         )
         .unwrap_or_else(|error| panic!("fits: {error}"));
@@ -94,15 +94,36 @@ fn two_pending_loads_of_one_media_adopt_their_own_rows_in_event_order() {
         .expect("registered");
     assert_ne!(first, second);
     assert_eq!(
-        session.state().queue().active(),
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
         None,
         "submitting adopts nothing"
     );
 
     session.observe(&loaded(first, 1, "a"), clock.sample());
-    assert_eq!(session.state().queue().active(), Some(ids[0]));
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        Some(ids[0])
+    );
     session.observe(&loaded(second, 2, "a"), clock.sample());
-    assert_eq!(session.state().queue().active(), Some(ids[2]));
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        Some(ids[2])
+    );
     assert_eq!(session.pending_load_count(), 0);
 }
 
@@ -116,7 +137,15 @@ fn reordering_a_pending_target_does_not_change_what_is_adopted() {
     session.move_entry(ids[2], Direction::Up).expect("known");
     session.move_entry(ids[2], Direction::Up).expect("known");
     session.observe(&loaded(request, 1, "c"), clock.sample());
-    assert_eq!(session.state().queue().active(), Some(ids[2]));
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        Some(ids[2])
+    );
 }
 
 #[test]
@@ -130,8 +159,24 @@ fn a_removed_pending_target_is_never_resurrected_and_its_playback_is_stopped() {
         .remove_entry(ids[1], &progress(0, "b", 0, None), clock.sample())
         .expect("known");
     session.observe(&loaded(request, 1, "b"), clock.sample());
-    assert_eq!(session.state().queue().active(), None);
-    assert!(session.state().queue().get(ids[1]).is_none());
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        None
+    );
+    assert!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .get(ids[1])
+            .is_none()
+    );
     assert!(session.take_stop_request());
     assert!(!session.take_stop_request(), "taken once");
 }
@@ -167,7 +212,15 @@ fn failure_before_adoption_keeps_the_previous_entry_and_its_checkpoint() {
         clock.sample(),
     );
 
-    assert_eq!(session.state().queue().active(), Some(ids[0]));
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        Some(ids[0])
+    );
     assert_eq!(
         session
             .state()
@@ -291,8 +344,19 @@ fn a_legacy_adoption_clears_the_active_entry_and_keeps_the_queue() {
         .register_load(LoadTarget::Legacy, &media("x"))
         .expect("registered");
     session.observe(&loaded(legacy, 2, "x"), clock.sample());
-    assert_eq!(session.state().queue().active(), None);
-    assert_eq!(session.state().queue().len(), 2);
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        None
+    );
+    assert_eq!(
+        session.state().playlists().playing_playlist().queue().len(),
+        2
+    );
     assert_eq!(session.state().current_media(), Some(&media("x")));
 }
 
@@ -304,7 +368,15 @@ fn unknown_and_duplicate_outcomes_select_nothing() {
         &loaded(LoadRequestId::from_raw(999), 1, "a"),
         clock.sample(),
     );
-    assert_eq!(session.state().queue().active(), None);
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        None
+    );
     assert!(!session.take_stop_request());
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
@@ -334,9 +406,14 @@ fn an_adoption_snapshot_contains_the_new_media_active_entry_and_metadata() {
         panic!("snapshot")
     };
     assert_eq!(state.current_media(), Some(&media("b")));
-    assert_eq!(state.queue().active(), Some(ids[1]));
+    assert_eq!(
+        state.playlists().playing_playlist().queue().active(),
+        Some(ids[1])
+    );
     assert_eq!(
         state
+            .playlists()
+            .playing_playlist()
             .queue()
             .get(ids[1])
             .and_then(|e| e.display().title.as_deref()),
@@ -350,7 +427,7 @@ fn an_adoption_snapshot_contains_the_new_media_active_entry_and_metadata() {
         panic!("snapshot")
     };
     assert_eq!(state.current_media(), Some(&media("x")));
-    assert_eq!(state.queue().active(), None);
+    assert_eq!(state.playlists().playing_playlist().queue().active(), None);
 }
 
 #[test]

@@ -13,7 +13,7 @@ pub mod media;
 pub mod persistence;
 pub mod playback;
 pub mod playlist;
-pub mod queue;
+pub use playlist::queue;
 pub mod resume;
 pub mod session;
 pub mod station;

@@ -3,10 +3,8 @@ mod support;
 use support::media;
 use tenuto::application::transport::*;
 use tenuto::media::id::MediaId;
-use tenuto::playlist::{Playlist, PlaylistId, Shuffle};
-use tenuto::queue::{
-    DisplayMetadata, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueSource,
-};
+use tenuto::playlist::{Playlist, PlaylistId, PlaylistSet};
+use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueEntryId, QueueSource};
 
 fn entry(name: &str) -> NewQueueEntry {
     let MediaId::LocalFile(path) = media(name) else {
@@ -20,29 +18,33 @@ fn entry(name: &str) -> NewQueueEntry {
     .unwrap_or_else(|error| panic!("a literal entry must be valid: {error}"))
 }
 
-/// A playlist of `names`, its cursor on `cursor` (an index), IDs from `ids`.
+/// Adds a playlist of `names` to `set`. Shuffle (seed `seed`, nothing
+/// pinned) goes on before the cursor, so `first` stays `None`; the cursor
+/// then goes on `cursor` (an index).
 fn playlist(
-    raw_id: u64,
+    set: &mut PlaylistSet,
     names: &[&str],
     cursor: Option<usize>,
-    shuffle: Option<Shuffle>,
-    ids: &mut IdAllocator,
-) -> (Playlist, Vec<QueueEntryId>) {
-    let mut queue = Queue::default();
-    let entries = queue
-        .enqueue(names.iter().map(|name| entry(name)).collect(), ids)
+    seed: Option<u64>,
+) -> (PlaylistId, Vec<QueueEntryId>) {
+    let id = set
+        .create("P")
+        .unwrap_or_else(|error| panic!("room: {error}"));
+    let entries = set
+        .enqueue(id, names.iter().map(|name| entry(name)).collect())
         .unwrap_or_else(|error| panic!("fits: {error}"));
-    let queue =
-        Queue::from_parts_for_tests(queue.entries().to_vec(), cursor.map(|index| entries[index]));
-    (
-        Playlist::from_parts(
-            PlaylistId::from_raw_for_tests(raw_id),
-            "P".into(),
-            shuffle,
-            queue,
-        ),
-        entries,
-    )
+    set.set_shuffle(id, seed)
+        .unwrap_or_else(|error| panic!("exists: {error}"));
+    if let Some(index) = cursor {
+        set.adopt(entries[index])
+            .unwrap_or_else(|error| panic!("queued: {error}"));
+    }
+    (id, entries)
+}
+
+fn get(set: &PlaylistSet, id: PlaylistId) -> &Playlist {
+    set.playlist(id)
+        .unwrap_or_else(|| panic!("playlist {} exists", id.get()))
 }
 
 const ALL_PHASES: [PlaybackPhase; 8] = [
@@ -58,15 +60,15 @@ const ALL_PHASES: [PlaybackPhase; 8] = [
 
 #[test]
 fn enter_plays_the_viewed_selection_in_every_phase_even_over_an_empty_playing_playlist() {
-    let mut ids = IdAllocator::default();
-    let (empty, _) = playlist(1, &[], None, None, &mut ids);
-    let (viewed, in_viewed) = playlist(2, &["x", "y"], None, None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (empty, _) = playlist(&mut set, &[], None, None);
+    let (viewed, in_viewed) = playlist(&mut set, &["x", "y"], None, None);
     for phase in ALL_PHASES {
         let decision = decide(
             TransportInput::Enter,
             &TransportSituation {
-                navigation: &empty,
-                viewed: &viewed,
+                navigation: get(&set, empty),
+                viewed: get(&set, viewed),
                 selected: Some(in_viewed[1]),
                 phase,
                 retry: None,
@@ -79,9 +81,9 @@ fn enter_plays_the_viewed_selection_in_every_phase_even_over_an_empty_playing_pl
 
 #[test]
 fn space_and_play_never_load_the_viewed_selection() {
-    let mut ids = IdAllocator::default();
-    let (playing, in_playing) = playlist(1, &["a", "b"], None, None, &mut ids);
-    let (viewed, in_viewed) = playlist(2, &["x"], None, None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (playing, in_playing) = playlist(&mut set, &["a", "b"], None, None);
+    let (viewed, in_viewed) = playlist(&mut set, &["x"], None, None);
     for phase in [
         PlaybackPhase::Unloaded,
         PlaybackPhase::Ended,
@@ -91,8 +93,8 @@ fn space_and_play_never_load_the_viewed_selection() {
             let decision = decide(
                 input,
                 &TransportSituation {
-                    navigation: &playing,
-                    viewed: &viewed,
+                    navigation: get(&set, playing),
+                    viewed: get(&set, viewed),
                     selected: Some(in_viewed[0]),
                     phase,
                     retry: None,
@@ -113,8 +115,8 @@ fn space_and_play_never_load_the_viewed_selection() {
                 decide(
                     input,
                     &TransportSituation {
-                        navigation: &playing,
-                        viewed: &playing,
+                        navigation: get(&set, playing),
+                        viewed: get(&set, playing),
                         selected: Some(in_playing[1]),
                         phase,
                         retry: None,
@@ -130,8 +132,8 @@ fn space_and_play_never_load_the_viewed_selection() {
 
 #[test]
 fn the_cursor_outranks_the_first_entry_and_shuffle_decides_what_first_means() {
-    let mut ids = IdAllocator::default();
-    let (with_cursor, entries) = playlist(1, &["a", "b", "c"], Some(1), None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (with_cursor, entries) = playlist(&mut set, &["a", "b", "c"], Some(1), None);
     let situation = |navigation| TransportSituation {
         navigation,
         viewed: navigation,
@@ -141,23 +143,14 @@ fn the_cursor_outranks_the_first_entry_and_shuffle_decides_what_first_means() {
         live: false,
     };
     assert_eq!(
-        decide(TransportInput::Play, &situation(&with_cursor)),
+        decide(TransportInput::Play, &situation(get(&set, with_cursor))),
         TransportDecision::Load(entries[1])
     );
 
-    let mut ids = IdAllocator::default();
-    let (shuffled, entries) = playlist(
-        1,
-        &["a", "b", "c", "d", "e"],
-        None,
-        Some(Shuffle {
-            seed: 42,
-            first: None,
-        }),
-        &mut ids,
-    );
+    let mut set = PlaylistSet::default();
+    let (shuffled, entries) = playlist(&mut set, &["a", "b", "c", "d", "e"], None, Some(42));
     assert_eq!(
-        decide(TransportInput::Play, &situation(&shuffled)),
+        decide(TransportInput::Play, &situation(get(&set, shuffled))),
         TransportDecision::Load(entries[4]),
         "seed 42 orders IDs 1..=5 as 5 1 4 3 2"
     );
@@ -166,16 +159,16 @@ fn the_cursor_outranks_the_first_entry_and_shuffle_decides_what_first_means() {
 #[test]
 fn a_valid_retry_outranks_the_empty_check_whatever_is_viewed() {
     // A is playing and empty; the failed request was in B; the view is on C.
-    let mut ids = IdAllocator::default();
-    let (a, _) = playlist(1, &[], None, None, &mut ids);
-    let (_b, in_b) = playlist(2, &["b1"], None, None, &mut ids);
-    let (c, in_c) = playlist(3, &["c1"], None, None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (a, _) = playlist(&mut set, &[], None, None);
+    let (_b, in_b) = playlist(&mut set, &["b1"], None, None);
+    let (c, in_c) = playlist(&mut set, &["c1"], None, None);
     for input in [TransportInput::Space, TransportInput::Play] {
         let decision = decide(
             input,
             &TransportSituation {
-                navigation: &a,
-                viewed: &c,
+                navigation: get(&set, a),
+                viewed: get(&set, c),
                 selected: Some(in_c[0]),
                 phase: PlaybackPhase::LoadFailed,
                 retry: Some(in_b[0]),
@@ -187,8 +180,8 @@ fn a_valid_retry_outranks_the_empty_check_whatever_is_viewed() {
     let nothing_to_retry = decide(
         TransportInput::Play,
         &TransportSituation {
-            navigation: &a,
-            viewed: &c,
+            navigation: get(&set, a),
+            viewed: get(&set, c),
             selected: Some(in_c[0]),
             phase: PlaybackPhase::LoadFailed,
             retry: None,
@@ -200,17 +193,8 @@ fn a_valid_retry_outranks_the_empty_check_whatever_is_viewed() {
 
 #[test]
 fn next_and_previous_step_from_the_cursor_in_playback_order_and_stop_at_the_ends() {
-    let mut ids = IdAllocator::default();
-    let (shuffled, e) = playlist(
-        1,
-        &["a", "b", "c", "d", "e"],
-        Some(0),
-        Some(Shuffle {
-            seed: 42,
-            first: None,
-        }),
-        &mut ids,
-    );
+    let mut set = PlaylistSet::default();
+    let (shuffled, e) = playlist(&mut set, &["a", "b", "c", "d", "e"], Some(0), Some(42));
     let at = |navigation, input| {
         decide(
             input,
@@ -226,25 +210,25 @@ fn next_and_previous_step_from_the_cursor_in_playback_order_and_stop_at_the_ends
     };
     // Order 5 1 4 3 2; the cursor is ID 1.
     assert_eq!(
-        at(&shuffled, TransportInput::Next),
+        at(get(&set, shuffled), TransportInput::Next),
         TransportDecision::Load(e[3])
     );
     assert_eq!(
-        at(&shuffled, TransportInput::Previous),
+        at(get(&set, shuffled), TransportInput::Previous),
         TransportDecision::Load(e[4])
     );
 
-    let mut ids = IdAllocator::default();
-    let (at_end, _) = playlist(1, &["a", "b"], Some(1), None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (at_end, _) = playlist(&mut set, &["a", "b"], Some(1), None);
     assert_eq!(
-        at(&at_end, TransportInput::Next),
+        at(get(&set, at_end), TransportInput::Next),
         TransportDecision::Nothing,
         "a boundary does not disturb playback"
     );
-    let mut ids = IdAllocator::default();
-    let (no_cursor, in_no_cursor) = playlist(1, &["a", "b", "c"], None, None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (no_cursor, in_no_cursor) = playlist(&mut set, &["a", "b", "c"], None, None);
     assert_eq!(
-        at(&no_cursor, TransportInput::Next),
+        at(get(&set, no_cursor), TransportInput::Next),
         TransportDecision::Nothing,
         "no anchor, no step"
     );
@@ -257,8 +241,8 @@ fn next_and_previous_step_from_the_cursor_in_playback_order_and_stop_at_the_ends
             decide(
                 input,
                 &TransportSituation {
-                    navigation: &no_cursor,
-                    viewed: &no_cursor,
+                    navigation: get(&set, no_cursor),
+                    viewed: get(&set, no_cursor),
                     selected: Some(in_no_cursor[1]),
                     phase: PlaybackPhase::Playing,
                     retry: None,
@@ -273,15 +257,15 @@ fn next_and_previous_step_from_the_cursor_in_playback_order_and_stop_at_the_ends
 
 #[test]
 fn during_loading_navigation_anchors_on_the_retry_in_its_own_playlist() {
-    let mut ids = IdAllocator::default();
-    let (_a, _) = playlist(1, &["a1", "a2"], Some(0), None, &mut ids);
-    let (b, in_b) = playlist(2, &["b1", "b2"], None, None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (_a, _) = playlist(&mut set, &["a1", "a2"], Some(0), None);
+    let (b, in_b) = playlist(&mut set, &["b1", "b2"], None, None);
     // The caller made B the navigation playlist because last_requested lives there.
     let decision = decide(
         TransportInput::Next,
         &TransportSituation {
-            navigation: &b,
-            viewed: &b,
+            navigation: get(&set, b),
+            viewed: get(&set, b),
             selected: None,
             phase: PlaybackPhase::Loading,
             retry: Some(in_b[0]),
@@ -293,16 +277,16 @@ fn during_loading_navigation_anchors_on_the_retry_in_its_own_playlist() {
 
 #[test]
 fn engine_phases_keep_their_engine_commands_over_an_emptied_playlist() {
-    let mut ids = IdAllocator::default();
-    let (empty, _) = playlist(1, &[], None, None, &mut ids);
+    let mut set = PlaylistSet::default();
+    let (empty, _) = playlist(&mut set, &[], None, None);
     for phase in [
         PlaybackPhase::Playing,
         PlaybackPhase::Paused,
         PlaybackPhase::Reconnecting,
     ] {
         let situation = TransportSituation {
-            navigation: &empty,
-            viewed: &empty,
+            navigation: get(&set, empty),
+            viewed: get(&set, empty),
             selected: None,
             phase,
             retry: None,

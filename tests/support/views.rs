@@ -16,9 +16,7 @@ use tenuto::media::id::{AbsolutePath, MediaId};
 use tenuto::persistence::model::PersistedState;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::volume::Volume;
-use tenuto::queue::{
-    DisplayDuration, DurationSource, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueSource,
-};
+use tenuto::queue::{DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueSource};
 
 /// The ids a fresh queue assigns to three entries; the same on every call.
 pub fn ids() -> Vec<QueueEntryId> {
@@ -27,7 +25,6 @@ pub fn ids() -> Vec<QueueEntryId> {
 
 /// The ids a fresh queue assigns to `names`, in order.
 pub fn ids_for(names: &[&str]) -> Vec<QueueEntryId> {
-    let mut queue = Queue::default();
     let entries = names
         .iter()
         .map(|name| {
@@ -41,8 +38,9 @@ pub fn ids_for(names: &[&str]) -> Vec<QueueEntryId> {
             .unwrap_or_else(|error| panic!("queue entry: {error}"))
         })
         .collect();
-    queue
-        .enqueue(entries, &mut IdAllocator::default())
+    let mut set = tenuto::playlist::PlaylistSet::default();
+    let playing = set.playing();
+    set.enqueue(playing, entries)
         .unwrap_or_else(|error| panic!("the entries fit: {error}"))
 }
 
@@ -63,7 +61,7 @@ pub fn decoded(seconds: u64) -> DisplayDuration {
 
 pub fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
     let ids = ids();
-    let viewed = PersistedState::default().playing();
+    let viewed = PersistedState::default().playlists().playing();
     PlayerView {
         tabs: vec![PlaylistTab {
             id: viewed,

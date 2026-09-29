@@ -9,8 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tenuto::application::browse::{BrowseRequest, BrowseResult, DirEntry, EntryKind};
 use tenuto::application::view::QueueRow;
 use tenuto::media::id::MediaId;
-use tenuto::playlist::PlaylistId;
-use tenuto::queue::{DisplayMetadata, IdAllocator, NewQueueEntry, Queue, QueueSource};
+use tenuto::playlist::{PlaylistId, PlaylistSet};
+use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueSource};
 use tenuto::tui::browser::{BrowserEffect, BrowserState};
 
 mod support;
@@ -49,24 +49,30 @@ fn requests(effects: &[BrowserEffect]) -> Vec<BrowseRequest> {
         .collect()
 }
 
-/// A `QueueRow` for `media`, whose `QueueEntryId` is `raw_id` — obtained by
-/// enqueuing a single scratch entry into its own `Queue` with an
-/// `IdAllocator` started at `raw_id`, since `QueueEntryId` has no public
-/// constructor.
+/// A `QueueRow` for `media`, whose `QueueEntryId` is `raw_id`: the set hands
+/// IDs out from 1 in enqueue order, so the `raw_id`-th scratch entry has it.
 fn queued_row(media: MediaId, raw_id: u64) -> QueueRow {
-    let path = tenuto::media::id::AbsolutePath::new(format!("/scratch/{raw_id}.flac").into())
-        .unwrap_or_else(|error| panic!("absolute path: {error}"));
-    let entry = NewQueueEntry::new(
-        MediaId::LocalFile(path.clone()),
-        QueueSource::LocalFile(path),
-        DisplayMetadata::default(),
-    )
-    .unwrap_or_else(|error| panic!("queue entry: {error}"));
-    let mut queue = Queue::default();
-    let mut ids = IdAllocator::starting_at(Some(raw_id));
-    let id = queue
-        .enqueue(vec![entry], &mut ids)
-        .unwrap_or_else(|error| panic!("enqueue: {error}"))[0];
+    let mut set = PlaylistSet::default();
+    let playing = set.playing();
+    let scratch: Vec<NewQueueEntry> = (1..=raw_id)
+        .map(|n| {
+            let path = tenuto::media::id::AbsolutePath::new(format!("/scratch/{n}.flac").into())
+                .unwrap_or_else(|error| panic!("absolute path: {error}"));
+            NewQueueEntry::new(
+                MediaId::LocalFile(path.clone()),
+                QueueSource::LocalFile(path),
+                DisplayMetadata::default(),
+            )
+            .unwrap_or_else(|error| panic!("queue entry: {error}"))
+        })
+        .collect();
+    let ids = set
+        .enqueue(playing, scratch)
+        .unwrap_or_else(|error| panic!("enqueue: {error}"));
+    let id = *ids
+        .last()
+        .unwrap_or_else(|| panic!("raw_id must be at least 1"));
+    assert_eq!(id.get(), raw_id);
     QueueRow {
         id,
         media,

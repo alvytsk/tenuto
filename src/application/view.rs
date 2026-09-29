@@ -141,7 +141,7 @@ pub(crate) fn playlist_tabs(state: &PersistedState) -> Vec<PlaylistTab> {
         .map(|playlist| PlaylistTab {
             id: playlist.id(),
             name: displayable(playlist.name()),
-            playing: playlist.id() == state.playing(),
+            playing: playlist.id() == state.playlists().playing(),
             shuffled: playlist.shuffle().is_some(),
         })
         .collect()
@@ -150,7 +150,7 @@ pub(crate) fn playlist_tabs(state: &PersistedState) -> Vec<PlaylistTab> {
 /// Every row of one playlist, in queue order; empty for a playlist that is
 /// no longer there.
 pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<QueueRow> {
-    let Some(playlist) = state.playlist(playlist) else {
+    let Some(playlist) = state.playlists().playlist(playlist) else {
         return Vec::new();
     };
     playlist
@@ -297,7 +297,7 @@ mod tests {
         )
         .expect("entry");
         let mut state = PersistedState::default();
-        let playing = state.playing();
+        let playing = state.playlists().playing();
         state.enqueue(playing, vec![entry]).expect("fits");
         state.record(
             &PlaybackCheckpoint {
@@ -337,12 +337,12 @@ mod tests {
             },
         )
         .unwrap_or_else(|error| panic!("valid: {error}"));
-        let mut queue = crate::queue::Queue::default();
-        let ids = queue
-            .enqueue(vec![new], &mut crate::queue::IdAllocator::default())
+        let mut set = crate::playlist::PlaylistSet::default();
+        let playing = set.playing();
+        let ids = set
+            .enqueue(playing, vec![new])
             .unwrap_or_else(|error| panic!("fits: {error}"));
-        queue
-            .get(ids[0])
+        set.find_entry(ids[0])
             .cloned()
             .unwrap_or_else(|| panic!("just enqueued"))
     }
@@ -367,12 +367,12 @@ mod tests {
             },
         )
         .unwrap_or_else(|error| panic!("valid: {error}"));
-        let mut queue = crate::queue::Queue::default();
-        let ids = queue
-            .enqueue(vec![new], &mut crate::queue::IdAllocator::default())
+        let mut set = crate::playlist::PlaylistSet::default();
+        let playing = set.playing();
+        let ids = set
+            .enqueue(playing, vec![new])
             .unwrap_or_else(|error| panic!("fits: {error}"));
-        queue
-            .get(ids[0])
+        set.find_entry(ids[0])
             .cloned()
             .unwrap_or_else(|| panic!("just enqueued"))
     }

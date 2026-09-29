@@ -1,9 +1,20 @@
 //! A named playlist (M8 §4): today's `Queue` plus an identity, a name and an
 //! optional shuffle. Pure data and policy, like `queue.rs`: it never
 //! renders, decodes or touches the filesystem, and it changes only through
-//! `Session`.
+//! `PlaylistSet`.
 
-use crate::queue::{Direction, Queue, QueueEntryId};
+pub mod queue;
+mod set;
+
+pub use set::{
+    Deletion, Field, MediaEffect, PlaylistSet, RecordOutcome, RecordParts, RecoveredSet, Recovery,
+    Repair, ShuffleField, Stage,
+};
+
+use self::queue::{Direction, Queue, QueueEntryId};
+
+/// The name migration and every fallback give a playlist (M8 §6).
+pub const DEFAULT_NAME: &str = "Default";
 
 pub const MAX_PLAYLISTS: usize = 32;
 pub const MAX_NAME_CHARS: usize = 40;
@@ -73,18 +84,12 @@ pub struct Playlist {
 }
 
 impl Playlist {
-    pub(crate) fn new(id: PlaylistId, name: String) -> Self {
+    fn new(id: PlaylistId, name: String) -> Self {
         Self::from_parts(id, name, None, Queue::default())
     }
 
-    /// Persistence's constructor and the tests'. The caller has validated
-    /// the name.
-    pub fn from_parts(
-        id: PlaylistId,
-        name: String,
-        shuffle: Option<Shuffle>,
-        queue: Queue,
-    ) -> Self {
+    /// The set's recovery builder's constructor.
+    fn from_parts(id: PlaylistId, name: String, shuffle: Option<Shuffle>, queue: Queue) -> Self {
         Self {
             id,
             name,
@@ -105,19 +110,6 @@ impl Playlist {
     pub fn queue(&self) -> &Queue {
         &self.queue
     }
-    pub(crate) fn queue_mut(&mut self) -> &mut Queue {
-        &mut self.queue
-    }
-    #[doc(hidden)]
-    pub fn queue_mut_for_tests(&mut self) -> &mut Queue {
-        &mut self.queue
-    }
-    pub(crate) fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-    pub(crate) fn set_shuffle(&mut self, shuffle: Option<Shuffle>) {
-        self.shuffle = shuffle;
-    }
 
     /// The order traversal follows: list order, or with shuffle on `first`
     /// then ascending `(splitmix64(seed + id), id)`.
@@ -126,7 +118,7 @@ impl Playlist {
     /// never per frame. Cache the order if n ever grows past the 4,096 cap.
     ///
     /// An entry added while shuffle is on would land at its hash position,
-    /// possibly behind the current track; `Session::enqueue` reshuffles so
+    /// possibly behind the current track; `PlaylistSet::enqueue` reshuffles so
     /// it cannot.
     pub fn playback_order(&self) -> Vec<QueueEntryId> {
         let mut ids: Vec<QueueEntryId> = self.queue.entries().iter().map(|e| e.id()).collect();
@@ -156,5 +148,16 @@ impl Playlist {
 
     pub fn first_in_order(&self) -> Option<QueueEntryId> {
         self.playback_order().first().copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::splitmix64;
+
+    #[test]
+    fn splitmix64_matches_the_reference_vector() {
+        assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
+        assert_eq!(splitmix64(0x9E37_79B9_7F4A_7C15), 0x6E78_9E6A_A1B9_65F4);
     }
 }

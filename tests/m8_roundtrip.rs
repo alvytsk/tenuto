@@ -120,7 +120,7 @@ fn saves_and_loads_unrepaired(state: &PersistedState, dir: &Path, step: &str) {
 fn ordinary_playlist_and_shuffle_use_never_saves_a_state_the_next_load_repairs() {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     let mut session = Session::new(PersistedState::default());
-    let a = session.state().playing();
+    let a = session.state().playlists().playing();
     let now = FakeClock::new().sample();
 
     let (b, _) = session
@@ -144,6 +144,7 @@ fn ordinary_playlist_and_shuffle_use_never_saves_a_state_the_next_load_repairs()
     assert_eq!(
         session
             .state()
+            .playlists()
             .playlist(a)
             .and_then(|playlist| playlist.shuffle())
             .and_then(|shuffle| shuffle.first),
@@ -162,7 +163,7 @@ fn ordinary_playlist_and_shuffle_use_never_saves_a_state_the_next_load_repairs()
     // `c` on a shuffled playlist that has a cursor orphans the pin the same
     // way, and takes the cursor with it. B becomes the playing playlist here.
     adopt(&mut session, in_b[0], "b1");
-    assert_eq!(session.state().playing(), b, "B is playing now");
+    assert_eq!(session.state().playlists().playing(), b, "B is playing now");
     session
         .set_shuffle(b, Some(7))
         .unwrap_or_else(|error| panic!("shuffled B: {error}"));

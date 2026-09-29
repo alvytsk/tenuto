@@ -14,9 +14,7 @@ use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
 use tenuto::playlist::{PlaylistId, Shuffle};
-use tenuto::queue::{
-    Direction, DisplayMetadata, NewQueueEntry, QueueEntryId, QueueError, QueueSource,
-};
+use tenuto::queue::{Direction, DisplayMetadata, NewQueueEntry, QueueEntryId, QueueSource};
 use tenuto::session::{Advance, DisplayUpdate, LoadTarget, Session};
 
 fn entry(name: &str) -> NewQueueEntry {
@@ -69,7 +67,7 @@ struct Two {
 
 fn two() -> Two {
     let mut session = Session::new(PersistedState::default());
-    let a = session.state().playing();
+    let a = session.state().playlists().playing();
     let (b, _) = session
         .create_playlist("B")
         .unwrap_or_else(|error| panic!("room: {error}"));
@@ -98,30 +96,6 @@ fn adopt(session: &mut Session, id: QueueEntryId, name: &str, rev: u64) -> LoadR
 }
 
 #[test]
-fn enqueue_lands_in_the_named_playlist_and_a_deleted_one_refuses() {
-    let mut two = two();
-    assert_eq!(
-        two.session
-            .state()
-            .playlist(two.b)
-            .expect("B")
-            .queue()
-            .len(),
-        2
-    );
-    assert_eq!(
-        two.session.state().queue().len(),
-        2,
-        "A, the playing playlist, is untouched by B's adds"
-    );
-    let gone = PlaylistId::from_raw_for_tests(99);
-    assert_eq!(
-        two.session.enqueue(gone, vec![entry("x")]).map(|_| ()),
-        Err(QueueError::UnknownPlaylist(99))
-    );
-}
-
-#[test]
 fn moving_and_loading_find_an_entry_in_any_playlist() {
     let mut two = two();
     two.session
@@ -130,6 +104,7 @@ fn moving_and_loading_find_an_entry_in_any_playlist() {
     let order: Vec<_> = two
         .session
         .state()
+        .playlists()
         .playlist(two.b)
         .expect("B")
         .queue()
@@ -174,6 +149,7 @@ fn a_display_update_reaches_every_occurrence_in_every_playlist() {
     for id in [two.in_a[0], extra[0]] {
         assert_eq!(
             state
+                .playlists()
                 .find_entry(id)
                 .expect("queued")
                 .display()
@@ -211,7 +187,7 @@ fn playing_changes_at_adoption_and_the_old_playlist_keeps_its_cursor() {
         .register_load(LoadTarget::Queue(two.in_b[0]), &media("b1"))
         .expect("registered");
     assert_eq!(
-        two.session.state().playing(),
+        two.session.state().playlists().playing(),
         two.a,
         "a request alone changes nothing (P4)"
     );
@@ -219,10 +195,18 @@ fn playing_changes_at_adoption_and_the_old_playlist_keeps_its_cursor() {
     two.session
         .observe(&loaded(pending, 2, "b1"), FakeClock::new().sample());
     let state = two.session.state();
-    assert_eq!(state.playing(), two.b);
-    assert_eq!(state.queue().active(), Some(two.in_b[0]));
+    assert_eq!(state.playlists().playing(), two.b);
     assert_eq!(
-        state.playlist(two.a).expect("A").queue().active(),
+        state.playlists().playing_playlist().queue().active(),
+        Some(two.in_b[0])
+    );
+    assert_eq!(
+        state
+            .playlists()
+            .playlist(two.a)
+            .expect("A")
+            .queue()
+            .active(),
         Some(two.in_a[1])
     );
 }
@@ -237,9 +221,20 @@ fn a_failed_cross_playlist_load_changes_neither_playing_nor_any_cursor() {
         .expect("registered");
     two.session.retract_load(pending);
     let state = two.session.state();
-    assert_eq!(state.playing(), two.a);
-    assert_eq!(state.queue().active(), Some(two.in_a[0]));
-    assert_eq!(state.playlist(two.b).expect("B").queue().active(), None);
+    assert_eq!(state.playlists().playing(), two.a);
+    assert_eq!(
+        state.playlists().playing_playlist().queue().active(),
+        Some(two.in_a[0])
+    );
+    assert_eq!(
+        state
+            .playlists()
+            .playlist(two.b)
+            .expect("B")
+            .queue()
+            .active(),
+        None
+    );
 }
 
 #[test]
@@ -256,7 +251,13 @@ fn automatic_advance_follows_the_same_shuffled_order_as_neighbor() {
     // one thing this test must rule out. 99 does not.
     two.session.set_shuffle(two.a, Some(99)).expect("A exists");
 
-    let playlist = two.session.state().playlist(two.a).expect("A").clone();
+    let playlist = two
+        .session
+        .state()
+        .playlists()
+        .playlist(two.a)
+        .expect("A")
+        .clone();
     assert_eq!(
         playlist.shuffle(),
         Some(Shuffle {
@@ -282,7 +283,12 @@ fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
     adopt(&mut two.session, two.in_a[0], "a1", 1);
     two.session.set_shuffle(two.b, Some(7)).expect("B exists");
     assert_eq!(
-        two.session.state().playlist(two.b).expect("B").shuffle(),
+        two.session
+            .state()
+            .playlists()
+            .playlist(two.b)
+            .expect("B")
+            .shuffle(),
         Some(Shuffle {
             seed: 7,
             first: None
@@ -291,7 +297,12 @@ fn shuffle_on_an_inactive_tab_pins_its_own_cursor_or_nothing() {
     );
     two.session.set_shuffle(two.b, None).expect("B exists");
     assert_eq!(
-        two.session.state().playlist(two.b).expect("B").shuffle(),
+        two.session
+            .state()
+            .playlists()
+            .playlist(two.b)
+            .expect("B")
+            .shuffle(),
         None
     );
     assert_eq!(
@@ -307,7 +318,7 @@ fn removing_an_inactive_playlists_cursor_only_clears_it() {
     let mut two = two();
     adopt(&mut two.session, two.in_b[0], "b1", 1);
     let playing = adopt(&mut two.session, two.in_a[0], "a1", 2);
-    assert_eq!(two.session.state().playing(), two.a);
+    assert_eq!(two.session.state().playlists().playing(), two.a);
 
     let removal = two
         .session
@@ -326,6 +337,7 @@ fn removing_an_inactive_playlists_cursor_only_clears_it() {
     assert_eq!(
         two.session
             .state()
+            .playlists()
             .playlist(two.b)
             .expect("B")
             .queue()
@@ -361,7 +373,7 @@ fn with_a_playing_and_b_loading_removing_as_entry_cannot_touch_bs_load() {
         Some(pending),
         "B's load is still valid"
     );
-    assert_eq!(two.session.state().playing(), two.b);
+    assert_eq!(two.session.state().playlists().playing(), two.b);
 }
 
 #[test]
@@ -399,7 +411,7 @@ fn deleting_the_owning_playlist_releases_and_moves_playing() {
     let mut two = two();
     let playing = adopt(&mut two.session, two.in_a[0], "a1", 1);
     two.session.observe(&started(1), FakeClock::new().sample());
-    let removal = two
+    let (removal, successor) = two
         .session
         .delete_playlist(
             two.a,
@@ -408,8 +420,9 @@ fn deleting_the_owning_playlist_releases_and_moves_playing() {
         )
         .expect("another exists");
     assert!(removal.stop_playback);
+    assert_eq!(successor, two.b);
     assert_eq!(two.session.adopted(), None);
-    assert_eq!(two.session.state().playing(), two.b);
+    assert_eq!(two.session.state().playlists().playing(), two.b);
     assert!(
         two.session.state().entry_for(&media("a1")).is_some(),
         "the outgoing checkpoint was captured"
@@ -420,7 +433,7 @@ fn deleting_the_owning_playlist_releases_and_moves_playing() {
 fn deleting_another_playlist_leaves_playback_alone() {
     let mut two = two();
     let playing = adopt(&mut two.session, two.in_a[0], "a1", 1);
-    let removal = two
+    let (removal, successor) = two
         .session
         .delete_playlist(
             two.b,
@@ -429,8 +442,12 @@ fn deleting_another_playlist_leaves_playback_alone() {
         )
         .expect("another exists");
     assert!(!removal.stop_playback);
+    assert_eq!(
+        successor, two.a,
+        "a non-playing delete still names its successor, for the viewed tab"
+    );
     assert_eq!(two.session.adopted().map(|a| a.request), Some(playing));
-    assert_eq!(two.session.state().playing(), two.a);
+    assert_eq!(two.session.state().playlists().playing(), two.a);
 }
 
 fn track(id: u64, name: &str) -> serde_json::Value {
@@ -459,6 +476,8 @@ fn removing_a_restored_cursor_with_nothing_adopted_only_clears_it() {
     );
     let cursor = session
         .state()
+        .playlists()
+        .playing_playlist()
         .queue()
         .active()
         .expect("the file's cursor survived recovery");
@@ -477,7 +496,12 @@ fn removing_a_restored_cursor_with_nothing_adopted_only_clears_it() {
     );
     assert!(session.adopted().is_none());
     assert_eq!(
-        session.state().queue().active(),
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
         None,
         "the cursor only clears"
     );
@@ -497,10 +521,19 @@ fn removing_the_playing_cursor_while_another_playlist_loads_leaves_that_load_val
     let b = PlaylistId::from_raw_for_tests(2);
     let cursor = session
         .state()
+        .playlists()
+        .playing_playlist()
         .queue()
         .active()
         .expect("A's cursor survived recovery");
-    let in_b = session.state().playlist(b).expect("B").queue().entries()[0].id();
+    let in_b = session
+        .state()
+        .playlists()
+        .playlist(b)
+        .expect("B")
+        .queue()
+        .entries()[0]
+        .id();
     let pending = session
         .register_load(LoadTarget::Queue(in_b), &media("b1"))
         .expect("registered");
@@ -519,7 +552,13 @@ fn removing_the_playing_cursor_while_another_playlist_loads_leaves_that_load_val
     );
     assert!(session.adopted().is_none());
     assert_eq!(
-        session.state().playlist(a).expect("A").queue().active(),
+        session
+            .state()
+            .playlists()
+            .playlist(a)
+            .expect("A")
+            .queue()
+            .active(),
         None,
         "the cursor only clears"
     );
@@ -530,38 +569,5 @@ fn removing_the_playing_cursor_while_another_playlist_loads_leaves_that_load_val
         Some(pending),
         "B's load was never invalidated"
     );
-    assert_eq!(session.state().playing(), b);
-}
-
-#[test]
-fn adding_to_a_shuffled_playlist_reshuffles_with_the_cursor_first() {
-    let mut two = two();
-    adopt(&mut two.session, two.in_a[1], "a2", 1);
-    two.session.set_shuffle(two.a, Some(99)).expect("A exists");
-
-    let names: Vec<String> = (0..20).map(|n| format!("new{n}")).collect();
-    let (added, _) = two
-        .session
-        .enqueue(two.a, names.iter().map(|name| entry(name)).collect())
-        .expect("fits");
-
-    let playlist = two.session.state().playlist(two.a).expect("A");
-    let shuffle = playlist.shuffle().expect("still shuffled");
-    assert_ne!(shuffle.seed, 99, "a new order, not the old one patched");
-    assert_eq!(shuffle.first, Some(two.in_a[1]));
-    let order = playlist.playback_order();
-    assert_eq!(order[0], two.in_a[1]);
-    assert!(
-        added.iter().all(|id| order[1..].contains(id)),
-        "every added track lies ahead of the playing one"
-    );
-
-    two.session
-        .enqueue(two.b, vec![entry("plain")])
-        .expect("fits");
-    assert_eq!(
-        two.session.state().playlist(two.b).expect("B").shuffle(),
-        None,
-        "an unshuffled playlist stays unshuffled"
-    );
+    assert_eq!(session.state().playlists().playing(), b);
 }

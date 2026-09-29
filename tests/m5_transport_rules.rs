@@ -6,10 +6,8 @@ use support::media;
 use tenuto::application::transport::*;
 use tenuto::media::id::MediaId;
 use tenuto::persistence::model::PersistedState;
-use tenuto::playlist::{Playlist, PlaylistId};
-use tenuto::queue::{
-    DisplayMetadata, IdAllocator, NewQueueEntry, Queue, QueueEntryId, QueueSource,
-};
+use tenuto::playlist::PlaylistSet;
+use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueEntryId, QueueSource};
 use tenuto::session::{LoadTarget, Session};
 
 fn entry(name: &str) -> NewQueueEntry {
@@ -26,14 +24,14 @@ fn entry(name: &str) -> NewQueueEntry {
 
 /// A queue of three with the second entry active, built through Session so
 /// the active entry is set the only legal way.
-fn with_active() -> (Queue, Vec<QueueEntryId>) {
+fn with_active() -> (PlaylistSet, Vec<QueueEntryId>) {
     use tenuto::clock::{Clock, FakeClock};
     use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
     use tenuto::playback::event::{PlaybackEvent, StartDisposition};
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
         .enqueue(
-            session.state().playing(),
+            session.state().playlists().playing(),
             vec![entry("a"), entry("b"), entry("c")],
         )
         .unwrap_or_else(|error| panic!("fits: {error}"));
@@ -55,49 +53,36 @@ fn with_active() -> (Queue, Vec<QueueEntryId>) {
         },
         FakeClock::new().sample(),
     );
-    (session.state().queue().clone(), ids)
+    (session.state().playlists().clone(), ids)
 }
 
-fn without_active() -> (Queue, Vec<QueueEntryId>) {
-    let mut queue = Queue::default();
-    let ids = queue
-        .enqueue(
-            vec![entry("a"), entry("b"), entry("c")],
-            &mut IdAllocator::default(),
-        )
+fn without_active() -> (PlaylistSet, Vec<QueueEntryId>) {
+    let mut set = PlaylistSet::default();
+    let playing = set.playing();
+    let ids = set
+        .enqueue(playing, vec![entry("a"), entry("b"), entry("c")])
         .unwrap_or_else(|error| panic!("fits: {error}"));
-    (queue, ids)
-}
-
-/// One playlist, both navigated and viewed: the single-list world these
-/// M5 rules were written for.
-fn only(queue: &Queue) -> Playlist {
-    Playlist::from_parts(
-        PlaylistId::from_raw_for_tests(1),
-        "P".into(),
-        None,
-        queue.clone(),
-    )
+    (set, ids)
 }
 
 fn run(
-    queue: &Queue,
+    queue: &PlaylistSet,
     selected: Option<QueueEntryId>,
     phase: PlaybackPhase,
     last: Option<QueueEntryId>,
     input: TransportInput,
 ) -> TransportDecision {
-    let playlist = only(queue);
+    let playlist = queue.playing_playlist();
     decide(
         input,
         &TransportSituation {
-            navigation: &playlist,
-            viewed: &playlist,
+            navigation: playlist,
+            viewed: playlist,
             selected,
             phase,
             // The runtime validates the retry across every playlist; with one
             // playlist that is this queue.
-            retry: last.filter(|id| queue.get(*id).is_some()),
+            retry: last.filter(|id| queue.find_entry(*id).is_some()),
             live: false,
         },
     )
@@ -164,7 +149,7 @@ fn without_an_active_entry_the_default_selection_is_the_first_row() {
 
 #[test]
 fn an_empty_queue_answers_every_transport_key_with_a_notice() {
-    let queue = Queue::default();
+    let queue = PlaylistSet::default();
     for input in [
         TransportInput::Space,
         TransportInput::Play,
@@ -316,7 +301,7 @@ fn a_failed_load_retries_the_last_requested_entry_while_it_is_queued() {
     // With the retry gone the chain falls through to the cursor, then the
     // first entry in playback order — never the selected row (M8 §7).
     let mut shorter = queue.clone();
-    shorter.remove(ids[2]).expect("known");
+    shorter.remove_entry(ids[2]).expect("known");
     assert_eq!(
         run(
             &shorter,
@@ -383,7 +368,7 @@ fn previous_and_next_anchor_on_the_active_entry_and_never_wrap() {
 
 #[test]
 fn an_empty_queue_keeps_engine_semantics_while_playing() {
-    let queue = Queue::default();
+    let queue = PlaylistSet::default();
     assert_eq!(
         run(
             &queue,
@@ -448,7 +433,7 @@ fn an_empty_queue_keeps_engine_semantics_while_playing() {
 
 #[test]
 fn an_empty_queue_keeps_engine_semantics_while_paused() {
-    let queue = Queue::default();
+    let queue = PlaylistSet::default();
     assert_eq!(
         run(
             &queue,
@@ -513,7 +498,7 @@ fn an_empty_queue_keeps_engine_semantics_while_paused() {
 
 #[test]
 fn an_empty_queue_while_stopped_still_notices() {
-    let queue = Queue::default();
+    let queue = PlaylistSet::default();
     assert_eq!(
         run(
             &queue,
@@ -533,7 +518,7 @@ fn an_empty_queue_while_stopped_still_notices() {
 #[test]
 fn a_stale_selection_falls_back_to_the_first_row() {
     let (mut queue, ids) = without_active();
-    queue.remove(ids[0]).expect("known");
+    queue.remove_entry(ids[0]).expect("known");
     assert_eq!(
         run(
             &queue,
@@ -575,7 +560,7 @@ fn loading_anchors_on_active_when_last_requested_is_gone() {
     // last_requested) reaches c.
     let (queue, ids) = with_active();
     let mut shorter = queue.clone();
-    shorter.remove(ids[0]).expect("known");
+    shorter.remove_entry(ids[0]).expect("known");
     assert_eq!(
         run(
             &shorter,
@@ -609,13 +594,13 @@ fn playing_with_no_active_entry_does_not_navigate() {
 // M7 §3.4/§6.3: a live entry is controlled like a playing one, but it has no
 // timeline to move around in.
 
-fn live(queue: &Queue, phase: PlaybackPhase, input: TransportInput) -> TransportDecision {
-    let playlist = only(queue);
+fn live(queue: &PlaylistSet, phase: PlaybackPhase, input: TransportInput) -> TransportDecision {
+    let playlist = queue.playing_playlist();
     decide(
         input,
         &TransportSituation {
-            navigation: &playlist,
-            viewed: &playlist,
+            navigation: playlist,
+            viewed: playlist,
             selected: None,
             phase,
             retry: None,
