@@ -18,6 +18,7 @@
 //! nothing, not even the revision the policy tracks.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::time::{Duration, Instant};
 
 use crate::clock::ClockSample;
@@ -160,10 +161,34 @@ struct Sample {
     provenance: PositionProvenance,
 }
 
+/// The state plus a count of the times it was opened for writing. Reads go
+/// through `Deref`; every write goes through [`edit`](Self::edit), so the
+/// count moves whenever the state may have changed and a reader can tell,
+/// without comparing anything, that it has not.
+struct Tracked {
+    state: PersistedState,
+    edits: u64,
+}
+
+impl Tracked {
+    fn edit(&mut self) -> &mut PersistedState {
+        self.edits += 1;
+        &mut self.state
+    }
+}
+
+impl Deref for Tracked {
+    type Target = PersistedState;
+
+    fn deref(&self) -> &PersistedState {
+        &self.state
+    }
+}
+
 pub struct Session {
     /// The authoritative state. `Action::Submit` carries a clone, which becomes
     /// the writer's property; the session never shares a reference into it.
-    state: PersistedState,
+    state: Tracked,
     session_rev: u64,
     playback: PlaybackState,
     current_media: Option<MediaId>,
@@ -268,7 +293,7 @@ pub struct Session {
 impl Session {
     pub fn new(state: PersistedState) -> Self {
         Self {
-            state,
+            state: Tracked { state, edits: 0 },
             session_rev: 0,
             playback: PlaybackState::Idle,
             // Learned from `Loaded`, never from the file: what was current last
@@ -304,6 +329,12 @@ impl Session {
     /// and changed nothing."
     pub fn state(&self) -> &PersistedState {
         &self.state
+    }
+
+    /// Moves every time the state may have changed, never otherwise: two
+    /// equal readings mean `state()` reads exactly as it did before.
+    pub fn state_edits(&self) -> u64 {
+        self.state.edits
     }
 
     // --------------------------------------------------------- load tokens
@@ -428,9 +459,9 @@ impl Session {
         dest: PlaylistId,
         batch: Vec<NewQueueEntry>,
     ) -> Result<(Vec<QueueEntryId>, Action), QueueError> {
-        let ids = self.state.enqueue(dest, batch)?;
+        let ids = self.state.edit().enqueue(dest, batch)?;
         if !ids.is_empty()
-            && let Some(playlist) = self.state.playlist_mut(dest)
+            && let Some(playlist) = self.state.edit().playlist_mut(dest)
             && let Some(shuffle) = playlist.shuffle()
         {
             let first = playlist.queue().active();
@@ -445,14 +476,14 @@ impl Session {
     /// Creates a new, empty playlist named `name`. `Ordinary` submit on
     /// success; nothing is submitted on failure.
     pub fn create_playlist(&mut self, name: &str) -> Result<(PlaylistId, Action), PlaylistError> {
-        let id = self.state.create_playlist(name)?;
+        let id = self.state.edit().create_playlist(name)?;
         Ok((id, self.submit(Urgency::Ordinary)))
     }
 
     /// Renames an existing playlist. `Ordinary` submit on success; nothing is
     /// submitted on failure.
     pub fn rename_playlist(&mut self, id: PlaylistId, name: &str) -> Result<Action, PlaylistError> {
-        self.state.rename_playlist(id, name)?;
+        self.state.edit().rename_playlist(id, name)?;
         Ok(self.submit(Urgency::Ordinary))
     }
 
@@ -466,6 +497,7 @@ impl Session {
     ) -> Result<Action, PlaylistError> {
         let playlist = self
             .state
+            .edit()
             .playlist_mut(id)
             .ok_or(PlaylistError::Unknown(id))?;
         let first = playlist.queue().active();
@@ -476,7 +508,10 @@ impl Session {
     /// The queue that holds `id`, in whichever playlist owns it (M8 §5).
     fn owner_queue_mut(&mut self, id: QueueEntryId) -> Option<&mut Queue> {
         let owner = self.state.owner_of(id)?;
-        self.state.playlist_mut(owner).map(Playlist::queue_mut)
+        self.state
+            .edit()
+            .playlist_mut(owner)
+            .map(Playlist::queue_mut)
     }
 
     /// Moves one entry a step in `direction`. `Ordinary` submit only when the
@@ -581,7 +616,7 @@ impl Session {
             return Err(PlaylistError::Unknown(id));
         }
         let owning = self.vacate(id, progress, now);
-        if let Some(playlist) = self.state.playlist_mut(id) {
+        if let Some(playlist) = self.state.edit().playlist_mut(id) {
             playlist.queue_mut().clear();
         }
         Ok(Removal {
@@ -608,7 +643,7 @@ impl Session {
             return Err(PlaylistError::LastPlaylist);
         }
         let owning = self.vacate(id, progress, now);
-        self.state.remove_playlist(id)?;
+        self.state.edit().remove_playlist(id)?;
         Ok(Removal {
             action: self.submit(Urgency::Forced),
             stop_playback: owning,
@@ -645,7 +680,7 @@ impl Session {
     /// exists to relay it to, and whenever a volume command arrives outside
     /// `observe`'s own `VolumeChanged` handling.
     pub fn set_volume(&mut self, volume: Volume) -> Action {
-        self.state.set_volume(volume);
+        self.state.edit().set_volume(volume);
         self.submit(Urgency::Ordinary)
     }
 
@@ -890,7 +925,7 @@ impl Session {
 
         // Profile-wide: bypasses the media-ownership gate below entirely.
         if let PlaybackEvent::VolumeChanged { volume, .. } = event {
-            self.state.set_volume(*volume);
+            self.state.edit().set_volume(*volume);
             return self.submit(Urgency::Ordinary);
         }
 
@@ -1099,15 +1134,15 @@ impl Session {
             LoadTarget::Queue(id) => {
                 // Validated against its owner a moment ago in `observe`.
                 if let Some(owner) = self.state.owner_of(id) {
-                    self.state.set_playing(owner);
+                    self.state.edit().set_playing(owner);
                 }
-                let _ = self.state.queue_mut().set_active(Some(id));
+                let _ = self.state.edit().queue_mut().set_active(Some(id));
                 self.absorb_load_metadata(id, metadata);
             }
             // A legacy load belongs to no playlist: it clears the playing
             // playlist's cursor, as it cleared the one queue's before M8.
             LoadTarget::Legacy => {
-                let _ = self.state.queue_mut().set_active(None);
+                let _ = self.state.edit().queue_mut().set_active(None);
             }
         }
         self.adopted = Some(AdoptedLoad { request, target });
@@ -1400,7 +1435,7 @@ impl Session {
         // resolving it first would write the pre-seek sample back over it (D17).
         let position = self.position_for(previous.position);
         if self.position_provenance == PositionProvenance::Established {
-            self.state.record(
+            self.state.edit().record(
                 &PlaybackCheckpoint {
                     media: previous.media,
                     position,
@@ -1410,6 +1445,7 @@ impl Session {
             );
         } else {
             self.state
+                .edit()
                 .record_estimated(previous.media, position, now.wall, false);
         }
     }
@@ -1420,7 +1456,7 @@ impl Session {
     /// `completed` in the same breath.
     fn adopt_media(&mut self, media: MediaId, completed: bool) {
         self.current_media = Some(media.clone());
-        self.state.set_current_media(media);
+        self.state.edit().set_current_media(media);
         self.completed = completed;
     }
 
@@ -1532,7 +1568,7 @@ impl Session {
             return;
         };
         let completed = self.completed;
-        self.state.record(
+        self.state.edit().record(
             &PlaybackCheckpoint {
                 media,
                 position,
@@ -1565,6 +1601,7 @@ impl Session {
         };
         let completed = self.completed;
         self.state
+            .edit()
             .record_estimated(media, position, now.wall, completed);
     }
 

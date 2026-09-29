@@ -2,6 +2,7 @@
 mod views;
 
 use std::cell::Cell;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ratatui::buffer::Buffer;
@@ -386,7 +387,7 @@ fn an_estimated_duration_is_marked_like_an_estimated_position() {
         PlaybackPhase::Playing,
         Some(playing(ids()[0], true, Some(estimated), false)),
     );
-    v.rows[2].duration = Some(estimated);
+    Arc::make_mut(&mut v.rows)[2].duration = Some(estimated);
     let screen = text(&v, &UiState::new(true), 100, 30);
     assert!(screen.contains("01:02 / ~02:00"), "{screen}");
     let done = screen
@@ -499,7 +500,7 @@ fn failing_persistence_is_labelled_apart_from_unsaved() {
 #[test]
 fn empty_loading_and_failed_screens() {
     let mut empty = view(PlaybackPhase::Unloaded, None);
-    empty.rows.clear();
+    Arc::make_mut(&mut empty.rows).clear();
     let screen = text(&empty, &UiState::new(true), 100, 30);
     assert!(
         screen.contains("Queue is empty — press b to browse or a to add"),
@@ -557,12 +558,12 @@ fn selection_reconciles_to_the_hint_then_a_surviving_row_then_the_first() {
         Some(v.rows[2].id),
         "a surviving selection stays"
     );
-    v.rows.remove(2);
+    Arc::make_mut(&mut v.rows).remove(2);
     ui.queue_offset = 9;
     ui.reconcile(&v, None);
     assert_eq!(ui.selected, Some(v.rows[0].id));
     assert!(ui.queue_offset < v.rows.len());
-    v.rows.clear();
+    Arc::make_mut(&mut v.rows).clear();
     ui.reconcile(&v, Some(ids()[1]));
     assert_eq!((ui.selected, ui.queue_offset), (None, 0));
 }
@@ -820,14 +821,16 @@ fn a_playlist_longer_than_its_pane_gets_a_scrollbar_that_follows_the_selection()
     let template = long.rows[0].clone();
     let names: Vec<String> = (0..300).map(|n| format!("t{n}")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    long.rows = views::ids_for(&names)
-        .into_iter()
-        .map(|id| {
-            let mut row = template.clone();
-            row.id = id;
-            row
-        })
-        .collect();
+    long.rows = Arc::new(
+        views::ids_for(&names)
+            .into_iter()
+            .map(|id| {
+                let mut row = template.clone();
+                row.id = id;
+                row
+            })
+            .collect(),
+    );
     let mut ui = UiState::new(true);
     ui.selected = Some(long.rows[0].id);
     let top = queue_border(&long, &ui);

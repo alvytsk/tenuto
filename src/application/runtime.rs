@@ -5,6 +5,7 @@
 //!
 //! [`pump`]: PlayerRuntime::pump
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -370,7 +371,14 @@ pub struct PlayerRuntime {
     /// The playlist the front end is looking at (M8 §10). Transient: never
     /// persisted, and it starts on whichever playlist was playing.
     viewed: PlaylistId,
+    /// The viewed playlist's rows as last built, keyed by the
+    /// `Session::state_edits` and the playlist they were built from, so a
+    /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
+    rows: Cell<Option<CachedRows>>,
 }
+
+/// `(state_edits, viewed, rows)`; see [`PlayerRuntime`]'s `rows`.
+type CachedRows = (u64, PlaylistId, Arc<Vec<QueueRow>>);
 
 impl PlayerRuntime {
     pub fn new(parts: RuntimeParts) -> Self {
@@ -409,6 +417,7 @@ impl PlayerRuntime {
                 .map(|probe| MetadataWorkers::spawn(METADATA_WORKERS, probe, parts.hook)),
             restored,
             viewed,
+            rows: Cell::new(None),
         }
     }
 
@@ -419,6 +428,18 @@ impl PlayerRuntime {
     /// The playlist the front end is looking at (M8 §10).
     pub fn viewed(&self) -> PlaylistId {
         self.viewed
+    }
+
+    /// The viewed playlist's rows, rebuilt only when the state or the viewed
+    /// playlist moved since the last call.
+    fn viewed_rows(&self) -> Arc<Vec<QueueRow>> {
+        let key = (self.session.state_edits(), self.viewed);
+        let rows = match self.rows.take() {
+            Some((edits, viewed, rows)) if (edits, viewed) == key => rows,
+            _ => Arc::new(queue_rows(self.session.state(), self.viewed)),
+        };
+        self.rows.set(Some((key.0, key.1, Arc::clone(&rows))));
+        rows
     }
 
     /// One named playlist's rows, for a caller that needs a playlist other
@@ -662,7 +683,7 @@ impl PlayerRuntime {
         let queue = state.queue();
         let active = queue.active();
         PlayerView {
-            rows: queue_rows(state, self.viewed),
+            rows: self.viewed_rows(),
             tabs: playlist_tabs(state),
             viewed: self.viewed,
             active,

@@ -777,7 +777,7 @@ fn handle_event(front: &mut Front<'_>, hits: &HitMap, event: Event) -> io::Resul
             // The destination's rows, not the viewed playlist's: while the
             // two usually agree, the browser's ticks and Enter-to-remove
             // must always follow where its own adds land (M8 §8).
-            browser.sync_queue(&front.runtime.rows_of(browser.dest));
+            browser.sync_queue(&Arc::new(front.runtime.rows_of(browser.dest)));
             let effects = browser.handle_key(key);
             for effect in effects {
                 apply_browser_effect(effect, front)?;

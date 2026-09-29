@@ -3,6 +3,7 @@
 //! already been made safe to print — a title can come from a feed or a
 //! decoder tag, and a terminal must never receive its control characters.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::application::transport::PlaybackPhase;
@@ -115,8 +116,9 @@ pub struct PlaylistTab {
 #[derive(Clone, Debug)]
 pub struct PlayerView {
     /// The *viewed* playlist's rows; `active` and `now_playing` stay the
-    /// playing playlist's.
-    pub rows: Vec<QueueRow>,
+    /// playing playlist's. Shared: the runtime hands out the same rows until
+    /// the state or the viewed playlist changes.
+    pub rows: Arc<Vec<QueueRow>>,
     pub tabs: Vec<PlaylistTab>,
     pub viewed: PlaylistId,
     pub active: Option<QueueEntryId>,

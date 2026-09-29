@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tenuto::application::transport::PlaybackPhase;
@@ -71,7 +72,7 @@ pub fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
             shuffled: false,
         }],
         viewed,
-        rows: vec![
+        rows: Arc::new(vec![
             QueueRow {
                 id: ids[0],
                 media: media("a"),
@@ -102,7 +103,7 @@ pub fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
                 duration: None,
                 saved: Some(SavedHistory::Played),
             },
-        ],
+        ]),
         active: now.as_ref().and_then(|now| now.entry),
         now_playing: now,
         phase,

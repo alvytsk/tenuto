@@ -2,6 +2,7 @@
 //! and the browser's key handling as a pure function over its own state.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
@@ -895,7 +896,7 @@ fn enter_on_a_queued_row_removes_it_and_marks_skip_queued_rows() {
         .media
         .clone()
         .unwrap_or_else(|| panic!("audio has an identity"));
-    state.sync_queue(&[queue_row(ids[0], a_flac)]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], a_flac)]));
 
     // The tick is the acknowledgement that the row is in the queue.
     let (text, _) = screen(&state);
@@ -935,7 +936,7 @@ fn enter_on_a_queued_row_removes_it_and_marks_skip_queued_rows() {
     }
 
     // Once the queue no longer holds it, Enter adds it again.
-    state.sync_queue(&[]);
+    state.sync_queue(&Arc::new(vec![]));
     press(&mut state, &[KeyCode::Up]);
     let effects = press(&mut state, &[KeyCode::Enter]);
     assert!(
@@ -957,7 +958,7 @@ fn a_queued_episode_is_ticked_and_enter_removes_it() {
         ]),
     });
     let ids = views::ids();
-    state.sync_queue(&[queue_row(ids[2], queued.media.clone())]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[2], queued.media.clone())]));
     let (text, _) = screen(&state);
     assert!(
         text.lines()
@@ -1138,7 +1139,7 @@ fn enter_on_a_station_enqueues_and_enter_again_removes_it() {
     );
 
     let ids = views::ids();
-    state.sync_queue(&[queue_row(ids[0], media)]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], media)]));
     let effects = press(&mut state, &[KeyCode::Enter]);
     assert!(
         matches!(&effects[..], [BrowserEffect::Remove(id)] if *id == ids[0]),
@@ -1151,7 +1152,7 @@ fn a_queued_station_draws_a_tick() {
     let row = station_row("one", "https://one.example/stream");
     let mut state = radio(vec![row.clone()]);
     let ids = views::ids();
-    state.sync_queue(&[queue_row(ids[0], row.media.clone())]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], row.media.clone())]));
 
     let (text, _) = screen(&state);
     let line = text
@@ -1499,7 +1500,7 @@ fn a_station_queued_elsewhere_draws_a_tick_on_the_radio_tab() {
     );
 
     let ids = views::ids();
-    state.sync_queue(&[queue_row(ids[0], elsewhere_media)]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], elsewhere_media)]));
     assert_eq!(state.queued_at(0), Some(ids[0]));
 
     // The toggle's other half: Enter on a row that draws a tick removes it.
@@ -1508,7 +1509,7 @@ fn a_station_queued_elsewhere_draws_a_tick_on_the_radio_tab() {
         matches!(&effects[..], [BrowserEffect::Remove(id)] if *id == ids[0]),
         "{effects:?}"
     );
-    state.sync_queue(&[]);
+    state.sync_queue(&Arc::new(vec![]));
     assert_eq!(state.queued_at(0), None, "the queue is now empty");
 }
 
@@ -1564,7 +1565,7 @@ fn enter_on_an_unqueued_station_enqueues_it() {
     );
 
     let ids = views::ids();
-    state.sync_queue(&[queue_row(ids[0], media)]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], media)]));
     let (text, _) = screen(&state);
     let line = text
         .lines()
@@ -1588,7 +1589,7 @@ fn a_directory_holding_a_queued_file_draws_the_tick() {
         .unwrap_or_else(|| panic!("audio has an identity"));
     assert_eq!(state.entries[0].name, "z");
 
-    state.sync_queue(&[queue_row(ids[0], deep)]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], deep)]));
     assert!(state.ticked(0), "z/ holds a queued file");
     assert!(!state.ticked(1));
     assert!(
@@ -1597,9 +1598,28 @@ fn a_directory_holding_a_queued_file_draws_the_tick() {
     );
 
     // A file beside the directory says nothing about what is inside it.
-    state.sync_queue(&[queue_row(ids[0], a_flac)]);
+    state.sync_queue(&Arc::new(vec![queue_row(ids[0], a_flac)]));
     assert!(!state.ticked(0));
     assert!(state.ticked(1));
+}
+
+#[test]
+fn the_same_rows_are_synced_again_once_the_directory_moves() {
+    let (_dir, root) = sample_dir();
+    let mut state = listed(&root);
+    let deep = listed(&root.join("z")).entries[0]
+        .media
+        .clone()
+        .unwrap_or_else(|| panic!("audio has an identity"));
+    let rows = Arc::new(vec![queue_row(views::ids()[0], deep)]);
+    state.sync_queue(&rows);
+    assert!(state.ticked(0), "z/ holds a queued file");
+
+    // The subdirectory ticks are relative to `cwd`: unchanged rows under
+    // another directory must not keep the old ones.
+    state.cwd = root.join("elsewhere");
+    state.sync_queue(&rows);
+    assert!(!state.ticked(0));
 }
 
 #[test]

@@ -26,8 +26,10 @@ use crate::playback::error::PlaybackError;
 const REQUEST_CAPACITY: usize = crate::queue::MAX_PLAYLIST_ENTRIES;
 /// Finished results waiting for the runtime; a runtime that stops draining
 /// holds a handful rather than a queue's worth, and the workers wait
-/// instead. Results carry no cover bytes (see [`Worker::serve`]).
-const RESULT_CAPACITY: usize = 16;
+/// instead. Results carry no cover bytes (see [`Worker::serve`]). Matches
+/// `MAX_ENRICHMENT_PER_PUMP`: the runtime drains once per pump, so a smaller
+/// channel, not the pump's batch, would cap how fast a folder add is tagged.
+const RESULT_CAPACITY: usize = 64;
 
 /// Reads a local file's tags. Shared by every worker, so it must be callable
 /// from several threads at once.
