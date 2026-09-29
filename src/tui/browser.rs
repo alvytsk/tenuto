@@ -12,6 +12,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
@@ -87,6 +88,8 @@ pub struct BrowserState {
     /// The names of `cwd`'s subdirectories that hold a queued file at any
     /// depth, as of the same sync: such a directory draws the tick too.
     queued_dirs: HashSet<OsString>,
+    /// The rows and `cwd` the last sync read, so an unchanged pair skips it.
+    synced: Option<(Arc<Vec<QueueRow>>, PathBuf)>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +128,7 @@ impl BrowserState {
             notice: None,
             queued: HashMap::new(),
             queued_dirs: HashSet::new(),
+            synced: None,
         }
     }
 
@@ -133,12 +137,19 @@ impl BrowserState {
     ///
     /// ponytail: a queued file is matched to a directory by its canonical
     /// path, so a directory reached through a symlink never draws the tick.
-    /// And this runs every frame over the whole playlist; rebuild only when
-    /// the rows change if a 4,096-row playlist ever makes the browser lag.
-    pub fn sync_queue(&mut self, rows: &[QueueRow]) {
+    /// Called every frame; it rebuilds only when the runtime handed out new
+    /// rows or the Files tab moved to another directory.
+    pub fn sync_queue(&mut self, rows: &Arc<Vec<QueueRow>>) {
+        if let Some((synced, cwd)) = &self.synced
+            && Arc::ptr_eq(synced, rows)
+            && *cwd == self.cwd
+        {
+            return;
+        }
+        self.synced = Some((Arc::clone(rows), self.cwd.clone()));
         self.queued = rows.iter().map(|row| (row.media.clone(), row.id)).collect();
         self.queued_dirs.clear();
-        for row in rows {
+        for row in rows.iter() {
             let MediaId::LocalFile(path) = &row.media else {
                 continue;
             };

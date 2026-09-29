@@ -3,6 +3,7 @@
 //! destination rule").
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tenuto::application::browse::{BrowseRequest, BrowseResult, DirEntry, EntryKind};
@@ -122,7 +123,7 @@ fn space_marks_directories_and_a_sends_files_and_directories_together_in_listing
 #[test]
 fn a_is_additive_where_enter_toggles() {
     let mut state = browser(&[("loose.mp3", EntryKind::Audio)]);
-    state.sync_queue(&[queued_row(support::media("loose.mp3"), 5)]);
+    state.sync_queue(&Arc::new(vec![queued_row(support::media("loose.mp3"), 5)]));
     assert!(matches!(
         state.handle_key(key(KeyCode::Enter))[..],
         [BrowserEffect::Remove(_)]

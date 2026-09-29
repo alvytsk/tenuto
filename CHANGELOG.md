@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Titles after a large folder add fill in about four times as fast: 4,000
+  files take around 4 seconds instead of 15.
+- The player no longer rebuilds the playlist view every frame, only when
+  something in it changed. With a few thousand entries queued, the player
+  idles at under 1% CPU with the browser open, down from about 4%.
+
 ## [0.2.0] - 2026-09-23
 
 ### Added

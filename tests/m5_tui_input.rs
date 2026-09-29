@@ -1,6 +1,7 @@
 #[path = "support/views.rs"]
 mod views;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -186,7 +187,7 @@ fn mouse_toggle_and_full_redraw() {
 #[test]
 fn enter_on_an_empty_queue_is_a_notice_not_a_command() {
     let mut view = sample_view();
-    view.rows.clear();
+    Arc::make_mut(&mut view.rows).clear();
     let mut ui = UiState::new(true);
     ui.selected = None;
     let effects = handle_key(key(KeyCode::Enter), &mut ui, &view);

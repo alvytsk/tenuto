@@ -58,6 +58,35 @@ fn tab_names(runtime: &PlayerRuntime) -> Vec<String> {
 }
 
 #[test]
+fn the_view_reuses_its_rows_until_the_state_or_the_viewed_playlist_moves() {
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(SHORT.into())],
+    });
+    let before = rig.runtime.view().rows;
+    assert_eq!(before.len(), 1);
+    assert!(
+        Arc::ptr_eq(&before, &rig.runtime.view().rows),
+        "nothing changed, so nothing is rebuilt"
+    );
+
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(FIVE.into())],
+    });
+    let after = rig.runtime.view().rows;
+    assert_eq!(after.len(), 2, "an edit rebuilds the rows");
+
+    rig.runtime
+        .handle(AppCommand::CreatePlaylist("Jazz".into()));
+    assert!(rig.runtime.view().rows.is_empty(), "the view is on Jazz");
+    rig.runtime.handle(AppCommand::View(first));
+    assert_eq!(rig.runtime.view().rows.len(), 2, "back on the first");
+}
+
+#[test]
 fn a_new_playlist_is_viewed_and_enqueue_goes_where_it_was_told() {
     let mut rig = rig_with(PersistedState::default());
     let first = rig.runtime.viewed();
