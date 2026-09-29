@@ -134,11 +134,12 @@ fn a_duplicate_occurrence_is_never_inferred_active_from_media() {
 #[test]
 fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
     use tenuto::media::id::MediaId;
-    use tenuto::queue::{DisplayMetadata, IdAllocator, NewQueueEntry, QueueError, QueueSource};
+    use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueError, QueueSource};
     let file = json!({ "schema_version": 3, "queue": [entry(u64::MAX, "a")] });
     let state: PersistedState = serde_json::from_value(file).expect("valid maximum ID");
-    let mut queue = state.playlists().playing_playlist().queue().clone();
-    let before = queue.clone();
+    let mut set = state.playlists().clone();
+    let before = set.clone();
+    let playing = set.playing();
     let MediaId::LocalFile(path) = media("b") else {
         unreachable!()
     };
@@ -148,14 +149,13 @@ fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
         DisplayMetadata::default(),
     )
     .expect("entry");
-    // Mirrors `RawState::into_state`, which raises the shared allocator past
-    // every recovered entry's ID: the maximum has already been observed.
-    let mut ids = IdAllocator::default();
-    ids.observe(u64::MAX);
     assert_eq!(
-        queue.enqueue(vec![item], &mut ids),
+        set.enqueue(playing, vec![item]),
         Err(QueueError::IdExhausted)
     );
-    assert_eq!(queue, before);
-    assert_eq!(queue.entries()[0].id().get(), u64::MAX);
+    assert_eq!(set, before);
+    assert_eq!(
+        set.playing_playlist().queue().entries()[0].id().get(),
+        u64::MAX
+    );
 }

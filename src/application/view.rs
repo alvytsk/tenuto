@@ -337,12 +337,12 @@ mod tests {
             },
         )
         .unwrap_or_else(|error| panic!("valid: {error}"));
-        let mut queue = crate::queue::Queue::default();
-        let ids = queue
-            .enqueue(vec![new], &mut crate::queue::IdAllocator::default())
+        let mut set = crate::playlist::PlaylistSet::default();
+        let playing = set.playing();
+        let ids = set
+            .enqueue(playing, vec![new])
             .unwrap_or_else(|error| panic!("fits: {error}"));
-        queue
-            .get(ids[0])
+        set.find_entry(ids[0])
             .cloned()
             .unwrap_or_else(|| panic!("just enqueued"))
     }
@@ -367,12 +367,12 @@ mod tests {
             },
         )
         .unwrap_or_else(|error| panic!("valid: {error}"));
-        let mut queue = crate::queue::Queue::default();
-        let ids = queue
-            .enqueue(vec![new], &mut crate::queue::IdAllocator::default())
+        let mut set = crate::playlist::PlaylistSet::default();
+        let playing = set.playing();
+        let ids = set
+            .enqueue(playing, vec![new])
             .unwrap_or_else(|error| panic!("fits: {error}"));
-        queue
-            .get(ids[0])
+        set.find_entry(ids[0])
             .cloned()
             .unwrap_or_else(|| panic!("just enqueued"))
     }

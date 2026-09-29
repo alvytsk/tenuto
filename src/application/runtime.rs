@@ -1532,7 +1532,6 @@ mod tests {
     use crate::media::id::AbsolutePath;
     use crate::persistence::writer::StateSink;
     use crate::playback::output::null_output::NullOutput;
-    use crate::queue::{IdAllocator, Queue};
 
     const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
 
@@ -1663,12 +1662,13 @@ mod tests {
             },
         )
         .unwrap_or_else(|error| panic!("valid: {error}"));
-        let mut queue = Queue::default();
-        let ids = queue
-            .enqueue(vec![new], &mut IdAllocator::default())
+        let mut set = crate::playlist::PlaylistSet::default();
+        let playing = set.playing();
+        let ids = set
+            .enqueue(playing, vec![new])
             .unwrap_or_else(|error| panic!("fits: {error}"));
-        let entry = queue
-            .get(ids[0])
+        let entry = set
+            .find_entry(ids[0])
             .cloned()
             .unwrap_or_else(|| panic!("just enqueued"));
 
