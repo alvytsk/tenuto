@@ -34,6 +34,7 @@ use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
 use crate::playlist::{PlaylistError, PlaylistId};
+pub use crate::queue::DisplayUpdate;
 use crate::queue::{
     Direction, DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueError,
 };
@@ -52,7 +53,6 @@ use url::Url;
 // exists to prevent, reachable by anyone who reached for the obvious `.into()`
 // instead. Deleted rather than fixed in place: a function that must not be
 // called with an unverified entry is safer removed than documented.
-pub use crate::queue::DisplayUpdate;
 pub use crate::resume::{ResumeDecision, decide_resume};
 use crate::resume::{restart_preference, resume_candidate};
 
