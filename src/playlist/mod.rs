@@ -4,6 +4,9 @@
 //! `Session`.
 
 pub mod queue;
+mod set;
+
+pub use set::{Deletion, MediaEffect, PlaylistSet};
 
 use self::queue::{Direction, Queue, QueueEntryId};
 
@@ -161,5 +164,16 @@ impl Playlist {
 
     pub fn first_in_order(&self) -> Option<QueueEntryId> {
         self.playback_order().first().copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::splitmix64;
+
+    #[test]
+    fn splitmix64_matches_the_reference_vector() {
+        assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
+        assert_eq!(splitmix64(0x9E37_79B9_7F4A_7C15), 0x6E78_9E6A_A1B9_65F4);
     }
 }

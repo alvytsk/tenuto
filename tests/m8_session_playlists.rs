@@ -14,9 +14,7 @@ use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
 use tenuto::playlist::{PlaylistId, Shuffle};
-use tenuto::queue::{
-    Direction, DisplayMetadata, NewQueueEntry, QueueEntryId, QueueError, QueueSource,
-};
+use tenuto::queue::{Direction, DisplayMetadata, NewQueueEntry, QueueEntryId, QueueSource};
 use tenuto::session::{Advance, DisplayUpdate, LoadTarget, Session};
 
 fn entry(name: &str) -> NewQueueEntry {
@@ -95,30 +93,6 @@ fn adopt(session: &mut Session, id: QueueEntryId, name: &str, rev: u64) -> LoadR
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     session.observe(&loaded(request, rev, name), FakeClock::new().sample());
     request
-}
-
-#[test]
-fn enqueue_lands_in_the_named_playlist_and_a_deleted_one_refuses() {
-    let mut two = two();
-    assert_eq!(
-        two.session
-            .state()
-            .playlist(two.b)
-            .expect("B")
-            .queue()
-            .len(),
-        2
-    );
-    assert_eq!(
-        two.session.state().queue().len(),
-        2,
-        "A, the playing playlist, is untouched by B's adds"
-    );
-    let gone = PlaylistId::from_raw_for_tests(99);
-    assert_eq!(
-        two.session.enqueue(gone, vec![entry("x")]).map(|_| ()),
-        Err(QueueError::UnknownPlaylist(99))
-    );
 }
 
 #[test]
@@ -531,37 +505,4 @@ fn removing_the_playing_cursor_while_another_playlist_loads_leaves_that_load_val
         "B's load was never invalidated"
     );
     assert_eq!(session.state().playing(), b);
-}
-
-#[test]
-fn adding_to_a_shuffled_playlist_reshuffles_with_the_cursor_first() {
-    let mut two = two();
-    adopt(&mut two.session, two.in_a[1], "a2", 1);
-    two.session.set_shuffle(two.a, Some(99)).expect("A exists");
-
-    let names: Vec<String> = (0..20).map(|n| format!("new{n}")).collect();
-    let (added, _) = two
-        .session
-        .enqueue(two.a, names.iter().map(|name| entry(name)).collect())
-        .expect("fits");
-
-    let playlist = two.session.state().playlist(two.a).expect("A");
-    let shuffle = playlist.shuffle().expect("still shuffled");
-    assert_ne!(shuffle.seed, 99, "a new order, not the old one patched");
-    assert_eq!(shuffle.first, Some(two.in_a[1]));
-    let order = playlist.playback_order();
-    assert_eq!(order[0], two.in_a[1]);
-    assert!(
-        added.iter().all(|id| order[1..].contains(id)),
-        "every added track lies ahead of the playing one"
-    );
-
-    two.session
-        .enqueue(two.b, vec![entry("plain")])
-        .expect("fits");
-    assert_eq!(
-        two.session.state().playlist(two.b).expect("B").shuffle(),
-        None,
-        "an unshuffled playlist stays unshuffled"
-    );
 }

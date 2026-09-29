@@ -112,6 +112,35 @@ pub struct DisplayUpdate {
     pub duration: Option<DisplayDuration>,
 }
 
+impl DisplayUpdate {
+    /// Writes each present field that differs from `display`; an absent one
+    /// leaves the entry's value alone. `true` when anything changed.
+    pub(in crate::playlist) fn apply_to(&self, display: &mut DisplayMetadata) -> bool {
+        let mut changed = false;
+        changed |= replace(&mut display.title, &self.title);
+        changed |= replace(&mut display.artist, &self.artist);
+        changed |= replace(&mut display.album, &self.album);
+        changed |= replace(&mut display.year, &self.year);
+        if let Some(duration) = self.duration
+            && display.duration != Some(duration)
+        {
+            display.duration = Some(duration);
+            changed = true;
+        }
+        changed
+    }
+}
+
+fn replace(field: &mut Option<String>, update: &Option<String>) -> bool {
+    match update {
+        Some(value) if field.as_ref() != Some(value) => {
+            *field = Some(value.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum QueueError {
     #[error(
@@ -194,6 +223,15 @@ impl QueueEntry {
     pub fn display(&self) -> &DisplayMetadata {
         &self.display
     }
+    /// The only way an entry gets an ID: the set's allocator, or recovery's.
+    pub(in crate::playlist) fn from_new(id: QueueEntryId, new: NewQueueEntry) -> Self {
+        Self {
+            id,
+            media: new.media,
+            source: new.source,
+            display: new.display,
+        }
+    }
     pub(crate) fn display_mut(&mut self) -> &mut DisplayMetadata {
         &mut self.display
     }
@@ -260,15 +298,14 @@ impl Queue {
             .zip(batch)
             .map(|(raw, new)| {
                 let id = QueueEntryId(raw);
-                self.entries.push(QueueEntry {
-                    id,
-                    media: new.media,
-                    source: new.source,
-                    display: new.display,
-                });
+                self.entries.push(QueueEntry::from_new(id, new));
                 id
             })
             .collect())
+    }
+
+    pub(in crate::playlist) fn clear_active(&mut self) {
+        self.active = None;
     }
 
     pub fn move_entry(
