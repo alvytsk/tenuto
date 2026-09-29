@@ -432,3 +432,136 @@ fn a_foreign_shuffle_first_becomes_none_without_a_report() {
     let shuffle = loaded.state.playlists()[0].shuffle().expect("kept");
     assert_eq!((shuffle.seed, shuffle.first), (7, None));
 }
+
+// ---- M9.1: first-problem precedence across several defects (spec §8.4) ----
+// Values captured from `main` at 67942e8; the PlaylistSet refactor must not
+// change a single one.
+
+fn playlist_ids(state: &PersistedState) -> Vec<u64> {
+    state.playlists().iter().map(|p| p.id().get()).collect()
+}
+
+#[test]
+fn precedence_a_repeated_playlist_id_outranks_malformed_entries_in_the_same_record() {
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": [track(1, "a")] },
+            { "id": 1, "name": "B", "entries": "oops" },
+        ]),
+        json!(1),
+        json!({}),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::DuplicatePlaylistId))
+    );
+    assert_eq!(playlist_ids(&loaded.state), [1, 2]);
+    assert!(
+        ids(&loaded.state, 1).is_empty(),
+        "B's malformed entries reset"
+    );
+    kept_checkpoint(&loaded.state);
+}
+
+#[test]
+fn precedence_the_cap_is_checked_before_a_duplicate_and_the_dropped_entry_costs_no_id() {
+    let first: Vec<Value> = (1..=4096).map(|i| track(i, &format!("t{i}"))).collect();
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": first },
+            { "id": 2, "name": "B", "entries": [track(1, "dup")] },
+        ]),
+        json!(1),
+        json!({ "current_media": null }),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::OverCapacity {
+            found: 4097
+        }))
+    );
+    assert!(ids(&loaded.state, 1).is_empty());
+    let saved =
+        serde_json::to_value(&loaded.state).unwrap_or_else(|error| panic!("serialize: {error}"));
+    assert_eq!(
+        saved["next_entry_id"],
+        json!(4097),
+        "a dropped duplicate consumes no fresh ID"
+    );
+}
+
+#[test]
+fn precedence_a_record_skipped_for_want_of_an_id_reports_nothing_about_its_entries() {
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": [track(1, "a")] },
+            { "id": "x", "name": "B", "entries": "oops" },
+        ]),
+        json!(1),
+        json!({ "next_playlist_id": null }),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::IdsExhausted))
+    );
+    assert_eq!(playlist_ids(&loaded.state), [1]);
+    kept_checkpoint(&loaded.state);
+}
+
+#[test]
+fn precedence_a_dangling_cursor_outranks_a_malformed_shuffle() {
+    let loaded = load(v4(
+        json!([
+            { "id": 1, "name": "A", "entries": [track(1, "a")],
+              "active_entry": 99, "shuffle": "bad" },
+        ]),
+        json!(1),
+        json!({}),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::ActiveReference(ActiveProblem::Dangling))
+    );
+    assert_eq!(loaded.state.playlists()[0].shuffle(), None);
+}
+
+#[test]
+fn precedence_too_many_playlists_outranks_an_early_record_defect() {
+    let mut records: Vec<Value> = (1..=33)
+        .map(|i| json!({ "id": i, "name": format!("P{i}") }))
+        .collect();
+    records[0]["entries"] = json!("oops");
+    let loaded = load(v4(json!(records), json!(1), json!({})));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::TooManyPlaylists {
+            found: 33
+        }))
+    );
+    assert_eq!(loaded.state.playlists().len(), 32);
+}
+
+#[test]
+fn the_playlist_cap_counts_input_records_even_when_one_is_skipped() {
+    let mut records: Vec<Value> = (1..=33)
+        .map(|i| json!({ "id": i, "name": format!("P{i}") }))
+        .collect();
+    records[4]["id"] = json!("x");
+    let loaded = load(v4(
+        json!(records),
+        json!(1),
+        json!({ "next_playlist_id": null }),
+    ));
+    assert_eq!(
+        loaded.reset,
+        Some(QueueReset::Playlists(PlaylistProblem::TooManyPlaylists {
+            found: 33
+        }))
+    );
+    let expected: Vec<u64> = (1..=4).chain(6..=32).collect();
+    assert_eq!(
+        playlist_ids(&loaded.state),
+        expected,
+        "record 5 had no ID to take, and record 33 is past the 32 records looked at"
+    );
+}
