@@ -118,7 +118,7 @@ flowchart TB
     subgraph appl["Application"]
         runtime["application/runtime.rs<br/>PlayerRuntime: owns engine, Session,<br/>writer, HttpService, workers"]
         session["session.rs<br/>checkpoint policy, load correlation,<br/>sole owner of PersistedState"]
-        queue["queue.rs, resume.rs, playlist.rs<br/>queue data, resume decision, named playlists"]
+        queue["playlist/ (PlaylistSet, Playlist, Queue), resume.rs<br/>the playlist rules, resume decision"]
         library["library.rs<br/>list, resolve, subscribe,<br/>refresh, unsubscribe"]
         workers["application/browse, enrich<br/>artwork/worker<br/>background workers"]
     end
@@ -179,7 +179,7 @@ flowchart TB
 | `library` | The application seam for feeds: `list_feeds`, `list_episodes`, `resolve_episode`, `subscribe`, `unsubscribe`, `refresh`, `refresh_all`. Async where the network is involved. | Print, `block_on`, open a device or a terminal |
 | `application::runtime` | One owner for the engine, `Session`, the writer, the `HttpService` and the workers. Driven by `AppCommand` values. Pumped once per front-end iteration. | Read a key or draw a frame |
 | `session` | Decide what to checkpoint and when. Allocate and track `LoadRequestId` tokens. Build every state snapshot. | Perform I/O or own a thread |
-| `queue`, `resume`, `playlist` | Pure data and policy: queue occurrences with stable IDs, the resume decision from a position and a completion flag, and a named, optionally shuffled playlist wrapping a queue. | Import persistence |
+| `playlist` (`PlaylistSet`, `Playlist`, `Queue`), `resume` | `PlaylistSet` owns every playlist rule: global entry and playlist IDs, the entry cap, cursors, `playing`, shuffle and its pin, the successor on delete, and recovery of stored playlists. `resume` is the resume decision from a position and a completion flag. | Import persistence. Hand out mutable access to a queue, playlist or entry |
 | `playback` | The decode worker, the CPAL stream's whole lifecycle, position accounting, the command and event protocol, the spectrum tap and worker. | Depend on persistence or block on Tokio |
 | `http` | Produce encoded bytes and the evidence that classifies them. One fetch task per source generation. One capped whole-document fetch per call. | Own a decoder, a resampler or a stream |
 | `feed`, `subscription` | Parse a document, bind items to `MediaId::PodcastEpisode`, store the cache and the subscription list. | Touch playback state |
@@ -188,7 +188,7 @@ flowchart TB
 | `media` | Validating identities, capabilities, metadata, tag and VBR-header reading. | Perform network I/O |
 | `tui` | Startup, event loop, teardown, layout tiers, drawing, the browser and its feed management, artwork placement, spectrum bars. | Mutate `PersistedState` except through `Session`; decode, read directories or probe tags inline |
 
-**The playlist model (M8).** A `Playlist` wraps today's `Queue` with an identity, a name and an optional shuffle; `PersistedState` holds a `Vec<Playlist>` in place of the old single queue. Entry IDs and playlist IDs are each their own global, monotonic counter allocated by `PersistedState` — never by a `Queue` or a `Playlist` itself — so an entry ID is unique across every playlist, not just within one. `PersistedState` also remembers which playlist is `playing` and that playlist's cursor (`current_media`); a cursor is adopted, not merely selected, and ownership survives moving between playlists (§9.1). The *viewed* playlist — which tab the front end is looking at — is transient runtime state kept by `application::runtime`, never written to disk.
+**The playlist model (M8).** A `Playlist` wraps today's `Queue` with an identity, a name and an optional shuffle; a `PlaylistSet` holds the `Vec<Playlist>` in place of the old single queue. Entry IDs and playlist IDs are each their own global, monotonic counter held by `PlaylistSet` (M9.1), never by a `Queue` or a `Playlist` itself, so an entry ID is unique across every playlist, not just within one. `PersistedState` holds the set privately and forwards every mutation to it; it applies the set's effect on the persisted current media when the playing playlist is deleted. The set also remembers which playlist is `playing` and that playlist's cursor (`current_media`); a cursor is adopted, not merely selected, and ownership survives moving between playlists (§9.1). The *viewed* playlist — which tab the front end is looking at — is transient runtime state kept by `application::runtime`, never written to disk.
 
 ## 5. Execution contexts
 

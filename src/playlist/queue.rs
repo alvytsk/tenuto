@@ -9,7 +9,7 @@ use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use crate::playback::provenance::PositionProvenance;
 
 /// The cap on entries across *all* playlists (M8 §4). Enforced by
-/// `PersistedState`, the one place IDs are allocated, never by a `Queue`.
+/// `PlaylistSet`, the one place IDs are allocated, never by a `Queue`.
 pub const MAX_PLAYLIST_ENTRIES: usize = 4096;
 
 /// The next ID to hand out, or `None` once `u64::MAX` has been handed out:
