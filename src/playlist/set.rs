@@ -2,6 +2,30 @@
 //! allocators, and the rules that bind them (spec §3, S1–S8). Nothing
 //! outside `crate::playlist` can change a `Queue`, a `Playlist` or a
 //! `QueueEntry`; `PersistedState` owns one set and forwards to it.
+//!
+//! Nothing outside this module can build or change a queue:
+//!
+//! ```compile_fail
+//! use tenuto::queue::{IdAllocator, Queue};
+//! let mut queue = Queue::default();
+//! let _ = queue.enqueue(Vec::new(), &mut IdAllocator::default());
+//! ```
+//!
+//! nor build a playlist from unchecked parts:
+//!
+//! ```compile_fail
+//! use tenuto::playlist::{Playlist, PlaylistId};
+//! use tenuto::queue::Queue;
+//! let _ = Playlist::from_parts(PlaylistId::from_raw_for_tests(1), "P".into(), None, Queue::default());
+//! ```
+//!
+//! and the state file's envelope never lends its set out:
+//!
+//! ```compile_fail
+//! let mut state = tenuto::persistence::model::PersistedState::default();
+//! let playing = state.playlists().playing();
+//! let _ = state.enqueue(playing, Vec::new());
+//! ```
 
 use std::collections::BTreeSet;
 use std::ops::Deref;

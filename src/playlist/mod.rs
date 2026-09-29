@@ -1,7 +1,7 @@
 //! A named playlist (M8 §4): today's `Queue` plus an identity, a name and an
 //! optional shuffle. Pure data and policy, like `queue.rs`: it never
 //! renders, decodes or touches the filesystem, and it changes only through
-//! `Session`.
+//! `PlaylistSet`.
 
 pub mod queue;
 mod set;
@@ -84,18 +84,12 @@ pub struct Playlist {
 }
 
 impl Playlist {
-    pub(crate) fn new(id: PlaylistId, name: String) -> Self {
+    fn new(id: PlaylistId, name: String) -> Self {
         Self::from_parts(id, name, None, Queue::default())
     }
 
-    /// Persistence's constructor and the tests'. The caller has validated
-    /// the name.
-    pub fn from_parts(
-        id: PlaylistId,
-        name: String,
-        shuffle: Option<Shuffle>,
-        queue: Queue,
-    ) -> Self {
+    /// The set's recovery builder's constructor.
+    fn from_parts(id: PlaylistId, name: String, shuffle: Option<Shuffle>, queue: Queue) -> Self {
         Self {
             id,
             name,
@@ -116,10 +110,6 @@ impl Playlist {
     pub fn queue(&self) -> &Queue {
         &self.queue
     }
-    #[doc(hidden)]
-    pub fn queue_mut_for_tests(&mut self) -> &mut Queue {
-        &mut self.queue
-    }
 
     /// The order traversal follows: list order, or with shuffle on `first`
     /// then ascending `(splitmix64(seed + id), id)`.
@@ -128,7 +118,7 @@ impl Playlist {
     /// never per frame. Cache the order if n ever grows past the 4,096 cap.
     ///
     /// An entry added while shuffle is on would land at its hash position,
-    /// possibly behind the current track; `Session::enqueue` reshuffles so
+    /// possibly behind the current track; `PlaylistSet::enqueue` reshuffles so
     /// it cannot.
     pub fn playback_order(&self) -> Vec<QueueEntryId> {
         let mut ids: Vec<QueueEntryId> = self.queue.entries().iter().map(|e| e.id()).collect();

@@ -1,6 +1,6 @@
 //! The playback queue (M5 §5): ordered occurrences with stable IDs. Pure
 //! data and policy. It lives inside `PersistedState` and changes only
-//! through `Session`; it never renders, decodes or touches the filesystem.
+//! through `PlaylistSet`; it never renders, decodes or touches the filesystem.
 
 use std::time::Duration;
 use url::Url;
@@ -232,10 +232,13 @@ impl QueueEntry {
             display: new.display,
         }
     }
-    pub(crate) fn display_mut(&mut self) -> &mut DisplayMetadata {
+    pub(in crate::playlist) fn display_mut(&mut self) -> &mut DisplayMetadata {
         &mut self.display
     }
-    pub(crate) fn set_source(&mut self, source: QueueSource) -> Result<(), QueueError> {
+    pub(in crate::playlist) fn set_source(
+        &mut self,
+        source: QueueSource,
+    ) -> Result<(), QueueError> {
         if !source_matches(&self.media, &source) {
             return Err(QueueError::SourceMismatch);
         }
@@ -279,13 +282,13 @@ impl Queue {
     pub fn get(&self, id: QueueEntryId) -> Option<&QueueEntry> {
         self.entries.iter().find(|e| e.id == id)
     }
-    pub(crate) fn get_mut(&mut self, id: QueueEntryId) -> Option<&mut QueueEntry> {
+    pub(in crate::playlist) fn get_mut(&mut self, id: QueueEntryId) -> Option<&mut QueueEntry> {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
     /// Appends `batch` with IDs from `ids`, all or nothing. Capacity is the
     /// caller's check: the cap is global (M8 P7), and a queue cannot see it.
-    pub fn enqueue(
+    pub(in crate::playlist) fn enqueue(
         &mut self,
         batch: Vec<NewQueueEntry>,
         ids: &mut IdAllocator,
@@ -308,7 +311,7 @@ impl Queue {
         self.active = None;
     }
 
-    pub fn move_entry(
+    pub(in crate::playlist) fn move_entry(
         &mut self,
         id: QueueEntryId,
         direction: Direction,
@@ -327,7 +330,7 @@ impl Queue {
         }
     }
 
-    pub fn remove(&mut self, id: QueueEntryId) -> Result<Removed, QueueError> {
+    pub(in crate::playlist) fn remove(&mut self, id: QueueEntryId) -> Result<Removed, QueueError> {
         let index = self.index_of(id).ok_or(QueueError::UnknownEntry(id))?;
         let entry = self.entries.remove(index);
         let was_active = self.active == Some(id);
@@ -346,22 +349,16 @@ impl Queue {
         })
     }
 
-    pub fn clear(&mut self) -> Vec<QueueEntry> {
+    pub(in crate::playlist) fn clear(&mut self) -> Vec<QueueEntry> {
         self.active = None;
         std::mem::take(&mut self.entries)
     }
 
-    pub fn neighbor(&self, anchor: QueueEntryId, direction: Direction) -> Option<QueueEntryId> {
-        let index = self.index_of(anchor)?;
-        let target = match direction {
-            Direction::Up => index.checked_sub(1)?,
-            Direction::Down => index + 1,
-        };
-        self.entries.get(target).map(QueueEntry::id)
-    }
-
-    /// Only `Session` adopts or clears an occurrence (§3).
-    pub(crate) fn set_active(&mut self, id: Option<QueueEntryId>) -> Result<(), QueueError> {
+    /// Only `PlaylistSet` adopts or clears an occurrence (§3).
+    pub(in crate::playlist) fn set_active(
+        &mut self,
+        id: Option<QueueEntryId>,
+    ) -> Result<(), QueueError> {
         if let Some(id) = id
             && self.get(id).is_none()
         {
@@ -371,15 +368,13 @@ impl Queue {
         Ok(())
     }
 
-    /// Persistence's constructor, used only after `queue_codec` validated
-    /// uniqueness, identity and capacity.
-    pub(crate) fn from_parts(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
+    /// The set's recovery builder validates uniqueness, identity and
+    /// capacity before it calls this.
+    pub(in crate::playlist) fn from_parts(
+        entries: Vec<QueueEntry>,
+        active: Option<QueueEntryId>,
+    ) -> Self {
         Self { entries, active }
-    }
-
-    #[doc(hidden)]
-    pub fn from_parts_for_tests(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
-        Self::from_parts(entries, active)
     }
 }
 
