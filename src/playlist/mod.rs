@@ -6,7 +6,10 @@
 pub mod queue;
 mod set;
 
-pub use set::{Deletion, MediaEffect, PlaylistSet};
+pub use set::{
+    Deletion, Field, MediaEffect, PlaylistSet, RecordOutcome, RecordParts, RecoveredSet, Recovery,
+    Repair, ShuffleField, Stage,
+};
 
 use self::queue::{Direction, Queue, QueueEntryId};
 

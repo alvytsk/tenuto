@@ -7,8 +7,8 @@ mod support;
 use support::media;
 use tenuto::media::id::{EpisodeKey, FeedId, MediaId};
 use tenuto::playlist::{
-    Deletion, MAX_PLAYLISTS, MediaEffect, PlaylistError, PlaylistId, PlaylistSet, Shuffle,
-    clean_name,
+    Deletion, Field, MAX_PLAYLISTS, MediaEffect, PlaylistError, PlaylistId, PlaylistSet,
+    RecordParts, Repair, Shuffle, ShuffleField, Stage, clean_name,
 };
 use tenuto::queue::{
     Direction, DisplayMetadata, DisplayUpdate, IdAllocator, MAX_PLAYLIST_ENTRIES, NewQueueEntry,
@@ -665,5 +665,316 @@ fn a_podcast_fallback_changes_only_when_it_differs_and_only_on_a_podcast() {
     assert_eq!(
         set.set_podcast_fallback(ids[1], new),
         Err(QueueError::SourceMismatch)
+    );
+}
+
+// ---- recovery (spec §8.3) ----
+
+fn record(id: Option<u64>, entries: &[(u64, &str)]) -> RecordParts {
+    RecordParts {
+        id,
+        entries: entries
+            .iter()
+            .map(|(raw, name)| (*raw, entry(name)))
+            .collect(),
+        cursor: Field::Absent,
+        shuffle: ShuffleField::Absent,
+        name: Some("P".into()),
+    }
+}
+
+fn entry_ids_of(set: &PlaylistSet) -> Vec<u64> {
+    set.iter()
+        .flat_map(|p| p.queue().entries())
+        .map(|e| e.id().get())
+        .collect()
+}
+
+#[test]
+fn records_keep_their_ids_names_and_cursor() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let mut parts = record(Some(4), &[(10, "a"), (11, "b")]);
+    parts.cursor = Field::Value(11);
+    parts.name = Some("  Morning  ".into());
+    let outcome = recovery.push_record(parts);
+    assert_eq!(outcome.kept, Some(PlaylistId::from_raw_for_tests(4)));
+    assert!(outcome.repairs.is_empty());
+    let done = recovery.finish(Some(4), Some(media("b")));
+    assert!(done.repairs.is_empty());
+    assert_eq!(done.current_media, MediaEffect::Unchanged);
+    assert_eq!(done.set.playing().get(), 4);
+    assert_eq!(done.set[0].name(), "Morning");
+    assert_eq!(done.set[0].queue().active().map(|id| id.get()), Some(11));
+    assert_eq!(entry_ids_of(&done.set), [10, 11]);
+}
+
+#[test]
+fn default_counters_never_reissue_a_kept_id() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    recovery.push_record(record(Some(1), &[(1, "a")]));
+    let mut set = recovery.finish(Some(1), None).set;
+    assert_ne!(create(&mut set, "new").get(), 1);
+    let playing = set.playing();
+    assert_ne!(add(&mut set, playing, vec![entry("b")])[0].get(), 1);
+}
+
+#[test]
+fn a_raw_playlist_id_equal_to_a_minted_one_is_reassigned() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let first = recovery.push_record(record(None, &[]));
+    assert_eq!(first.kept.map(PlaylistId::get), Some(1));
+    assert_eq!(first.repairs, [(Stage::Id, Repair::DuplicatePlaylistId)]);
+    let second = recovery.push_record(record(Some(1), &[]));
+    assert_eq!(second.kept.map(PlaylistId::get), Some(2));
+    assert_eq!(second.repairs, [(Stage::Id, Repair::DuplicatePlaylistId)]);
+}
+
+#[test]
+fn a_raw_entry_id_equal_to_a_minted_one_is_reassigned() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    recovery.push_record(record(Some(1), &[(5, "a")]));
+    let second = recovery.push_record(record(Some(2), &[(5, "b")]));
+    assert_eq!(second.repairs, [(Stage::Entries, Repair::DuplicateEntryId)]);
+    let third = recovery.push_record(record(Some(3), &[(6, "c")]));
+    assert_eq!(
+        third.repairs,
+        [(Stage::Entries, Repair::DuplicateEntryId)],
+        "6 was minted for b"
+    );
+    let set = recovery.finish(Some(1), None).set;
+    assert_eq!(entry_ids_of(&set), [5, 6, 7]);
+}
+
+#[test]
+fn counters_below_a_kept_id_are_raised_past_it() {
+    let mut recovery =
+        PlaylistSet::recovery(IdAllocator::default(), IdAllocator::starting_at(Some(2)));
+    recovery.push_record(record(Some(7), &[]));
+    let minted = recovery.push_record(record(None, &[]));
+    assert_eq!(minted.kept.map(PlaylistId::get), Some(8));
+    let mut set = recovery.finish(Some(7), None).set;
+    assert_eq!(create(&mut set, "live").get(), 9);
+}
+
+#[test]
+fn an_exhausted_counter_stays_exhausted_after_recovery() {
+    let mut recovery = PlaylistSet::recovery(
+        IdAllocator::starting_at(None),
+        IdAllocator::starting_at(None),
+    );
+    recovery.push_record(record(Some(3), &[(4, "a")]));
+    let mut set = recovery.finish(Some(3), None).set;
+    assert_eq!(set.create("new"), Err(PlaylistError::IdExhausted));
+    let playing = set.playing();
+    assert_eq!(
+        set.enqueue(playing, vec![entry("b")]),
+        Err(QueueError::IdExhausted)
+    );
+}
+
+#[test]
+fn the_playlist_cap_counts_input_records_not_survivors() {
+    let mut recovery =
+        PlaylistSet::recovery(IdAllocator::default(), IdAllocator::starting_at(None));
+    let mut outcomes = Vec::new();
+    for i in 1..=33u64 {
+        let id = (i != 5).then_some(i);
+        outcomes.push(recovery.push_record(record(id, &[])));
+    }
+    assert_eq!(outcomes[4].kept, None);
+    assert_eq!(outcomes[4].repairs, [(Stage::Id, Repair::IdsExhausted)]);
+    assert_eq!(outcomes[32].kept, None);
+    assert_eq!(
+        outcomes[32].repairs,
+        [(Stage::Count, Repair::TooManyPlaylists)]
+    );
+    let set = recovery.finish(Some(1), None).set;
+    let expected: Vec<u64> = (1..=4).chain(6..=32).collect();
+    assert_eq!(
+        set.iter().map(|p| p.id().get()).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn the_entry_cap_is_checked_before_duplicates_and_a_dropped_entry_costs_no_id() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let full: Vec<(u64, String)> = (1..=MAX_PLAYLIST_ENTRIES as u64)
+        .map(|i| (i, format!("t{i}")))
+        .collect();
+    let full: Vec<(u64, &str)> = full.iter().map(|(i, n)| (*i, n.as_str())).collect();
+    recovery.push_record(record(Some(1), &full));
+    let second = recovery.push_record(record(Some(2), &[(1, "dup"), (2, "dup2")]));
+    assert_eq!(
+        second.repairs,
+        [(Stage::Entries, Repair::OverCapacity)],
+        "reported once, and never as a duplicate"
+    );
+    let mut set = recovery.finish(Some(1), None).set;
+    let playing = set.playing();
+    let removed = set.playing_playlist().queue().entries()[0].id();
+    set.remove_entry(removed)
+        .unwrap_or_else(|error| panic!("queued: {error}"));
+    assert_eq!(
+        add(&mut set, playing, vec![entry("next")])[0].get(),
+        MAX_PLAYLIST_ENTRIES as u64 + 1,
+        "no fresh ID went to a dropped entry"
+    );
+}
+
+#[test]
+fn a_reassigned_cursor_reports_the_duplicate_then_the_dangling_cursor() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    recovery.push_record(record(Some(1), &[(1, "a")]));
+    let mut parts = record(Some(2), &[(1, "b")]);
+    parts.cursor = Field::Value(1);
+    let outcome = recovery.push_record(parts);
+    assert_eq!(
+        outcome.repairs,
+        [
+            (Stage::Entries, Repair::DuplicateEntryId),
+            (Stage::Cursor, Repair::DanglingCursor)
+        ]
+    );
+    let set = recovery.finish(Some(1), None).set;
+    assert_eq!(set[1].queue().active(), None);
+}
+
+#[test]
+fn a_malformed_or_foreign_cursor_is_dangling_and_an_absent_one_is_silent() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let mut malformed = record(Some(1), &[(1, "a")]);
+    malformed.cursor = Field::Malformed;
+    assert_eq!(
+        recovery.push_record(malformed).repairs,
+        [(Stage::Cursor, Repair::DanglingCursor)]
+    );
+    let mut foreign = record(Some(2), &[(2, "b")]);
+    foreign.cursor = Field::Value(99);
+    assert_eq!(
+        recovery.push_record(foreign).repairs,
+        [(Stage::Cursor, Repair::DanglingCursor)]
+    );
+    assert!(
+        recovery
+            .push_record(record(Some(3), &[(3, "c")]))
+            .repairs
+            .is_empty()
+    );
+}
+
+#[test]
+fn shuffle_damage_is_graded() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let mut bad_seed = record(Some(1), &[(1, "a")]);
+    bad_seed.shuffle = ShuffleField::BadSeed;
+    assert_eq!(
+        recovery.push_record(bad_seed).repairs,
+        [(Stage::Shuffle, Repair::Shuffle)]
+    );
+    let mut bad_first = record(Some(2), &[(2, "b")]);
+    bad_first.shuffle = ShuffleField::Seeded {
+        seed: 7,
+        first: Field::Malformed,
+    };
+    assert_eq!(
+        recovery.push_record(bad_first).repairs,
+        [(Stage::Shuffle, Repair::Shuffle)]
+    );
+    let mut foreign_first = record(Some(3), &[(3, "c")]);
+    foreign_first.shuffle = ShuffleField::Seeded {
+        seed: 8,
+        first: Field::Value(99),
+    };
+    assert!(
+        recovery.push_record(foreign_first).repairs.is_empty(),
+        "silent"
+    );
+    let mut member_first = record(Some(4), &[(4, "d")]);
+    member_first.shuffle = ShuffleField::Seeded {
+        seed: 9,
+        first: Field::Value(4),
+    };
+    assert!(recovery.push_record(member_first).repairs.is_empty());
+    let set = recovery.finish(Some(1), None).set;
+    let shuffles: Vec<Option<Shuffle>> = set.iter().map(|p| p.shuffle()).collect();
+    assert_eq!(
+        shuffles,
+        [
+            None,
+            Some(Shuffle {
+                seed: 7,
+                first: None
+            }),
+            Some(Shuffle {
+                seed: 8,
+                first: None
+            }),
+            Some(Shuffle {
+                seed: 9,
+                first: set[3].queue().first()
+            }),
+        ]
+    );
+}
+
+#[test]
+fn a_missing_or_blank_name_is_named_after_the_resolved_id() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let mut blank = record(Some(3), &[]);
+    blank.name = Some("   ".into());
+    recovery.push_record(blank);
+    let mut missing = record(Some(3), &[]);
+    missing.name = None;
+    recovery.push_record(missing);
+    let set = recovery.finish(Some(3), None).set;
+    assert_eq!(set[0].name(), "Playlist 3");
+    assert_eq!(set[1].name(), "Playlist 4", "the reassigned ID names it");
+}
+
+#[test]
+fn no_surviving_record_gives_one_empty_default_with_a_fresh_id() {
+    let recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::starting_at(Some(9)));
+    let done = recovery.finish(Some(1), Some(media("a")));
+    assert_eq!(done.set.len(), 1);
+    assert_eq!(done.set[0].name(), "Default");
+    assert_eq!(done.set.playing().get(), 9);
+    assert_eq!(done.current_media, MediaEffect::Unchanged);
+    assert!(done.repairs.is_empty());
+
+    let exhausted = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::starting_at(None));
+    assert_eq!(exhausted.finish(None, None).set.playing().get(), 1);
+}
+
+#[test]
+fn a_dangling_playing_falls_back_to_the_first_and_moves_the_persisted_media() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let mut parts = record(Some(1), &[(1, "a")]);
+    parts.cursor = Field::Value(1);
+    recovery.push_record(parts);
+    let done = recovery.finish(Some(42), Some(media("other")));
+    assert_eq!(done.repairs, [Repair::DanglingPlaying]);
+    assert_eq!(done.set.playing().get(), 1);
+    assert_eq!(done.current_media, MediaEffect::Set(Some(media("a"))));
+    assert_eq!(done.set[0].queue().active().map(|id| id.get()), Some(1));
+}
+
+#[test]
+fn a_playing_cursor_on_other_media_is_cleared_and_the_media_is_unchanged() {
+    let mut recovery = PlaylistSet::recovery(IdAllocator::default(), IdAllocator::default());
+    let mut playing = record(Some(1), &[(1, "a")]);
+    playing.cursor = Field::Value(1);
+    recovery.push_record(playing);
+    let mut other = record(Some(2), &[(2, "b")]);
+    other.cursor = Field::Value(2);
+    recovery.push_record(other);
+    let done = recovery.finish(Some(1), Some(media("x")));
+    assert_eq!(done.repairs, [Repair::CursorMediaMismatch]);
+    assert_eq!(done.current_media, MediaEffect::Unchanged);
+    assert_eq!(done.set[0].queue().active(), None);
+    assert_eq!(
+        done.set[1].queue().active().map(|id| id.get()),
+        Some(2),
+        "only the playing cursor is judged against the media"
     );
 }
