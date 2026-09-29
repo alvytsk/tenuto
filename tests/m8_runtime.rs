@@ -254,7 +254,7 @@ fn a_restored_inactive_playlist_is_enriched_on_the_first_pump() {
         .enqueue(other, vec![local_entry(&tagged)])
         .expect("fits");
     let state = session.state().clone();
-    assert_ne!(state.playing(), other);
+    assert_ne!(state.playlists().playing(), other);
 
     let mut rig = rig_with_probe(state, default_probe(TestHook::None));
     let deadline = Instant::now() + Duration::from_secs(5);

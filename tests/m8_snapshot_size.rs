@@ -190,7 +190,7 @@ fn fs_type_of(path: &Path) -> String {
 #[ignore = "a measurement, run by hand; see the module comment"]
 fn a_full_snapshot_costs_this_much() {
     let mut session = Session::new(PersistedState::default());
-    let mut playlists = vec![session.state().playing()];
+    let mut playlists = vec![session.state().playlists().playing()];
     for i in 1..8 {
         playlists.push(
             session
@@ -247,7 +247,7 @@ fn a_full_snapshot_costs_this_much() {
             MediaId::PodcastEpisode { .. } => checkpoint_podcast += 1,
         }
     }
-    assert_eq!(state.total_entries(), MAX_PLAYLIST_ENTRIES);
+    assert_eq!(state.playlists().total_entries(), MAX_PLAYLIST_ENTRIES);
 
     let started = Instant::now();
     let cloned = state.clone();
@@ -283,7 +283,10 @@ fn a_full_snapshot_costs_this_much() {
     let disk_write_time = started.elapsed();
     let disk_fstype = fs_type_of(disk_dir.path());
 
-    println!("entries                        {}", state.total_entries());
+    println!(
+        "entries                        {}",
+        state.playlists().total_entries()
+    );
     println!(
         "entries by kind                local={local_count} url={url_count} podcast={podcast_count}"
     );

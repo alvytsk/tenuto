@@ -393,7 +393,7 @@ impl PlayerRuntime {
             .flat_map(|playlist| playlist.queue().entries())
             .map(QueueEntry::id)
             .collect();
-        let viewed = parts.session.state().playing();
+        let viewed = parts.session.state().playlists().playing();
         Self {
             session: parts.session,
             writer: parts.writer,
@@ -463,7 +463,7 @@ impl PlayerRuntime {
     /// local file; `None` for a remote or podcast entry or no active entry.
     /// Read from the queue alone — nothing touches the filesystem.
     pub fn active_local_dir(&self) -> Option<PathBuf> {
-        let queue = self.session.state().queue();
+        let queue = self.session.state().playlists().playing_playlist().queue();
         let entry = queue.get(queue.active()?)?;
         match entry.source() {
             QueueSource::LocalFile(path) => path.as_path().parent().map(Path::to_path_buf),
@@ -483,7 +483,7 @@ impl PlayerRuntime {
     // on the cover source as well as the media, so the new art does show on
     // that next load (M7.1 §8.1), not merely "eventually".
     pub fn cover_key(&self) -> Option<CoverKey> {
-        let queue = self.session.state().queue();
+        let queue = self.session.state().playlists().playing_playlist().queue();
         let entry = queue.get(queue.active()?)?;
         Some(CoverKey {
             media: entry.media().clone(),
@@ -507,7 +507,7 @@ impl PlayerRuntime {
     /// are read straight from the store, which is authoritative for them.
     /// Both refresh on add or re-probe/feed refresh, never mid-playback.
     pub fn active_cover(&self) -> Option<(MediaId, CoverSource)> {
-        let queue = self.session.state().queue();
+        let queue = self.session.state().playlists().playing_playlist().queue();
         let entry = queue.get(queue.active()?)?;
         let embedded = || {
             let mirror = self
@@ -551,7 +551,7 @@ impl PlayerRuntime {
     /// artwork of its own. `None` when nothing is active, which is the one
     /// case that still draws the plain placeholder.
     pub fn active_cover_kind(&self) -> Option<CoverKind> {
-        let queue = self.session.state().queue();
+        let queue = self.session.state().playlists().playing_playlist().queue();
         let entry = queue.get(queue.active()?)?;
         let station = self
             .library
@@ -606,7 +606,7 @@ impl PlayerRuntime {
             AppCommand::ViewNext => self.step_view(1),
             AppCommand::ViewPrevious => self.step_view(-1),
             AppCommand::View(id) => {
-                if self.session.state().playlist(id).is_some() {
+                if self.session.state().playlists().playlist(id).is_some() {
                     self.viewed = id;
                 }
             }
@@ -680,7 +680,7 @@ impl PlayerRuntime {
 
     pub fn view(&self) -> PlayerView {
         let state = self.session.state();
-        let queue = state.queue();
+        let queue = state.playlists().playing_playlist().queue();
         let active = queue.active();
         PlayerView {
             rows: self.viewed_rows(),
@@ -767,15 +767,18 @@ impl PlayerRuntime {
         let phase = self.phase();
         let retry = self
             .last_requested
-            .filter(|id| state.find_entry(*id).is_some());
+            .filter(|id| state.playlists().find_entry(*id).is_some());
         // M8 P5: while loading, navigation follows the request's own playlist.
         let navigation = (phase == PlaybackPhase::Loading)
             .then_some(retry)
             .flatten()
-            .and_then(|id| state.owner_of(id))
-            .and_then(|owner| state.playlist(owner))
-            .unwrap_or_else(|| state.playing_playlist());
-        let viewed = state.playlist(self.viewed).unwrap_or(navigation);
+            .and_then(|id| state.playlists().owner_of(id))
+            .and_then(|owner| state.playlists().playlist(owner))
+            .unwrap_or_else(|| state.playlists().playing_playlist());
+        let viewed = state
+            .playlists()
+            .playlist(self.viewed)
+            .unwrap_or(navigation);
         decide(
             input,
             &TransportSituation {
@@ -874,7 +877,7 @@ impl PlayerRuntime {
         id: QueueEntryId,
         start: impl FnOnce(&EngineHandle, LoadRequestId) -> Admission,
     ) {
-        let Some(entry) = self.session.state().find_entry(id) else {
+        let Some(entry) = self.session.state().playlists().find_entry(id) else {
             return;
         };
         let (media, source) = (entry.media().clone(), entry.source().clone());
@@ -1126,7 +1129,7 @@ impl PlayerRuntime {
         for path in &tree.unreadable {
             tracing::warn!(path = ?path, "folder add: directory could not be read");
         }
-        let Some(playlist) = self.session.state().playlist(tree.dest) else {
+        let Some(playlist) = self.session.state().playlists().playlist(tree.dest) else {
             self.status = Some("Playlist was deleted; nothing added".to_owned());
             return;
         };
@@ -1145,7 +1148,8 @@ impl PlayerRuntime {
                 Err(_) => {}
             }
         }
-        let free = MAX_PLAYLIST_ENTRIES.saturating_sub(self.session.state().total_entries());
+        let free =
+            MAX_PLAYLIST_ENTRIES.saturating_sub(self.session.state().playlists().total_entries());
         let did_not_fit = fresh.len().saturating_sub(free);
         fresh.truncate(free);
         let added = fresh.len();
@@ -1223,21 +1227,19 @@ impl PlayerRuntime {
     /// are gone, nothing owns playback any more.
     fn vacate(&mut self, id: PlaylistId, delete: bool) {
         let owning = self.session.owns_playlist(id);
-        let index = self
-            .session
-            .state()
-            .playlists()
-            .iter()
-            .position(|playlist| playlist.id() == id);
         let progress = self.latest_progress();
         let now = self.clock.sample();
         let result = if delete {
-            self.session.delete_playlist(id, &progress, now)
+            self.session
+                .delete_playlist(id, &progress, now)
+                .map(|(removal, successor)| (removal, Some(successor)))
         } else {
-            self.session.clear_playlist(id, &progress, now)
+            self.session
+                .clear_playlist(id, &progress, now)
+                .map(|removal| (removal, None))
         };
         match result {
-            Ok(removal) => {
+            Ok((removal, successor)) => {
                 if owning {
                     self.router.cancel();
                 }
@@ -1260,10 +1262,10 @@ impl PlayerRuntime {
                     .map(QueueEntry::id)
                     .collect();
                 self.request_enrichment(&remaining);
-                if delete && self.viewed == id {
-                    let playlists = self.session.state().playlists();
-                    let next = index.unwrap_or(0).min(playlists.len().saturating_sub(1));
-                    self.viewed = playlists[next].id();
+                if let Some(successor) = successor
+                    && self.viewed == id
+                {
+                    self.viewed = successor;
                 }
             }
             Err(error) => self.status = Some(error.to_string()),
@@ -1274,6 +1276,7 @@ impl PlayerRuntime {
         let on = self
             .session
             .state()
+            .playlists()
             .playlist(id)
             .is_some_and(|playlist| playlist.shuffle().is_some());
         let seed = if on {
@@ -1303,7 +1306,10 @@ impl PlayerRuntime {
         let mut requested: Vec<&MediaId> = Vec::new();
         // Across every playlist: an add into a playlist that is not playing
         // would otherwise never be offered to the workers.
-        for entry in ids.iter().filter_map(|id| state.find_entry(*id)) {
+        for entry in ids
+            .iter()
+            .filter_map(|id| state.playlists().find_entry(*id))
+        {
             let QueueSource::LocalFile(path) = entry.source() else {
                 continue;
             };
@@ -1383,7 +1389,7 @@ impl PlayerRuntime {
         // hint only ever names a row of the viewed one.
         self.selection_hint = removal
             .selection
-            .filter(|id| self.session.state().owner_of(*id) == Some(self.viewed));
+            .filter(|id| self.session.state().playlists().owner_of(*id) == Some(self.viewed));
     }
 
     fn latest_progress(&self) -> Progress {

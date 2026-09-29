@@ -33,7 +33,7 @@ fn with_active() -> (Queue, Vec<QueueEntryId>) {
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
         .enqueue(
-            session.state().playing(),
+            session.state().playlists().playing(),
             vec![entry("a"), entry("b"), entry("c")],
         )
         .unwrap_or_else(|error| panic!("fits: {error}"));
@@ -55,7 +55,15 @@ fn with_active() -> (Queue, Vec<QueueEntryId>) {
         },
         FakeClock::new().sample(),
     );
-    (session.state().queue().clone(), ids)
+    (
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .clone(),
+        ids,
+    )
 }
 
 fn without_active() -> (Queue, Vec<QueueEntryId>) {

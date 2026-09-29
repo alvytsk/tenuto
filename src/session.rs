@@ -33,10 +33,9 @@ use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDispo
 use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
 use crate::playback::volume::Volume;
-use crate::playlist::{Playlist, PlaylistError, PlaylistId, Shuffle, splitmix64};
+use crate::playlist::{PlaylistError, PlaylistId};
 use crate::queue::{
-    Direction, DisplayDuration, DurationSource, NewQueueEntry, Queue, QueueEntryId, QueueError,
-    QueueSource,
+    Direction, DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueError,
 };
 use url::Url;
 // Re-exported so `src/app.rs` and `tests/resume_contract.rs` keep importing
@@ -340,7 +339,7 @@ impl Session {
             return Err(RegisterLoadError::Busy);
         }
         if let LoadTarget::Queue(id) = target {
-            match self.state.find_entry(id) {
+            match self.state.playlists().find_entry(id) {
                 None => return Err(RegisterLoadError::UnknownEntry),
                 Some(entry) if entry.media() != media => {
                     return Err(RegisterLoadError::MediaMismatch);
@@ -405,6 +404,7 @@ impl Session {
         match pending.target {
             LoadTarget::Queue(id) => self
                 .state
+                .playlists()
                 .find_entry(id)
                 .is_some_and(|entry| entry.media() == media)
                 .then_some(pending.target),
@@ -438,26 +438,13 @@ impl Session {
     /// success; the queue is untouched on failure, so nothing is submitted
     /// for it. Touches neither adoption nor any pending load's target.
     ///
-    /// A shuffled `dest` is reshuffled with its cursor pinned first, so
-    /// every added track lies ahead of the playing one; tracks already
-    /// played this pass come round again. The next seed is derived from the
-    /// old one, which keeps `Session` free of a randomness source.
+    /// A shuffled `dest` is reshuffled by the set (M9.1 §5).
     pub fn enqueue(
         &mut self,
         dest: PlaylistId,
         batch: Vec<NewQueueEntry>,
     ) -> Result<(Vec<QueueEntryId>, Action), QueueError> {
         let ids = self.state.edit().enqueue(dest, batch)?;
-        if !ids.is_empty()
-            && let Some(playlist) = self.state.edit().playlist_mut(dest)
-            && let Some(shuffle) = playlist.shuffle()
-        {
-            let first = playlist.queue().active();
-            playlist.set_shuffle(Some(Shuffle {
-                seed: splitmix64(shuffle.seed),
-                first,
-            }));
-        }
         Ok((ids, self.submit(Urgency::Ordinary)))
     }
 
@@ -483,23 +470,8 @@ impl Session {
         id: PlaylistId,
         seed: Option<u64>,
     ) -> Result<Action, PlaylistError> {
-        let playlist = self
-            .state
-            .edit()
-            .playlist_mut(id)
-            .ok_or(PlaylistError::Unknown(id))?;
-        let first = playlist.queue().active();
-        playlist.set_shuffle(seed.map(|seed| Shuffle { seed, first }));
+        self.state.edit().set_shuffle(id, seed)?;
         Ok(self.submit(Urgency::Ordinary))
-    }
-
-    /// The queue that holds `id`, in whichever playlist owns it (M8 §5).
-    fn owner_queue_mut(&mut self, id: QueueEntryId) -> Option<&mut Queue> {
-        let owner = self.state.owner_of(id)?;
-        self.state
-            .edit()
-            .playlist_mut(owner)
-            .map(Playlist::queue_mut)
     }
 
     /// Moves one entry a step in `direction`. `Ordinary` submit only when the
@@ -512,10 +484,7 @@ impl Session {
         id: QueueEntryId,
         direction: Direction,
     ) -> Result<Action, QueueError> {
-        let moved = self
-            .owner_queue_mut(id)
-            .ok_or(QueueError::UnknownEntry(id))?
-            .move_entry(id, direction)?;
+        let moved = self.state.edit().move_entry(id, direction)?;
         Ok(if moved {
             self.submit(Urgency::Ordinary)
         } else {
@@ -533,7 +502,7 @@ impl Session {
     /// Whether `id` is the playlist that owns the adopted entry (M8 §5).
     pub fn owns_playlist(&self, id: PlaylistId) -> bool {
         match self.adopted.map(|adopted| adopted.target) {
-            Some(LoadTarget::Queue(entry)) => self.state.owner_of(entry) == Some(id),
+            Some(LoadTarget::Queue(entry)) => self.state.playlists().owner_of(entry) == Some(id),
             _ => false,
         }
     }
@@ -552,7 +521,7 @@ impl Session {
         progress: &Progress,
         now: ClockSample,
     ) -> Result<Removal, QueueError> {
-        if self.state.find_entry(id).is_none() {
+        if self.state.playlists().find_entry(id).is_none() {
             return Err(QueueError::UnknownEntry(id));
         }
         self.invalidate_pending(|target| target == LoadTarget::Queue(id));
@@ -560,11 +529,8 @@ impl Session {
         if owned {
             self.release_active(progress, now);
         }
-        // `Queue::remove` clears the cursor itself when `id` was the cursor.
-        let removed = self
-            .owner_queue_mut(id)
-            .ok_or(QueueError::UnknownEntry(id))?
-            .remove(id)?;
+        // The set clears the cursor itself when `id` was the cursor.
+        let removed = self.state.edit().remove_entry(id)?;
         Ok(Removal {
             action: self.submit(Urgency::Forced),
             stop_playback: owned,
@@ -578,6 +544,7 @@ impl Session {
     fn vacate(&mut self, id: PlaylistId, progress: &Progress, now: ClockSample) -> bool {
         let entries: Vec<QueueEntryId> = self
             .state
+            .playlists()
             .playlist(id)
             .map(|playlist| playlist.queue().entries().iter().map(|e| e.id()).collect())
             .unwrap_or_default();
@@ -600,13 +567,11 @@ impl Session {
         progress: &Progress,
         now: ClockSample,
     ) -> Result<Removal, PlaylistError> {
-        if self.state.playlist(id).is_none() {
+        if self.state.playlists().playlist(id).is_none() {
             return Err(PlaylistError::Unknown(id));
         }
         let owning = self.vacate(id, progress, now);
-        if let Some(playlist) = self.state.edit().playlist_mut(id) {
-            playlist.queue_mut().clear();
-        }
+        self.state.edit().clear_playlist(id)?;
         Ok(Removal {
             action: self.submit(Urgency::Forced),
             stop_playback: owning,
@@ -614,29 +579,29 @@ impl Session {
         })
     }
 
-    /// Deletes one playlist. The `LastPlaylist` refusal (P1) precedes
-    /// `vacate`, so a refused delete releases nothing. Deleting the playing
-    /// playlist moves `playing` to the adjacent one and re-points
-    /// `current_media` at its cursor (M8 §5).
+    /// Deletes one playlist and returns its successor with the removal. The
+    /// refusal (`Unknown`, then `LastPlaylist`, P1) precedes `vacate`, so a
+    /// refused delete releases nothing; `vacate` runs while the playlist's
+    /// entries still exist, since it reads them to find pending targets and
+    /// ownership. Deleting the playing playlist moves `playing` to the
+    /// successor and re-points the persisted current media (M8 §5).
     pub fn delete_playlist(
         &mut self,
         id: PlaylistId,
         progress: &Progress,
         now: ClockSample,
-    ) -> Result<Removal, PlaylistError> {
-        if self.state.playlist(id).is_none() {
-            return Err(PlaylistError::Unknown(id));
-        }
-        if self.state.playlists().len() == 1 {
-            return Err(PlaylistError::LastPlaylist);
-        }
+    ) -> Result<(Removal, PlaylistId), PlaylistError> {
+        self.state.playlists().check_delete(id)?;
         let owning = self.vacate(id, progress, now);
-        self.state.edit().remove_playlist(id)?;
-        Ok(Removal {
-            action: self.submit(Urgency::Forced),
-            stop_playback: owning,
-            selection: None,
-        })
+        let successor = self.state.edit().delete_playlist(id)?;
+        Ok((
+            Removal {
+                action: self.submit(Urgency::Forced),
+                stop_playback: owning,
+                selection: None,
+            },
+            successor,
+        ))
     }
 
     /// Marks every pending load whose target satisfies `matches` as
@@ -721,40 +686,11 @@ impl Session {
             .collect();
         let mut changed = false;
         for id in ids {
-            let Some(entry) = self.owner_queue_mut(id).and_then(|queue| queue.get_mut(id)) else {
-                continue;
-            };
-            let display = entry.display_mut();
-            if let Some(title) = &update.title
-                && display.title.as_ref() != Some(title)
-            {
-                display.title = Some(title.clone());
-                changed = true;
-            }
-            if let Some(artist) = &update.artist
-                && display.artist.as_ref() != Some(artist)
-            {
-                display.artist = Some(artist.clone());
-                changed = true;
-            }
-            if let Some(album) = &update.album
-                && display.album.as_ref() != Some(album)
-            {
-                display.album = Some(album.clone());
-                changed = true;
-            }
-            if let Some(year) = &update.year
-                && display.year.as_ref() != Some(year)
-            {
-                display.year = Some(year.clone());
-                changed = true;
-            }
-            if let Some(duration) = update.duration
-                && display.duration != Some(duration)
-            {
-                display.duration = Some(duration);
-                changed = true;
-            }
+            changed |= self
+                .state
+                .edit()
+                .update_display(id, update)
+                .unwrap_or(false);
         }
         changed
     }
@@ -772,17 +708,12 @@ impl Session {
         id: QueueEntryId,
         url: Url,
     ) -> Result<Action, QueueError> {
-        let entry = self
-            .owner_queue_mut(id)
-            .and_then(|queue| queue.get_mut(id))
-            .ok_or(QueueError::UnknownEntry(id))?;
-        if let QueueSource::Podcast { fallback } = entry.source()
-            && *fallback == url
-        {
-            return Ok(Action::None);
-        }
-        entry.set_source(QueueSource::Podcast { fallback: url })?;
-        Ok(self.submit(Urgency::Ordinary))
+        let changed = self.state.edit().set_podcast_fallback(id, url)?;
+        Ok(if changed {
+            self.submit(Urgency::Ordinary)
+        } else {
+            Action::None
+        })
     }
 
     /// Copies a decoder-reported title, artist, album and duration into the
@@ -790,28 +721,17 @@ impl Session {
     /// actually reported it: `MediaMetadata`'s absent fields must never blank
     /// out what the entry already displayed.
     fn absorb_load_metadata(&mut self, id: QueueEntryId, metadata: &MediaMetadata) {
-        let Some(entry) = self.owner_queue_mut(id).and_then(|queue| queue.get_mut(id)) else {
-            return;
-        };
-        let display = entry.display_mut();
-        if let Some(title) = &metadata.title {
-            display.title = Some(title.clone());
-        }
-        if let Some(artist) = &metadata.artist {
-            display.artist = Some(artist.clone());
-        }
-        if let Some(album) = &metadata.album {
-            display.album = Some(album.clone());
-        }
-        if let Some(year) = &metadata.year {
-            display.year = Some(year.clone());
-        }
-        if let Some(duration) = metadata.duration {
-            display.duration = Some(DisplayDuration {
-                value: duration,
+        let update = DisplayUpdate {
+            title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
+            album: metadata.album.clone(),
+            year: metadata.year.clone(),
+            duration: metadata.duration.map(|value| DisplayDuration {
+                value,
                 source: DurationSource::Decoded(metadata.duration_provenance),
-            });
-        }
+            }),
+        };
+        let _ = self.state.edit().update_display(id, &update);
     }
 
     // ------------------------------------------------------------- observe
@@ -1069,8 +989,9 @@ impl Session {
                 if let LoadTarget::Queue(id) = adopted.target {
                     let next = self
                         .state
+                        .playlists()
                         .owner_of(id)
-                        .and_then(|owner| self.state.playlist(owner))
+                        .and_then(|owner| self.state.playlists().playlist(owner))
                         .and_then(|playlist| playlist.neighbor(id, Direction::Down));
                     self.advance = Some(next.map_or(Advance::EndOfQueue, Advance::Next));
                 }
@@ -1116,26 +1037,28 @@ impl Session {
         capabilities: &MediaCapabilities,
         now: ClockSample,
     ) -> Action {
-        let previous = (self.state.playing(), self.state.queue().active());
+        let previous = (
+            self.state.playlists().playing(),
+            self.state.playlists().playing_playlist().queue().active(),
+        );
         let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
         match target {
             LoadTarget::Queue(id) => {
-                // Validated against its owner a moment ago in `observe`.
-                if let Some(owner) = self.state.owner_of(id) {
-                    self.state.edit().set_playing(owner);
-                }
-                let _ = self.state.edit().queue_mut().set_active(Some(id));
+                // Validated against its owner a moment ago in `observe`; the
+                // set changes nothing if it no longer holds `id`.
+                let _ = self.state.edit().adopt(id);
                 self.absorb_load_metadata(id, metadata);
             }
             // A legacy load belongs to no playlist: it clears the playing
             // playlist's cursor, as it cleared the one queue's before M8.
-            LoadTarget::Legacy => {
-                let _ = self.state.edit().queue_mut().set_active(None);
-            }
+            LoadTarget::Legacy => self.state.edit().clear_playing_cursor(),
         }
         self.adopted = Some(AdoptedLoad { request, target });
         self.adopted_rev_floor = self.session_rev;
-        let now_at = (self.state.playing(), self.state.queue().active());
+        let now_at = (
+            self.state.playlists().playing(),
+            self.state.playlists().playing_playlist().queue().active(),
+        );
         if switched_media || previous != now_at {
             self.submit(Urgency::Forced)
         } else {

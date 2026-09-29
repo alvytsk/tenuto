@@ -76,20 +76,23 @@ fn playing(rev: u64) -> PlaybackEvent {
 fn an_accepted_enqueue_submits_the_queue_and_a_rejected_one_submits_nothing() {
     let mut session = Session::new(PersistedState::default());
     let (_, action) = session
-        .enqueue(session.state().playing(), vec![entry("a")])
+        .enqueue(session.state().playlists().playing(), vec![entry("a")])
         .expect("fits");
     let Action::Submit { state, .. } = action else {
         panic!("must submit")
     };
-    assert_eq!(state.queue().len(), 1);
+    assert_eq!(state.playlists().playing_playlist().queue().len(), 1);
     let too_many = (0..MAX_PLAYLIST_ENTRIES)
         .map(|i| entry(&format!("t{i}")))
         .collect();
     assert!(matches!(
-        session.enqueue(session.state().playing(), too_many),
+        session.enqueue(session.state().playlists().playing(), too_many),
         Err(QueueError::Capacity { .. })
     ));
-    assert_eq!(session.state().queue().len(), 1);
+    assert_eq!(
+        session.state().playlists().playing_playlist().queue().len(),
+        1
+    );
 }
 
 #[test]
@@ -97,7 +100,10 @@ fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
-        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .enqueue(
+            session.state().playlists().playing(),
+            vec![entry("a"), entry("b")],
+        )
         .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
@@ -110,7 +116,15 @@ fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
         .expect("known");
     assert!(removal.stop_playback);
     assert_eq!(removal.selection, Some(ids[1]));
-    assert_eq!(session.state().queue().active(), None);
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        None
+    );
     assert_eq!(session.adopted(), None);
     assert_eq!(
         session
@@ -121,7 +135,12 @@ fn removing_the_active_entry_captures_it_stops_and_selects_the_successor() {
     );
     assert_eq!(session.state().current_media(), Some(&media("a")));
     assert_eq!(
-        session.state().queue().active(),
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
         None,
         "selection never activates"
     );
@@ -132,7 +151,10 @@ fn removing_a_nonplaying_entry_leaves_playback_alone() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
-        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .enqueue(
+            session.state().playlists().playing(),
+            vec![entry("a"), entry("b")],
+        )
         .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
@@ -142,7 +164,15 @@ fn removing_a_nonplaying_entry_leaves_playback_alone() {
         .remove_entry(ids[1], &progress(1, "a", 3, Some(request)), clock.sample())
         .expect("known");
     assert!(!removal.stop_playback);
-    assert_eq!(session.state().queue().active(), Some(ids[0]));
+    assert_eq!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        Some(ids[0])
+    );
 }
 
 #[test]
@@ -150,7 +180,10 @@ fn clearing_stops_and_keeps_listening_history() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
-        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .enqueue(
+            session.state().playlists().playing(),
+            vec![entry("a"), entry("b")],
+        )
         .expect("fits");
     let request = session
         .register_load(LoadTarget::Queue(ids[1]), &media("b"))
@@ -159,13 +192,20 @@ fn clearing_stops_and_keeps_listening_history() {
     session.observe(&playing(1), clock.sample());
     let removal = session
         .clear_playlist(
-            session.state().playing(),
+            session.state().playlists().playing(),
             &progress(1, "b", 9, Some(request)),
             clock.sample(),
         )
         .expect("the playing playlist exists");
     assert!(removal.stop_playback);
-    assert!(session.state().queue().is_empty());
+    assert!(
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .is_empty()
+    );
     assert!(session.state().entry_for(&media("b")).is_some());
 }
 
@@ -235,6 +275,8 @@ fn a_queued_track_can_lose_its_history_to_eviction_and_stays_queued() {
     let mut session = Session::new(serde_json::from_value(file).expect("valid"));
     let ids: Vec<_> = session
         .state()
+        .playlists()
+        .playing_playlist()
         .queue()
         .entries()
         .iter()
@@ -252,7 +294,7 @@ fn a_queued_track_can_lose_its_history_to_eviction_and_stays_queued() {
         "oldest history evicted"
     );
     assert_eq!(
-        session.state().queue().len(),
+        session.state().playlists().playing_playlist().queue().len(),
         2,
         "queue membership does not pin history"
     );
@@ -266,7 +308,10 @@ fn a_queued_track_can_lose_its_history_to_eviction_and_stays_queued() {
 fn volume_and_display_updates_submit_through_the_session() {
     let mut session = Session::new(PersistedState::default());
     let (ids, _) = session
-        .enqueue(session.state().playing(), vec![entry("a"), entry("a")])
+        .enqueue(
+            session.state().playlists().playing(),
+            vec![entry("a"), entry("a")],
+        )
         .expect("fits");
     assert!(matches!(
         session.set_volume(tenuto::playback::volume::Volume::new(0.4)),
@@ -287,6 +332,8 @@ fn volume_and_display_updates_submit_through_the_session() {
         assert_eq!(
             session
                 .state()
+                .playlists()
+                .playing_playlist()
                 .queue()
                 .get(id)
                 .and_then(|e| e.display().title.as_deref()),
@@ -299,7 +346,7 @@ fn volume_and_display_updates_submit_through_the_session() {
 fn an_identical_display_update_submits_nothing_and_leaves_state_unchanged() {
     let mut session = Session::new(PersistedState::default());
     session
-        .enqueue(session.state().playing(), vec![entry("a")])
+        .enqueue(session.state().playlists().playing(), vec![entry("a")])
         .expect("fits");
     let update = DisplayUpdate {
         title: Some("Title".into()),
@@ -318,8 +365,13 @@ fn an_identical_display_update_submits_nothing_and_leaves_state_unchanged() {
         Action::None
     ));
     assert_eq!(
-        session.state().queue().entries(),
-        before.queue().entries(),
+        session
+            .state()
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .entries(),
+        before.playlists().playing_playlist().queue().entries(),
         "a repeated, unchanged update must not touch state"
     );
 }
@@ -329,7 +381,7 @@ fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps
  {
     let mut session = Session::new(PersistedState::default());
     session
-        .enqueue(session.state().playing(), vec![entry("a")])
+        .enqueue(session.state().playlists().playing(), vec![entry("a")])
         .expect("fits");
     session.update_display(
         &media("a"),
@@ -354,6 +406,8 @@ fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps
     assert!(matches!(action, Action::Submit { .. }));
     let entry = session
         .state()
+        .playlists()
+        .playing_playlist()
         .queue()
         .entries()
         .first()
@@ -371,7 +425,7 @@ fn a_display_update_that_repeats_one_field_and_changes_another_submits_and_keeps
 fn a_none_field_in_a_display_update_never_blanks_an_existing_value() {
     let mut session = Session::new(PersistedState::default());
     session
-        .enqueue(session.state().playing(), vec![entry("a")])
+        .enqueue(session.state().playlists().playing(), vec![entry("a")])
         .expect("fits");
     session.update_display(
         &media("a"),
@@ -396,6 +450,8 @@ fn a_none_field_in_a_display_update_never_blanks_an_existing_value() {
     assert!(matches!(action, Action::Submit { .. }));
     let entry = session
         .state()
+        .playlists()
+        .playing_playlist()
         .queue()
         .entries()
         .first()
@@ -438,7 +494,10 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
     let mut session = Session::new(PersistedState::default());
 
     let (ids, action) = session
-        .enqueue(session.state().playing(), vec![entry("a"), entry("b")])
+        .enqueue(
+            session.state().playlists().playing(),
+            vec![entry("a"), entry("b")],
+        )
         .expect("fits");
     if let Action::Submit { state, .. } = action {
         writer.submit(state, Urgency::Forced);
@@ -459,7 +518,7 @@ fn queue_and_checkpoint_writes_interleave_into_one_latest_snapshot() {
         writer.submit(state, urgency);
     }
     let (_, action) = session
-        .enqueue(session.state().playing(), vec![entry("c")])
+        .enqueue(session.state().playlists().playing(), vec![entry("c")])
         .expect("fits");
     if let Action::Submit { state, .. } = action {
         writer.submit(state, Urgency::Forced);

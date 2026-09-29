@@ -24,8 +24,16 @@ fn schema_three_migrates_its_queue_into_the_default_playlist() {
     let file = json!({ "schema_version": 3, "current_media": "local:/music/a.flac", "volume": 0.5,
         "checkpoints": history(), "queue": [entry(4, "a"), entry(9, "a")], "active_entry": 9 });
     let state: PersistedState = serde_json::from_value(file).expect("valid");
-    assert_eq!(state.queue().len(), 2);
-    assert_eq!(state.queue().active().map(|id| id.get()), Some(9));
+    assert_eq!(state.playlists().playing_playlist().queue().len(), 2);
+    assert_eq!(
+        state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active()
+            .map(|id| id.get()),
+        Some(9)
+    );
     // `from_value` decodes without the store's version stamp, so the label is
     // still the file's; only `StateStore::load` migrates it.
     let back = serde_json::to_value(&state).expect("serializes");
@@ -40,7 +48,7 @@ fn a_version_two_file_migrates_to_an_empty_queue_keeping_current_media() {
     let file = json!({ "schema_version": 2, "current_media": "local:/music/a.flac", "volume": 0.5,
         "checkpoints": history(), "queue": "ignored before schema 3" });
     let state: PersistedState = serde_json::from_value(file).expect("valid");
-    assert!(state.queue().is_empty());
+    assert!(state.playlists().playing_playlist().queue().is_empty());
     assert_eq!(state.current_media(), Some(&media("a")));
     assert!(state.entry_for(&media("a")).is_some());
 }
@@ -50,7 +58,7 @@ fn a_wrong_queue_type_resets_only_the_queue() {
     let file = json!({ "schema_version": 3, "current_media": "local:/music/a.flac", "volume": 0.25,
         "checkpoints": history(), "queue": 7, "active_entry": "x" });
     let state: PersistedState = serde_json::from_value(file).expect("base survives");
-    assert!(state.queue().is_empty());
+    assert!(state.playlists().playing_playlist().queue().is_empty());
     assert_eq!(state.volume().percent(), 25);
     assert_eq!(
         state
@@ -81,8 +89,8 @@ fn every_whole_queue_problem_is_classified() {
         ),
     ];
     for (queue, problem) in cases {
-        let (recovered, reset) = recover_queue(Some(&queue), Some(&json!(1)), Some(&cur));
-        assert!(recovered.is_empty() && recovered.active().is_none());
+        let (entries, cursor, reset) = recover_queue(Some(&queue), Some(&json!(1)), Some(&cur));
+        assert!(entries.is_empty() && cursor.is_none());
         assert_eq!(reset, Some(QueueReset::WholeQueue(problem)));
     }
 }
@@ -97,9 +105,9 @@ fn active_reference_problems_keep_the_entries() {
         (json!(2), Some(&cur), ActiveProblem::MediaMismatch),
         (json!(1), None, ActiveProblem::MediaMismatch),
     ] {
-        let (recovered, reset) = recover_queue(Some(&queue), Some(&active), current);
-        assert_eq!(recovered.len(), 2);
-        assert_eq!(recovered.active(), None);
+        let (entries, cursor, reset) = recover_queue(Some(&queue), Some(&active), current);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(cursor, None);
         assert_eq!(reset, Some(QueueReset::ActiveReference(problem)));
     }
 }
@@ -107,12 +115,12 @@ fn active_reference_problems_keep_the_entries() {
 #[test]
 fn a_missing_or_null_active_reference_needs_no_recovery() {
     let queue = json!([entry(1, "a")]);
-    assert_eq!(recover_queue(Some(&queue), None, None).1, None);
+    assert_eq!(recover_queue(Some(&queue), None, None).2, None);
     assert_eq!(
-        recover_queue(Some(&queue), Some(&serde_json::Value::Null), None).1,
+        recover_queue(Some(&queue), Some(&serde_json::Value::Null), None).2,
         None
     );
-    assert_eq!(recover_queue(None, None, None).1, None);
+    assert_eq!(recover_queue(None, None, None).2, None);
 }
 
 #[test]
@@ -120,7 +128,7 @@ fn a_duplicate_occurrence_is_never_inferred_active_from_media() {
     let file = json!({ "schema_version": 3, "current_media": "local:/music/a.flac", "volume": 1.0,
         "checkpoints": {}, "queue": [entry(1, "a"), entry(2, "a")] });
     let state: PersistedState = serde_json::from_value(file).expect("valid");
-    assert_eq!(state.queue().active(), None);
+    assert_eq!(state.playlists().playing_playlist().queue().active(), None);
 }
 
 #[test]
@@ -129,7 +137,7 @@ fn a_valid_maximum_id_is_preserved_but_cannot_be_reallocated() {
     use tenuto::queue::{DisplayMetadata, IdAllocator, NewQueueEntry, QueueError, QueueSource};
     let file = json!({ "schema_version": 3, "queue": [entry(u64::MAX, "a")] });
     let state: PersistedState = serde_json::from_value(file).expect("valid maximum ID");
-    let mut queue = state.queue().clone();
+    let mut queue = state.playlists().playing_playlist().queue().clone();
     let before = queue.clone();
     let MediaId::LocalFile(path) = media("b") else {
         unreachable!()

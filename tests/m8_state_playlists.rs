@@ -82,9 +82,17 @@ fn a_schema_3_queue_becomes_the_default_playlist_with_its_ids_and_cursor() {
     assert_eq!(state.playlists().len(), 1);
     assert_eq!(state.playlists()[0].name(), "Default");
     assert_eq!(state.playlists()[0].id().get(), 1);
-    assert_eq!(state.playing().get(), 1);
+    assert_eq!(state.playlists().playing().get(), 1);
     assert_eq!(ids(state, 0), [4, 9]);
-    assert_eq!(state.queue().active().map(|id| id.get()), Some(4));
+    assert_eq!(
+        state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active()
+            .map(|id| id.get()),
+        Some(4)
+    );
     assert_eq!(state.playlists()[0].shuffle(), None);
     assert_eq!(state.schema_version(), 4);
     kept_checkpoint(state);
@@ -143,7 +151,15 @@ fn only_the_playing_cursor_is_judged_against_current_media() {
         mismatch.reset,
         Some(QueueReset::ActiveReference(ActiveProblem::MediaMismatch))
     );
-    assert_eq!(mismatch.state.queue().active(), None);
+    assert_eq!(
+        mismatch
+            .state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        None
+    );
     kept_checkpoint(&mismatch.state);
 }
 
@@ -376,7 +392,7 @@ fn both_caps_truncate_in_file_order_and_say_so() {
             found: 4200
         }))
     );
-    assert_eq!(loaded.state.total_entries(), 4096);
+    assert_eq!(loaded.state.playlists().total_entries(), 4096);
     assert_eq!(ids(&loaded.state, 1).last(), Some(&4096));
     assert_eq!(
         loaded.state.playlists()[1].queue().active(),
@@ -397,8 +413,17 @@ fn a_dangling_playing_falls_back_to_the_first_playlist_and_repoints_current_medi
         loaded.reset,
         Some(QueueReset::Playlists(PlaylistProblem::DanglingPlaying))
     );
-    assert_eq!(loaded.state.playing().get(), 1);
-    assert_eq!(loaded.state.queue().active().map(|id| id.get()), Some(1));
+    assert_eq!(loaded.state.playlists().playing().get(), 1);
+    assert_eq!(
+        loaded
+            .state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active()
+            .map(|id| id.get()),
+        Some(1)
+    );
     assert_eq!(loaded.state.current_media(), Some(&support::media("b")));
     kept_checkpoint(&loaded.state);
 }

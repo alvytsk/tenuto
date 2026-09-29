@@ -11,10 +11,13 @@ use url::Url;
 
 use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use crate::playback::provenance::PositionProvenance;
-use crate::playlist::{MAX_PLAYLISTS, Playlist, PlaylistId, Shuffle, clean_name};
+use crate::playlist::{
+    DEFAULT_NAME, Field, MAX_PLAYLISTS, Playlist, PlaylistSet, RecordParts, Repair, ShuffleField,
+    Stage,
+};
 use crate::queue::{
-    DisplayDuration, DisplayMetadata, DurationSource, IdAllocator, MAX_PLAYLIST_ENTRIES, Queue,
-    QueueEntry, QueueEntryId, QueueSource, source_matches,
+    DisplayDuration, DisplayMetadata, DurationSource, IdAllocator, MAX_PLAYLIST_ENTRIES,
+    NewQueueEntry, Queue, QueueEntryId, QueueSource,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,10 +206,7 @@ pub(super) struct RawPlaylists<'a> {
 /// Everything a load derives from a file's playlist data — recovered or
 /// migrated — together with the one problem that is reported.
 pub(super) struct Recovered {
-    pub playlists: Vec<Playlist>,
-    pub playing: PlaylistId,
-    pub entry_ids: IdAllocator,
-    pub playlist_ids: IdAllocator,
+    pub set: PlaylistSet,
     pub current_media: Option<MediaId>,
     pub reset: Option<QueueReset>,
 }
@@ -231,99 +231,152 @@ fn counter(stored: Option<&Value>, seen: impl Iterator<Item = u64>) -> IdAllocat
     ids
 }
 
-fn fresh(ids: &mut IdAllocator) -> Option<u64> {
-    ids.reserve(1).ok().map(|range| *range.start())
+/// The diagnostic this file reports for a set-level repair. `playlists` and
+/// `entries` are the raw counts the file held.
+fn reset_for(repair: Repair, playlists: usize, entries: usize) -> QueueReset {
+    match repair {
+        Repair::TooManyPlaylists => {
+            QueueReset::Playlists(PlaylistProblem::TooManyPlaylists { found: playlists })
+        }
+        Repair::DuplicatePlaylistId => QueueReset::Playlists(PlaylistProblem::DuplicatePlaylistId),
+        Repair::IdsExhausted => QueueReset::Playlists(PlaylistProblem::IdsExhausted),
+        Repair::OverCapacity => {
+            QueueReset::Playlists(PlaylistProblem::OverCapacity { found: entries })
+        }
+        Repair::DuplicateEntryId => QueueReset::Playlists(PlaylistProblem::DuplicateEntryId),
+        Repair::DanglingCursor => QueueReset::ActiveReference(ActiveProblem::Dangling),
+        Repair::Shuffle => QueueReset::Playlists(PlaylistProblem::Shuffle),
+        Repair::DanglingPlaying => QueueReset::Playlists(PlaylistProblem::DanglingPlaying),
+        Repair::CursorMediaMismatch => QueueReset::ActiveReference(ActiveProblem::MediaMismatch),
+    }
 }
 
-/// One empty `Default`, for a file with no usable playlists. Both counters
-/// are the caller's — already raised past everything stored and seen — so a
-/// fallback can neither reuse an ID nor revive an exhausted namespace. The
-/// playlist takes a fresh ID. Only with playlist IDs exhausted does it fall
-/// back to 1: P1 needs a playlist, and no in-flight result from before a
-/// restart can name it.
-fn default_playlists(
+/// Rules 7–9 through the builder; its repairs come after every record's.
+fn finish(
+    recovery: crate::playlist::Recovery,
+    playing: Option<u64>,
     current_media: Option<MediaId>,
-    reset: Option<QueueReset>,
-    entry_ids: IdAllocator,
-    mut playlist_ids: IdAllocator,
+    mut reset: Option<QueueReset>,
+    (playlists, entries): (usize, usize),
 ) -> Recovered {
-    let id = PlaylistId::from_raw(fresh(&mut playlist_ids).unwrap_or(1));
+    let done = recovery.finish(playing, current_media.clone());
+    for repair in done.repairs {
+        note(&mut reset, reset_for(repair, playlists, entries));
+    }
     Recovered {
-        playlists: vec![Playlist::from_parts(
-            id,
-            "Default".into(),
-            None,
-            Queue::default(),
-        )],
-        playing: id,
-        entry_ids,
-        playlist_ids,
-        current_media,
+        set: done.set,
+        current_media: done.current_media.apply(current_media),
         reset,
     }
 }
 
-/// Schema 3 → 4: the one queue becomes `Default`, IDs and cursor carried over.
+/// One stored playlist as parts, plus its own JSON problem: a malformed or
+/// internally duplicated entry list resets that list (rule 2), and belongs
+/// to the Entries stage.
+fn record_parts(item: &Value) -> (RecordParts, Option<QueueReset>) {
+    let (entries, problem) = match item.get("entries") {
+        None | Some(Value::Null) => (Vec::new(), None),
+        Some(Value::Array(entries)) => match decode_entries(entries) {
+            Ok(entries) => (entries, None),
+            Err(problem) => (Vec::new(), Some(QueueReset::WholeQueue(problem))),
+        },
+        Some(_) => (
+            Vec::new(),
+            Some(QueueReset::WholeQueue(QueueProblem::Malformed)),
+        ),
+    };
+    let field = |value: Option<&Value>| match value {
+        None | Some(Value::Null) => Field::Absent,
+        Some(value) => value.as_u64().map_or(Field::Malformed, Field::Value),
+    };
+    let shuffle = match item.get("shuffle") {
+        None | Some(Value::Null) => ShuffleField::Absent,
+        Some(value) => match value.get("seed").and_then(Value::as_u64) {
+            None => ShuffleField::BadSeed,
+            Some(seed) => ShuffleField::Seeded {
+                seed,
+                first: field(value.get("first")),
+            },
+        },
+    };
+    let parts = RecordParts {
+        id: item.get("id").and_then(Value::as_u64),
+        entries,
+        cursor: field(item.get("active_entry")),
+        shuffle,
+        name: item.get("name").and_then(Value::as_str).map(str::to_owned),
+    };
+    (parts, problem)
+}
+
+/// Schema 3 → 4: the one queue becomes `Default` with ID 1, IDs and cursor
+/// carried over. `recover_queue` has already validated it and chosen the
+/// reset; the builder finds nothing more to repair.
 pub(super) fn migrate_queue(
-    queue: Queue,
+    entries: Vec<(u64, NewQueueEntry)>,
+    cursor: Option<u64>,
     current_media: Option<MediaId>,
-    reset: Option<QueueReset>,
+    mut reset: Option<QueueReset>,
 ) -> Recovered {
     let mut entry_ids = IdAllocator::default();
-    queue
-        .entries()
-        .iter()
-        .for_each(|entry| entry_ids.observe(entry.id().get()));
-    let id = PlaylistId::from_raw(1);
-    Recovered {
-        playlists: vec![Playlist::from_parts(id, "Default".into(), None, queue)],
-        playing: id,
-        entry_ids,
-        playlist_ids: IdAllocator::starting_at(Some(2)),
-        current_media,
-        reset,
+    entries.iter().for_each(|(id, _)| entry_ids.observe(*id));
+    let found = entries.len();
+    let mut recovery = PlaylistSet::recovery(entry_ids, IdAllocator::starting_at(Some(2)));
+    let outcome = recovery.push_record(RecordParts {
+        id: Some(1),
+        entries,
+        cursor: cursor.map_or(Field::Absent, Field::Value),
+        shuffle: ShuffleField::Absent,
+        name: Some(DEFAULT_NAME.to_owned()),
+    });
+    for (_, repair) in outcome.repairs {
+        note(&mut reset, reset_for(repair, 1, found));
     }
+    finish(recovery, Some(1), current_media, reset, (1, found))
 }
 
-/// Schema 4's ten ordered recovery rules (M8 §6). Never fails: each step
-/// resets only what it affects and reports why, so damaged playlist data can
-/// never cost a checkpoint (P8).
+/// Schema 4's ten ordered recovery rules (M8 §6), with the rules themselves
+/// in `PlaylistSet`'s builder. This function owns what is about the file:
+/// the counter scan over every raw record, the file-level playlist count,
+/// the raw entry count, file order, and which problem is reported first.
+/// Never fails: damaged playlist data can never cost a checkpoint (P8).
 pub(super) fn recover_playlists(
     raw: RawPlaylists<'_>,
     current_media: Option<MediaId>,
 ) -> Recovered {
     let mut reset = None;
-    // Rule 1. The stored counters are read before anything else, so every
-    // fallback below carries them.
+    // Rule 1.
     let items = match raw.playlists {
         Some(Value::Array(items)) => items,
         other => {
             let problem = (!matches!(other, None | Some(Value::Null)))
                 .then_some(QueueReset::Playlists(PlaylistProblem::Malformed));
-            return default_playlists(
-                current_media,
-                problem,
+            let recovery = PlaylistSet::recovery(
                 counter(raw.next_entry_id, std::iter::empty()),
                 counter(raw.next_playlist_id, std::iter::empty()),
             );
+            return finish(recovery, None, current_media, problem, (0, 0));
         }
     };
 
-    // Counters first, over the whole file.
+    // Counters first, over the whole file, discarded records included, so
+    // that the IDs minted below are exactly 0.2.0's.
     let playlist_seen = items.iter().filter_map(|item| item.get("id")?.as_u64());
     let entry_seen = items
         .iter()
         .filter_map(|item| item.get("entries")?.as_array())
         .flatten()
         .filter_map(|entry| entry.get("id")?.as_u64());
-    let mut playlist_ids = counter(raw.next_playlist_id, playlist_seen);
-    let mut entry_ids = counter(raw.next_entry_id, entry_seen);
-
+    let mut recovery = PlaylistSet::recovery(
+        counter(raw.next_entry_id, entry_seen),
+        counter(raw.next_playlist_id, playlist_seen),
+    );
     let found_entries: usize = items
         .iter()
         .filter_map(|item| item.get("entries")?.as_array())
         .map(Vec::len)
         .sum();
+    let found = (items.len(), found_entries);
     if items.len() > MAX_PLAYLISTS {
         note(
             &mut reset,
@@ -331,223 +384,45 @@ pub(super) fn recover_playlists(
         );
     }
 
-    let mut seen_playlists = BTreeSet::new();
-    let mut seen_entries = BTreeSet::new();
-    let mut total = 0usize;
-    let mut playlists = Vec::new();
-
-    for item in items.iter().take(MAX_PLAYLISTS) {
-        // Rule 3: a malformed or repeated playlist ID.
-        let id = match item
-            .get("id")
-            .and_then(Value::as_u64)
-            .filter(|id| seen_playlists.insert(*id))
+    // Records in file order. Per record: the builder's Count and Id repairs,
+    // then this record's own JSON problem (Entries stage), then the rest. A
+    // record skipped at Count or Id drops its JSON problem, as 0.2.0 never
+    // decoded one (spec §8.4).
+    for item in items {
+        let (parts, own) = record_parts(item);
+        let outcome = recovery.push_record(parts);
+        let (early, late): (Vec<_>, Vec<_>) = outcome
+            .repairs
+            .into_iter()
+            .partition(|(stage, _)| *stage <= Stage::Id);
+        for (_, repair) in early {
+            note(&mut reset, reset_for(repair, found.0, found.1));
+        }
+        if outcome.kept.is_some()
+            && let Some(problem) = own
         {
-            Some(id) => id,
-            None => match fresh(&mut playlist_ids) {
-                Some(id) => {
-                    note(
-                        &mut reset,
-                        QueueReset::Playlists(PlaylistProblem::DuplicatePlaylistId),
-                    );
-                    seen_playlists.insert(id);
-                    id
-                }
-                None => {
-                    note(
-                        &mut reset,
-                        QueueReset::Playlists(PlaylistProblem::IdsExhausted),
-                    );
-                    continue;
-                }
-            },
-        };
-
-        // Rule 2: this playlist's entries, under the existing per-queue rules.
-        let decoded = match item.get("entries") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(entries)) => decode_entries(entries).unwrap_or_else(|problem| {
-                note(&mut reset, QueueReset::WholeQueue(problem));
-                Vec::new()
-            }),
-            Some(_) => {
-                note(&mut reset, QueueReset::WholeQueue(QueueProblem::Malformed));
-                Vec::new()
-            }
-        };
-
-        // Rules 4 and 6: cross-playlist duplicates, then the global cap.
-        let mut cursor = item.get("active_entry").and_then(Value::as_u64);
-        let mut entries = Vec::with_capacity(decoded.len());
-        for entry in decoded {
-            if total >= MAX_PLAYLIST_ENTRIES {
-                // Noted here, not after the loop: the truncated cursor's own
-                // `Dangling` note below must not win the first-problem slot.
-                note(
-                    &mut reset,
-                    QueueReset::Playlists(PlaylistProblem::OverCapacity {
-                        found: found_entries,
-                    }),
-                );
-                if cursor == Some(entry.id().get()) {
-                    cursor = None;
-                }
-                continue;
-            }
-            let raw_id = entry.id().get();
-            let entry = if seen_entries.insert(raw_id) {
-                entry
-            } else {
-                if cursor == Some(raw_id) {
-                    cursor = None;
-                }
-                match fresh(&mut entry_ids) {
-                    Some(new_id) => {
-                        note(
-                            &mut reset,
-                            QueueReset::Playlists(PlaylistProblem::DuplicateEntryId),
-                        );
-                        seen_entries.insert(new_id);
-                        Queue::entry_from_parts(
-                            QueueEntryId::from_raw(new_id),
-                            entry.media().clone(),
-                            entry.source().clone(),
-                            entry.display().clone(),
-                        )
-                    }
-                    None => {
-                        note(
-                            &mut reset,
-                            QueueReset::Playlists(PlaylistProblem::IdsExhausted),
-                        );
-                        continue;
-                    }
-                }
-            };
-            total += 1;
-            entries.push(entry);
+            note(&mut reset, problem);
         }
-
-        // Rule 9, the membership half: every playlist's cursor must be a member.
-        let active = match item.get("active_entry") {
-            None | Some(Value::Null) => None,
-            Some(_) => match cursor.filter(|id| entries.iter().any(|e| e.id().get() == *id)) {
-                Some(id) => Some(QueueEntryId::from_raw(id)),
-                None => {
-                    note(
-                        &mut reset,
-                        QueueReset::ActiveReference(ActiveProblem::Dangling),
-                    );
-                    None
-                }
-            },
-        };
-
-        // Rule 10.
-        let shuffle = match item.get("shuffle") {
-            None | Some(Value::Null) => None,
-            Some(value) => match value.get("seed").and_then(Value::as_u64) {
-                Some(seed) => {
-                    let named = value.get("first").filter(|first| !first.is_null());
-                    let numbered = named.and_then(Value::as_u64);
-                    let first = numbered
-                        .filter(|id| entries.iter().any(|e| e.id().get() == *id))
-                        .map(QueueEntryId::from_raw);
-                    // A `first` that is no longer a member is dropped
-                    // *silently*: §7 makes that a legal in-memory state —
-                    // shuffle on mid-track pins the cursor, then that entry
-                    // is removed — so reporting it would tell the listener
-                    // their queue was reset when nothing was lost. Only a
-                    // `first` that is not a number is damage.
-                    if named.is_some() && numbered.is_none() {
-                        note(&mut reset, QueueReset::Playlists(PlaylistProblem::Shuffle));
-                    }
-                    Some(Shuffle { seed, first })
-                }
-                None => {
-                    note(&mut reset, QueueReset::Playlists(PlaylistProblem::Shuffle));
-                    None
-                }
-            },
-        };
-
-        // Rule 5.
-        let name = item
-            .get("name")
-            .and_then(Value::as_str)
-            .and_then(clean_name)
-            .unwrap_or_else(|| format!("Playlist {id}"));
-
-        playlists.push(Playlist::from_parts(
-            PlaylistId::from_raw(id),
-            name,
-            shuffle,
-            Queue::from_parts(entries, active),
-        ));
+        for (_, repair) in late {
+            note(&mut reset, reset_for(repair, found.0, found.1));
+        }
     }
-    // Rule 7.
-    let Some(first) = playlists.first().map(Playlist::id) else {
-        return default_playlists(current_media, reset, entry_ids, playlist_ids);
-    };
 
-    // Rule 8, then the media half of rule 9 — never both: a re-pointed
-    // `playing` re-points `current_media` to match, so its cursor survives.
-    let named = raw
-        .playing
-        .and_then(Value::as_u64)
-        .map(PlaylistId::from_raw);
-    let playing = named.filter(|id| playlists.iter().any(|p| p.id() == *id));
-    let (playing, current_media) = match playing {
-        Some(playing) => {
-            if let Some(playlist) = playlists.iter_mut().find(|p| p.id() == playing) {
-                let queue = playlist.queue();
-                let cursor_media = queue
-                    .active()
-                    .and_then(|id| queue.get(id))
-                    .map(|e| e.media());
-                if cursor_media.is_some() && cursor_media != current_media.as_ref() {
-                    note(
-                        &mut reset,
-                        QueueReset::ActiveReference(ActiveProblem::MediaMismatch),
-                    );
-                    let _ = playlist.queue_mut().set_active(None);
-                }
-            }
-            (playing, current_media)
-        }
-        None => {
-            note(
-                &mut reset,
-                QueueReset::Playlists(PlaylistProblem::DanglingPlaying),
-            );
-            let queue = playlists[0].queue();
-            let media = queue
-                .active()
-                .and_then(|id| queue.get(id))
-                .map(|e| e.media().clone());
-            (first, media)
-        }
-    };
-
-    Recovered {
-        playlists,
-        playing,
-        entry_ids,
-        playlist_ids,
-        current_media,
-        reset,
-    }
+    // Rules 7–9.
+    let playing = raw.playing.and_then(Value::as_u64);
+    finish(recovery, playing, current_media, reset, found)
 }
 
 /// Decodes the `queue`/`active_entry` fields of a state file, applying the
 /// ten ordered recovery rules (task brief §"Recovery rules"). Never fails:
 /// a problem at any step resets exactly the part it affects and reports why,
-/// so a damaged queue can never cost a checkpoint.
+/// so a damaged queue can never cost a checkpoint. Returns the stored
+/// entries with their IDs and the checked cursor, for `migrate_queue`.
 pub fn recover_queue(
     queue: Option<&Value>,
     active: Option<&Value>,
     current_media: Option<&MediaId>,
-) -> (Queue, Option<QueueReset>) {
+) -> (Vec<(u64, NewQueueEntry)>, Option<u64>, Option<QueueReset>) {
     let entries = match queue {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => match decode_entries(items) {
@@ -556,55 +431,57 @@ pub fn recover_queue(
             // `decode_entries` no longer knows about it (M8 §6 rule 6).
             Ok(entries) if entries.len() > MAX_PLAYLIST_ENTRIES => {
                 return (
-                    Queue::default(),
+                    Vec::new(),
+                    None,
                     Some(QueueReset::WholeQueue(QueueProblem::OverCapacity {
                         found: entries.len(),
                     })),
                 );
             }
             Ok(entries) => entries,
-            Err(problem) => return (Queue::default(), Some(QueueReset::WholeQueue(problem))),
+            Err(problem) => return (Vec::new(), None, Some(QueueReset::WholeQueue(problem))),
         },
         Some(_) => {
             return (
-                Queue::default(),
+                Vec::new(),
+                None,
                 Some(QueueReset::WholeQueue(QueueProblem::Malformed)),
             );
         }
     };
-    let active_id = match active {
+    let cursor = match active {
         None | Some(Value::Null) => None,
         Some(value) => match value.as_u64() {
             None => {
                 return (
-                    Queue::from_parts(entries, None),
+                    entries,
+                    None,
                     Some(QueueReset::ActiveReference(ActiveProblem::Malformed)),
                 );
             }
-            Some(raw) => {
-                let id = QueueEntryId::from_raw(raw);
-                match entries.iter().find(|e| e.id() == id) {
-                    None => {
-                        return (
-                            Queue::from_parts(entries, None),
-                            Some(QueueReset::ActiveReference(ActiveProblem::Dangling)),
-                        );
-                    }
-                    Some(entry) if Some(entry.media()) != current_media => {
-                        return (
-                            Queue::from_parts(entries, None),
-                            Some(QueueReset::ActiveReference(ActiveProblem::MediaMismatch)),
-                        );
-                    }
-                    Some(_) => Some(id),
+            Some(raw) => match entries.iter().find(|(id, _)| *id == raw) {
+                None => {
+                    return (
+                        entries,
+                        None,
+                        Some(QueueReset::ActiveReference(ActiveProblem::Dangling)),
+                    );
                 }
-            }
+                Some((_, entry)) if Some(entry.media()) != current_media => {
+                    return (
+                        entries,
+                        None,
+                        Some(QueueReset::ActiveReference(ActiveProblem::MediaMismatch)),
+                    );
+                }
+                Some(_) => Some(raw),
+            },
         },
     };
-    (Queue::from_parts(entries, active_id), None)
+    (entries, cursor, None)
 }
 
-fn decode_entries(items: &[Value]) -> Result<Vec<QueueEntry>, QueueProblem> {
+fn decode_entries(items: &[Value]) -> Result<Vec<(u64, NewQueueEntry)>, QueueProblem> {
     let dtos = items
         .iter()
         .map(|item| {
@@ -623,11 +500,11 @@ fn decode_entries(items: &[Value]) -> Result<Vec<QueueEntry>, QueueProblem> {
 
 /// Builds a `QueueSource` from its DTO, failing `Malformed` when the source's
 /// own path/URL does not construct, then `SourceMismatch` unless it names the
-/// same identity as `media` (Task 3's [`source_matches`]). Duration decodes
+/// same identity as `media` (checked by [`NewQueueEntry::new`]). Duration decodes
 /// to `DisplayDuration` only when `duration_ms` is present alongside a known
 /// `duration_source` label; an unknown label drops the duration, never the
 /// entry.
-fn entry_from_dto(dto: QueueEntryDto) -> Result<QueueEntry, QueueProblem> {
+fn entry_from_dto(dto: QueueEntryDto) -> Result<(u64, NewQueueEntry), QueueProblem> {
     let source = match dto.source {
         SourceDto::Local { path } => {
             let path =
@@ -643,9 +520,6 @@ fn entry_from_dto(dto: QueueEntryDto) -> Result<QueueEntry, QueueProblem> {
             QueueSource::Podcast { fallback: url }
         }
     };
-    if !source_matches(&dto.media, &source) {
-        return Err(QueueProblem::SourceMismatch);
-    }
     let duration = match (
         dto.display.duration_ms,
         dto.display.duration_source.as_deref(),
@@ -671,10 +545,7 @@ fn entry_from_dto(dto: QueueEntryDto) -> Result<QueueEntry, QueueProblem> {
         year: dto.display.year,
         duration,
     };
-    Ok(Queue::entry_from_parts(
-        QueueEntryId::from_raw(dto.id),
-        dto.media,
-        source,
-        display,
-    ))
+    let new =
+        NewQueueEntry::new(dto.media, source, display).map_err(|_| QueueProblem::SourceMismatch)?;
+    Ok((dto.id, new))
 }

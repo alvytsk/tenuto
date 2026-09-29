@@ -146,18 +146,10 @@ impl PlaylistSet {
     }
 
     /// For serialization: `None` is an exhausted namespace.
-    #[expect(
-        dead_code,
-        reason = "Task 4's serializer is the first caller; drop this then"
-    )]
     pub(crate) fn next_entry_id(&self) -> Option<u64> {
         self.entry_ids.next()
     }
 
-    #[expect(
-        dead_code,
-        reason = "Task 4's serializer is the first caller; drop this then"
-    )]
     pub(crate) fn next_playlist_id(&self) -> Option<u64> {
         self.playlist_ids.next()
     }

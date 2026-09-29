@@ -116,18 +116,9 @@ impl Playlist {
     pub fn queue(&self) -> &Queue {
         &self.queue
     }
-    pub(crate) fn queue_mut(&mut self) -> &mut Queue {
-        &mut self.queue
-    }
     #[doc(hidden)]
     pub fn queue_mut_for_tests(&mut self) -> &mut Queue {
         &mut self.queue
-    }
-    pub(crate) fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-    pub(crate) fn set_shuffle(&mut self, shuffle: Option<Shuffle>) {
-        self.shuffle = shuffle;
     }
 
     /// The order traversal follows: list order, or with shuffle on `first`

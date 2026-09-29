@@ -63,7 +63,7 @@ pub fn decoded(seconds: u64) -> DisplayDuration {
 
 pub fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
     let ids = ids();
-    let viewed = PersistedState::default().playing();
+    let viewed = PersistedState::default().playlists().playing();
     PlayerView {
         tabs: vec![PlaylistTab {
             id: viewed,

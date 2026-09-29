@@ -381,20 +381,6 @@ impl Queue {
     pub fn from_parts_for_tests(entries: Vec<QueueEntry>, active: Option<QueueEntryId>) -> Self {
         Self::from_parts(entries, active)
     }
-
-    pub(crate) fn entry_from_parts(
-        id: QueueEntryId,
-        media: MediaId,
-        source: QueueSource,
-        display: DisplayMetadata,
-    ) -> QueueEntry {
-        QueueEntry {
-            id,
-            media,
-            source,
-            display,
-        }
-    }
 }
 
 #[cfg(test)]
