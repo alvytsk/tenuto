@@ -3,7 +3,12 @@
 //! renders, decodes or touches the filesystem, and it changes only through
 //! `Session`.
 
-use crate::queue::{Direction, Queue, QueueEntryId};
+pub mod queue;
+
+use self::queue::{Direction, Queue, QueueEntryId};
+
+/// The name migration and every fallback give a playlist (M8 §6).
+pub const DEFAULT_NAME: &str = "Default";
 
 pub const MAX_PLAYLISTS: usize = 32;
 pub const MAX_NAME_CHARS: usize = 40;

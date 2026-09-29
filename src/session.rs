@@ -53,6 +53,7 @@ use url::Url;
 // exists to prevent, reachable by anyone who reached for the obvious `.into()`
 // instead. Deleted rather than fixed in place: a function that must not be
 // called with an unverified entry is safer removed than documented.
+pub use crate::queue::DisplayUpdate;
 pub use crate::resume::{ResumeDecision, decide_resume};
 use crate::resume::{restart_preference, resume_candidate};
 
@@ -120,19 +121,6 @@ pub struct Removal {
     pub action: Action,
     pub stop_playback: bool,
     pub selection: Option<QueueEntryId>,
-}
-
-/// A partial update to a queue entry's display metadata: a field left `None`
-/// leaves the entry's existing value alone. Distinct from `DisplayMetadata`
-/// itself, whose `None` means "nothing known" and would blank out a field a
-/// caller never meant to touch.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DisplayUpdate {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub year: Option<String>,
-    pub duration: Option<DisplayDuration>,
 }
 
 /// A registered, not-yet-resolved load. Tracked by `Session` so that a

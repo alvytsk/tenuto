@@ -99,6 +99,19 @@ pub struct DisplayMetadata {
     pub duration: Option<DisplayDuration>,
 }
 
+/// A partial update to a queue entry's display metadata: a field left `None`
+/// leaves the entry's existing value alone. Distinct from `DisplayMetadata`
+/// itself, whose `None` means "nothing known" and would blank out a field a
+/// caller never meant to touch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DisplayUpdate {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<String>,
+    pub duration: Option<DisplayDuration>,
+}
+
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum QueueError {
     #[error(
