@@ -1165,6 +1165,46 @@ fn a_backward_seek_does_not_stop_heard_playback_ending_the_outage() {
 }
 
 #[test]
+fn a_pause_inside_the_stability_window_ends_the_outage() {
+    // 1..=RESUMED: dropped(). ATTEMPT..ATTEMPT+OPEN-1: the reopen; `landing`:
+    // the reseek, which plays and is cut 0.75 s in (about 450 ms heard, short
+    // of `stable_after`); `landing`+1: the transport's re-request, which ends
+    // short, so the second drop reaches the engine inside the first window.
+    // The second outage reopens (OPEN) and reseeks (1).
+    let landing = ATTEMPT + OPEN;
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (
+            landing,
+            episode().truncate_body_after(BYTES_PER_SEC * 3 / 4),
+        ),
+        (landing + 1, short()),
+    ]);
+    let mut engine = start(&server, one_shot());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.play_until_event(state(PlaybackState::Playing));
+    // A park, not a close: the recovered connection is healthy.
+    engine.send(PlaybackCommand::Pause);
+    engine.await_event(state(PlaybackState::Paused));
+    engine.send(PlaybackCommand::Play);
+    engine.await_event(state(PlaybackState::Playing));
+    // The budget is 1 ms: an outage left standing across the pause gives up
+    // at the second drop; a fresh one reconnects.
+    let next =
+        engine.play_until_event(|event| state(PlaybackState::Reconnecting)(event) || failed(event));
+    assert!(
+        state(PlaybackState::Reconnecting)(&next),
+        "the pause left the first outage standing: {next:?}"
+    );
+    engine.play_until_event(state(PlaybackState::Playing));
+    assert_eq!(engine.count_events(failed), 0);
+    assert_eq!(server.requests().len(), landing + 1 + OPEN + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
 fn arrow_bursts_during_recovery_accumulate_across_progress() {
     let server = dropped();
     let mut engine = start(&server, parked());

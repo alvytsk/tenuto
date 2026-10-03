@@ -15,7 +15,8 @@ pub struct ReconnectPolicy {
     /// something fails. It never cuts an in-flight open short and never stops
     /// playback that is succeeding.
     pub budget: Duration,
-    /// Heard audio after a reconnect that ends the outage. Played audio only: bytes, decoded frames and seeks do not count.
+    /// Heard audio after a reconnect that ends the outage. Played audio
+    /// only: bytes, decoded frames and seeks do not count.
     pub stable_after: Duration,
 }
 

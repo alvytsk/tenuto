@@ -829,12 +829,13 @@ struct Worker {
     /// decision point, never cached, so an installed policy takes effect at
     /// once (M7 §7).
     reconnect_policy: Arc<Mutex<ReconnectPolicy>>,
-    /// The outage in progress: `Some` from the first retryable failure of an
-    /// established live connection until sustained playback ends it, a
-    /// failure ends the session (every one of them, through `fail_with`), or
-    /// the listener ends the request (pause, stop, a replacing load,
-    /// shutdown). `None` at every other moment - which is what lets each
-    /// outage be judged against a budget of its own.
+    /// The outage in progress: `Some` from the first retryable failure of a
+    /// playing connection, live or finite (M10), until sustained playback
+    /// ends it, a failure ends the session (every one of them, through
+    /// `fail_with`), or the listener ends the request (pause - a park
+    /// included - stop, a replacing load, shutdown). `None` at every other
+    /// moment - which is what lets each outage be judged against a budget of
+    /// its own.
     outage: Option<Outage>,
     /// Where heard-time accounting last read the current generation (M10
     /// §6): its number and how far past its anchor the position was.
@@ -2423,8 +2424,9 @@ impl Worker {
                             PlaybackError::Remote(failure) => failure,
                             other => match remote_cause(&other) {
                                 Some(failure) => failure,
-                                // Not the station's fault: a device that will
-                                // not open is never retried against a remote
+                                // Not the server's fault: a device that will
+                                // not open, or any other error with no remote
+                                // cause, is never retried against a remote
                                 // budget.
                                 None => {
                                     self.fail_from(other);
@@ -3083,6 +3085,10 @@ impl Worker {
         if self.state != PlaybackState::Playing {
             return;
         }
+        // §7.5's table: a pause clears the outage, a park included. A
+        // recovered connection paused inside its stability window would
+        // otherwise carry the old `started` into the next drop and give up.
+        self.outage = None;
         // Idempotent with respect to the hook: if it already parked the
         // transport for a freeze and announced `Paused` itself, that
         // announcement already stands, so this only updates local state
@@ -3579,7 +3585,7 @@ impl Worker {
                 self.announce_playing();
             }
             Err(error) if is_cancelled(&error) => {}
-            Err(error) => self.fail(format!("cannot start the audio device: {error}")),
+            Err(error) => self.fail(format!("cannot start playback: {error}")),
         }
     }
 
@@ -3601,6 +3607,10 @@ impl Worker {
         &mut self,
         target: Duration,
     ) -> Result<(Duration, PositionProvenance), PlaybackError> {
+        // A target stored offline with no duration to clamp it to (M10 §7)
+        // meets the reopened decoder's duration here, rather than failing
+        // past the end on every Space.
+        let target = self.clamp_target(target);
         let deadline = self.seek_deadline();
         let Some(source) = self.source.as_mut() else {
             return Ok((target, self.position_provenance));
