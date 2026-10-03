@@ -1081,3 +1081,79 @@ fn shutdown_during_a_blocked_attempt_joins_promptly() {
     server.release();
     server.shutdown();
 }
+
+/// Any second failure in the same outage gives up at once (the budget is 1
+/// ms); a fresh outage reconnects. One heard second ends the window.
+fn one_shot() -> ReconnectPolicy {
+    ReconnectPolicy {
+        budget: Duration::from_millis(1),
+        stable_after: Duration::from_secs(1),
+        ..quick()
+    }
+}
+
+/// The request a seek issued right after [`dropped`]'s recovery lands makes.
+/// 1..=RESUMED: dropped(). ATTEMPT..ATTEMPT+OPEN-1: the reopen; ATTEMPT+OPEN:
+/// the reseek, which lands. The seek is the next request, and the transport's
+/// re-request of its cut body the one after.
+const AFTER_LANDING: usize = ATTEMPT + OPEN + 1;
+
+/// A server whose recovery lands, then whose seek's range response is cut
+/// `after` bytes in, with the transport's re-request ending short so the
+/// drop reaches the engine.
+fn dropped_after_landing(after: usize) -> TestServer {
+    server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (AFTER_LANDING, episode().truncate_body_after(after)),
+        (AFTER_LANDING + 1, short()),
+    ])
+}
+
+#[test]
+fn a_forward_seek_does_not_end_the_outage() {
+    // The seek's response is cut half a second in: about 200 ms heard after
+    // the landing (the decoder runs a 300 ms ring ahead of what is heard).
+    let server = dropped_after_landing(BYTES_PER_SEC / 2);
+    let mut engine = start(&server, one_shot());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.play_until_event(state(PlaybackState::Playing));
+    let landed = engine.position();
+    // Further than stable_after: position growth would call this stable.
+    assert_eq!(
+        engine
+            .handle()
+            .submit_seek(landed + Duration::from_millis(1200)),
+        Admission::Accepted
+    );
+    engine.await_seek_completed(PATIENCE);
+    engine.play_until_terminal(PATIENCE);
+    assert_eq!(
+        engine.state(),
+        PlaybackState::Failed,
+        "the seek ended the outage, so the drop after it started a fresh one"
+    );
+    assert_eq!(engine.count_events(state(PlaybackState::Reconnecting)), 0);
+    assert_eq!(server.requests().len(), AFTER_LANDING + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_backward_seek_does_not_stop_heard_playback_ending_the_outage() {
+    // The seek's response is cut 1.5 s in: about 1.2 s heard after the
+    // landing, past stable_after.
+    let server = dropped_after_landing(BYTES_PER_SEC * 3 / 2);
+    let mut engine = start(&server, one_shot());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.play_until_event(state(PlaybackState::Playing));
+    assert_eq!(engine.handle().submit_seek(RESUME), Admission::Accepted);
+    engine.await_seek_completed(PATIENCE);
+    // A fresh outage: the budget did not carry over.
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert_eq!(server.requests().len(), AFTER_LANDING + 1);
+    engine.play_until_event(state(PlaybackState::Playing));
+    assert_eq!(engine.count_events(failed), 0);
+    engine.finish();
+    server.shutdown();
+}
