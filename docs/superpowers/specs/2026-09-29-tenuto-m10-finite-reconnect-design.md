@@ -1,6 +1,6 @@
 # M10 — Finite HTTP recovery
 
-Status: approved in conversation on 2026-09-29; amended on 2026-10-03 after review (anchor order, attempt-local priming outcome, pause at submission, frontend seek hold). It is ready for an implementation plan. The design below is the agreed contract; the code does not yet match it.
+Status: approved in conversation on 2026-09-29; amended on 2026-10-03 after review (anchor order, attempt-local priming outcome, pause at submission, frontend seek hold). Implemented on `feature/finite-reconnect`; §10 records the decisions made while planning and executing, and §9's harness and test 1 describe what was built.
 
 Branch: `feature/finite-reconnect`, from `main` at `4fb5245`.
 
@@ -9,6 +9,8 @@ Branch: `feature/finite-reconnect`, from `main` at `4fb5245`.
 A finite HTTP episode that stalls or drops mid-play (a VPN profile switch, a Wi-Fi blip, a server hiccup) recovers on its own and keeps playing from where the listener was, instead of landing in `Failed` with "the server went quiet during Stall".
 
 Recovery reuses the live-stream machinery: the worker state `Reconnecting`, `Outage` and `ReconnectPolicy` (`src/playback/reconnect.rs`), driven from the worker loop and cancelled at once by a pause, stop, replacing load or shutdown. It does not watch the OS for network changes: the 15 s stall timeout already detects every cause of a dead connection, and network events would cover only one of them.
+
+When M10 engages: the HTTP layer already resumes a short ranged body in place (`http::service`, once more than 64 KiB has arrived), so a plain mid-body cut never reaches the engine. M10 engages when that in-place resume fails, when the body ends inside the first chunk, or on a stall or timeout.
 
 In scope: remote finite sources whose resume capability is `Supported` (architecture §8: `Finite` with `Native` seek support — range-capable servers, which is most podcasts).
 
@@ -157,14 +159,13 @@ All engine tests run on the virtual clock (`play_for`, `let_time_pass`, `play_un
 
 ### Harness additions (`tests/support/`)
 
-- `Script::stall_only_first_response()`, next to `truncate_only_first_response()`.
-- Tests 5b and 7 script faults per connection with the existing `Script::then` chain (`stall_body_after`, `truncate_body_after`, `stall_headers`): a reopen that succeeds while the following ranged response stalls or truncates, and a reopen or reseek that blocks. No new server API.
-- An **opt-in** full render log on the virtual device (for example `TestEngine::record_rendered()` and `rendered()`). Off by default; `captured()` keeps its last-buffer meaning.
-- A WAV builder for a **frame-index fixture**: stereo 16-bit PCM at the virtual device's sample rate, so nothing is resampled. Each frame encodes its own index: left = `index / 32767`, right = `(index % 32767) + 1`. The right channel is never zero, so no encoded frame equals the silence marker and filtering silence cannot hide a skipped frame.
+- Faults are scripted per connection with the existing `Script::then` chain (`stall_body_after`, `truncate_body_after`, `stall_headers`); there is no `stall_only_first_response`. A helper `server(&[(ordinal, Script)])` keys each fault by absolute 1-based connection ordinal and serves every other ordinal normally. An open costs 4 requests (probe, open, Symphonia's tail read, rewind) and a seek costs 1. Every drop faults both the cut and the transport's in-place re-request.
+- `TestEngine::rendered()` and `clear_rendered()` expose the virtual device's existing render log (`TestOutput::captured()` already holds every rendered sample since the last clear). Nothing new is opt-in. Render-log tests keep the clock stopped at the capture (`frozen_attempts()`).
+- A WAV builder for a **frame-index fixture**: stereo 16-bit PCM at the virtual device's sample rate, so nothing is resampled. Each frame encodes its own index in base 1024: left = `index / 1024`, right = `index % 1024 + 1`. The right channel is never zero, so no encoded frame equals the silence marker and filtering silence cannot hide a skipped frame. The values stay small enough to decode exactly whichever i16 to f32 scale Symphonia uses.
 
 ### `tests/m10_finite_reconnect.rs`
 
-1. **Audio continuity across a buffered stall.** Frame-index fixture, served ranged, stalling only the first response, with audio still in the ring. The policy's backoff (20 ms) is shorter than the 300 ms ring. Assert that the rendered log, silence removed, decodes to strictly consecutive frame indices: nothing repeated, nothing skipped. Also assert the position after recovery equals the captured position within one callback period.
+1. **Audio continuity across a buffered stall.** Frame-index fixture, served ranged, stalling only the first response, with audio still in the ring. The policy's backoff (20 ms) is shorter than the 300 ms ring. Assert that the rendered log, silence removed, decodes to consecutive frame indices on both sides of exactly one seam, which replays exactly `UNHEARD_FRAMES` (one output latency, 4800 frames at 48 kHz): the heard model counts only played frames, so the latency in flight at the capture is rendered again once, as on every capture-and-reinstall path (Stop then Play too). Nothing else is repeated or skipped. Also assert the position after recovery equals the captured position within one callback period.
 2. **`TruncatedBody` on every path.** A first-read truncation reconnects. A truncation during the attempt's reopen or reseek is retried on the same outage.
 3. **Not eligible.** A range-less server (`without_ranges`) fails as today, with no `Reconnecting`.
 4. **Seek while reconnecting.** `SeekTargetStored` is emitted; the server's request count does not change until the next scheduled attempt; that attempt lands on the target; `SeekCompleted` arrives only after install. Three `SeekBy(+n)` presses store `3n` past the base.
@@ -180,3 +181,26 @@ All engine tests run on the virtual clock (`play_for`, `let_time_pass`, `play_un
 Unit tests in `src/playback/reconnect.rs` cover the counter's arithmetic (reset on `playing_from` and `failed`, threshold). They do not replace test 9.
 
 The m7 live suites (`m7_reconnect`, `m7_live_recovery`, `m7_live_playback`, `m7_cancellation`) must pass unchanged, and `m4_diagnostics` must still pass with the new log line.
+
+## 10. Decisions
+
+### Decisions made during planning
+
+1. **The seek proof carries across a reopen.** A reopened remote source comes back `SeekSupport::Unknown`, which would make every recovery after the first ineligible. `ensure_source_open` keeps `Native` when the session had already proven it for that location.
+2. **Seek frame conversion rounds.** `DecodedSource::duration_to_frames` truncated, while positions round to the nanosecond, so one frame in three converted back one short at 48 kHz and a resume replayed a frame. It now rounds, and `adopt_preserved` accepts a sub-tolerance difference in either direction.
+3. **The render log already exists.** `TestOutput::captured()` holds every rendered sample since the last clear; the harness only exposes it.
+4. **Per-connection faults reuse `Script::then`.** There is no `stall_only_first_response`.
+5. **The frame-index fixture encodes `index / 1024` and `index % 1024 + 1`,** not base 32767.
+6. **A recovery pause stores seeks and restarts offline,** exactly as `Reconnecting` does (§7's closing line made concrete).
+7. **Test coverage substitutions.** The Session checkpoint of a stored target is pinned by `tests/session_policy.rs`; the non-retryable priming case is covered through Space's one-attempt path; the ring-drain case of test 9 is covered by the unit tests in `reconnect.rs`.
+
+### Decisions made during execution
+
+1. **Heard time from position minus anchor.** Counted per pass from the position's advance over the anchor, not literally from `Timeline::played_frames`. Equivalent, less code; at worst it drifts by sub-frame rounding.
+2. **Faults keyed by connection ordinal.** The planned `server(playing, attempts)` chain helper assumed one request per open. `server(&[(ordinal, Script)])` replaces it, with ordinals named from measured costs (open 4, seek 1) and every count assertion exact. A change in Symphonia's or `HttpMediaSource`'s request shape breaks these tests loudly.
+3. **Every cut also faults the in-place re-request.** The HTTP layer resumes a short ranged body itself, so a plain cut never reached the engine; the tests fault the re-request too, and the docs say when M10 engages (§1).
+4. **Render continuity is one replayed latency.** One seam replaying exactly `UNHEARD_FRAMES`, consecutive on both sides. Test 1's "nothing repeated" is amended (§9). A listener may hear about 100 ms twice at a recovery, as after Stop then Play.
+5. **The priming attempt keeps the source for `abandon_attempt`.** Dropping it retires the shared interrupt, so every priming failure read as a cancellation and retried outside backoff and budget. Pinned by `a_priming_failure_counts_against_the_budget`.
+6. **Commands that prime while `Playing` yield to a drop.** If `restart` or `pause`'s rebuild primes, drops, and the state became `Reconnecting` or `Failed`, nothing is announced. An interrupted restart stores `PendingResume::Restart`, so the landing still reports `RestartEstablished`.
+7. **The pause race predicate is broad.** `lost_source_while_playing` also closes a pause queued before a seek on a healthy remote episode; the seek is stored and Space reopens (one extra reopen). Narrowing it needs the seek bit visible at Pause dispatch.
+8. **Space's device-start failure says "cannot start playback"** (restart keeps "cannot start the audio device").

@@ -185,7 +185,7 @@ The slug is the short name you use in commands. Pass `--as` to choose it, or let
 - A server without range support plays through from the start and cannot seek or resume.
 - A live stream (Icecast, Shoutcast v2) plays without a position bar. It cannot seek or restart, and is never resumed: pausing closes the connection and playing rejoins the live edge.
 - If a live stream drops, Tenuto reconnects with backoff for up to five minutes, then fails; Space tries once more. Stop, pause, or another track cancels it immediately.
-- A dropped connection on a finite track fails. Playing again makes one attempt to reopen at the saved position.
+- A dropped connection on a finite track on a server without range support fails. Playing again makes one attempt to reopen at the saved position.
 - A stream that interleaves ICY metadata, an HLS playlist, or a source whose continuity cannot be established is refused.
 
 ```sh

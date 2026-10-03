@@ -29,7 +29,7 @@ Provenance is sticky. Decoding forward from an estimated landing stays `Estimate
 
 Other fixed rules:
 
-- Nothing plays, fetches or refreshes on its own. Every network request follows an explicit user action. Reconnect attempts for a live stream continue a current Play: they are cancellable at once, bounded, and never start or resume after a process restart.
+- Nothing plays, fetches or refreshes on its own. Every network request follows an explicit user action. Reconnect attempts, for a live stream or for a finite episode that dropped mid-play (§7.6), continue a current Play: they are cancellable at once, bounded, and never start or resume after a process restart.
 - Feed listings never write files. A corrupt cache is reported and left in place.
 - A partial success never exits zero.
 - Every URL in a message or a log line has passed `redact_url` first.
@@ -283,7 +283,7 @@ Every event carries the `session_rev` the application keys its rendering on. `En
 
 Lifecycle events, seek outcomes, end of track, and errors are ordered and lossless. Progress is keep-latest and may be coalesced. Diagnostics such as dropped spans and xruns accumulate into one aggregated `Warning`. The event channel reserves `RESERVED_EVENT_SLOTS` (9) for terminal and protected outcomes, so a backlog of ordinary events can never starve the outcome the application waits for. Ordinary events that do not fit wait in `pending_events` under the `PENDING_CAP` drop-and-displace policy.
 
-The worker's `PlaybackState` moves through `Idle`, `Loading`, `Playing`, `Paused`, `Reconnecting`, `Stopped`, `Ended` and `Failed`. `Reconnecting` exists only for indefinite media (§7.5): entered from `Playing` on a disconnect, it returns to `Playing` on a successful fresh open, or falls out to `Paused`, `Stopped` or `Failed` the same way `Playing` would.
+The worker's `PlaybackState` moves through `Idle`, `Loading`, `Playing`, `Paused`, `Reconnecting`, `Stopped`, `Ended` and `Failed`. `Reconnecting` serves indefinite media (§7.5) and range-capable finite media (§7.6): entered from `Playing` on a disconnect, it returns to `Playing` on a successful attempt, or falls out to `Paused`, `Stopped` or `Failed` the same way `Playing` would.
 
 Cancellation is out of band. An interrupt word carries separate stop, shutdown and `SEEK` bits. A blocked read must wake for a seek, and a seek must not cancel its own first attempt. `SourceInterrupt::frozen` is a level, not an edge. A pause persists until a play, and every wait re-tests the flag on each wake.
 
@@ -354,6 +354,36 @@ Success is step 7, not the return of any earlier call. `reinstall()` is never us
 | Outage ends | after 30 s of sustained playback (listening time advanced, not bytes or decoded frames) |
 | Non-retryable failure | `Failed` at once |
 | Pause, Stop, a new Load, Shutdown | clear the outage; a `Play` from `Failed` therefore always starts with a fresh budget |
+
+### 7.6 Finite media recovery
+
+A remote finite source whose resume capability is `Supported` recovers from a dropped or stalled connection through the same `Reconnecting` state, `Outage` and `ReconnectPolicy` as a station. Range-less servers and sources whose seek support is still `Unknown` fail as before. A reopen of an already-proven location keeps its `Native` seek support.
+
+**Entry** (`Playing`, remote, `Supported`, not a retirement): a read failure that `retryable(failure, Finite)` accepts. The table: `Transport`, `Timeout`, 429 and 5xx retry for both continuities; `LiveEnded` only for a station; `TruncatedBody` only for finite media; everything else fails. The transport stays up so the ring plays out. A failure that arrives with a pause already submitted (the freeze level up) lands in the recovery pause instead.
+
+The HTTP layer resumes a short ranged body in place (once more than 64 KiB has arrived), so a plain mid-body cut never reaches the engine. M10 engages when that in-place resume fails, when the body ends inside the first chunk, or on a stall or timeout.
+
+**One attempt** (`Worker::reconnect_finite`):
+1. Capture the heard position and tear the transport down before any network I/O.
+2. Target: the stored seek, zero for a stored restart, otherwise the captured position.
+3. Reopen (`expected = Finite`) and reseek.
+4. Install the landing as the anchor before the transport opens.
+5. Open and prime inside `prime_attempt`, which records a read failure as the attempt's rather than the session's. The attempt keeps the source for `abandon_attempt`: dropping it would retire the shared interrupt and a priming failure would read as a cancellation.
+6. Commit only if nothing failed or cancelled.
+
+A failed attempt restores the captured position and keeps the stored intent. `restore()` (Space) commits through the same check. Seek frame conversion rounds to the nearest frame, so a resume does not replay a frame.
+
+**Render continuity.** The heard model counts only played frames, so the output latency in flight at the capture (`UNHEARD_FRAMES`, one latency, 4800 frames at 48 kHz) is rendered again exactly once at the seam; frames are consecutive on both sides. Every capture-and-reinstall path behaves this way, Stop then Play included.
+
+**Pending intent.** `PendingResume { Seek(t), Restart }` is read, never taken, and cleared only after a landing is installed, which reports `SeekCompleted` or `RestartEstablished`. A command that primes while `Playing` (`restart`, the rebuild in `pause`) announces nothing if its priming drops and the state changed to `Reconnecting` or `Failed`: the recovery or failure owns the session. A restart interrupted this way stores `PendingResume::Restart`, so the landing still reports `RestartEstablished`.
+
+**Heard time.** The outage ends after `stable_after` of heard playback since the last successful attempt. Heard time is the position's advance from the pass's anchor, counted per generation (equivalent to the `Timeline` played frames), so a seek neither ends nor extends it.
+
+**Commands while recovering, or paused out of recovery:**
+- `SeekTo`, `SeekBy` and `Restart` are stored with no network I/O, clamped to the duration cached on entry. A recovery pause (`Paused`, remote finite, no source, no transport) stores them the same way.
+- `submit_pause` retires the attempt's read instead of freezing it, and the dispatched pause closes everything (`pause_closing`). The race predicate (`lost_source_while_playing`) is broad: a pause queued just before a seek on a healthy remote episode also closes rather than parks, the seek is stored, and Space reopens (one extra reopen).
+- Stop and Load behave as for a station.
+- The frontend holds an arrow-key target across progress until the landing releases it; `Session` checkpoints a stored target (`SeekTargetStored`) in every state.
 
 ## 8. Identity and capabilities
 
@@ -571,6 +601,7 @@ the script tests without a container.
 - **Out of scope for v0.1.** Streaming services, yt-dlp, media servers, equalizer, themes, plugins, a daemon and client split, remote control, MPRIS and media keys. The spectrum analyzer is the one visual addition the M5 spec allowed.
 - **Known limitations.** Non-UTF-8 paths. Estimated position where the device reports no latency. Seek support that stays `Unknown` until probed. Symphonia reads an embedded picture in full while probing, before the 10 MiB artwork cap applies. Shoutcast v1 (`ICY 200 OK`) and streams without ICY headers are not playable (`docs/m1-known-debt.md`).
 - **Live radio, next.** ICY now-playing titles (M7.2) are the planned follow-up: a pure demultiplexer ahead of Symphonia, a generation-keyed latest-value slot, and a droppable `StreamMetadata` event. Not implemented; recorded in the M7 spec §12 so the seams are in the right place.
+- **Finite recovery does not revalidate across a reopen (M10).** A reopen probes fresh at byte zero without the previous response's validator, so an episode replaced on the server during an outage resumes at the same time offset in the new file. Stop → Play has the same limit.
 - **Architecture deepening, next (M9).** The nearest structural work is recorded layer by layer in [`superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md`](superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md). It covers one owner for the playlist rules, one versioned-file module under the three JSON stores, one display mirror for both front ends, one submission door and one landing operation in the engine, and network deadlines on `Clock`. Not implemented; none of it revisits the decisions above.
 - **Radio tab and stations.json (M7.1).** A saved-station list, `stations.json`, mirrors `subscriptions.json` in atomicity and quarantine behavior. A probe opens the real source through `HttpMediaSource::open` rather than a bespoke header-only request, so a station's verified identity can never disagree with what playback itself would classify. A station's logo is fetched and decoded (SVG via `resvg` 0.48, `default-features = false`, both `image_href_resolver` halves closed) only on add or re-probe, never mid-playback — the one exception to the rule that stored identity is never authority over a live open.
 
