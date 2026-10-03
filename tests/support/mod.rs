@@ -62,6 +62,11 @@ const PERIOD: Duration = Duration::from_millis(2);
 /// Deliberately generous, so that "the ring is empty" and "the last frame has
 /// been heard" are far apart in time and the end-of-track rule is observable.
 const LATENCY: Duration = Duration::from_millis(100);
+/// Frames the virtual device has rendered but not played when the worker
+/// freezes it: the buffers of the last output latency, less the one whose
+/// playback starts at the freeze instant. A capture counts them unheard, so
+/// a teardown that resumes at the captured position renders them again.
+pub const UNHEARD_FRAMES: u32 = LATENCY.as_millis() as u32 * RATE / 1000 - BUFFER_FRAMES;
 const DRIVER_NAP: Duration = Duration::from_micros(500);
 /// Between two periods of a drain that is still producing audio.
 const PACING_NAP: Duration = Duration::from_millis(1);
@@ -662,6 +667,17 @@ impl TestEngine {
             .captured()
             .iter()
             .any(|sample| *sample != 0.0)
+    }
+
+    /// Every sample the virtual device rendered since the last
+    /// `clear_rendered`, interleaved. `TestOutput` already keeps the whole
+    /// log; this only hands it out.
+    pub fn rendered(&self) -> Vec<f32> {
+        lock(&self.device).output.captured().to_vec()
+    }
+
+    pub fn clear_rendered(&mut self) {
+        lock(&self.device).output.clear_captured();
     }
 
     pub fn inject_xruns(&mut self, count: usize) {

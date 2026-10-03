@@ -4,6 +4,9 @@
 
 use std::time::{Duration, Instant};
 
+use crate::http::error::RemoteFailure;
+use crate::media::capabilities::Continuity;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReconnectPolicy {
     /// Delay before attempt n; the last entry repeats.
@@ -30,6 +33,18 @@ impl Default for ReconnectPolicy {
 pub enum Next {
     AttemptAt(Instant),
     GiveUp,
+}
+
+/// M10 §3: whether trying the same location again can help, for media of
+/// this continuity. A station's body has no declared length, so it is never
+/// "truncated", and only a station can end live. A finite body that ended
+/// early can be fetched again from where it broke.
+pub fn retryable(failure: &RemoteFailure, continuity: Continuity) -> bool {
+    match failure {
+        RemoteFailure::LiveEnded => continuity == Continuity::Indefinite,
+        RemoteFailure::TruncatedBody { .. } => continuity == Continuity::Finite,
+        other => other.is_retryable(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -180,5 +195,42 @@ mod tests {
         outage.playing_from();
         outage.add_heard(Duration::from_secs(1));
         assert!(!outage.is_over(&policy()));
+    }
+
+    #[test]
+    fn retry_classification_follows_continuity() {
+        use crate::http::error::{Operation, Phase};
+        let truncated = RemoteFailure::TruncatedBody { missing: 1 };
+        for continuity in [Continuity::Indefinite, Continuity::Finite] {
+            let transport = RemoteFailure::Transport {
+                operation: Operation::Read,
+                detail: String::new(),
+            };
+            assert!(retryable(&transport, continuity));
+            assert!(retryable(
+                &RemoteFailure::Timeout {
+                    phase: Phase::Stall
+                },
+                continuity
+            ));
+            assert!(retryable(
+                &RemoteFailure::Status {
+                    status: 503,
+                    operation: Operation::Open
+                },
+                continuity
+            ));
+            assert!(!retryable(&RemoteFailure::ResourceChanged, continuity));
+            assert!(!retryable(
+                &RemoteFailure::Status {
+                    status: 404,
+                    operation: Operation::Open
+                },
+                continuity
+            ));
+        }
+        assert!(retryable(&RemoteFailure::LiveEnded, Continuity::Indefinite));
+        assert!(!retryable(&truncated, Continuity::Indefinite));
+        assert!(retryable(&truncated, Continuity::Finite));
     }
 }

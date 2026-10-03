@@ -371,8 +371,12 @@ impl DecodedSource {
         })
     }
 
+    /// Nearest frame, not floor: positions reach here through
+    /// `Duration::from_secs_f64`, which rounds to the nanosecond, and at
+    /// 48 kHz one frame in three converts back one frame short under a
+    /// floor, so a resume at a captured position would replay a frame.
     fn duration_to_frames(&self, value: Duration) -> u64 {
-        (value.as_secs_f64() * f64::from(self.sample_rate)) as u64
+        (value.as_secs_f64() * f64::from(self.sample_rate)).round() as u64
     }
 
     fn frames_to_duration(&self, frames: u64) -> Duration {

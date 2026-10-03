@@ -22,7 +22,7 @@ use crate::http::error::{Operation, RemoteFailure, redact_url};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{is_retired, remote_cause};
-use crate::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
+use crate::media::capabilities::{Continuity, MediaCapabilities, ResumeCapability, SeekSupport};
 use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 use crate::media::source::SourceLocation;
@@ -40,7 +40,7 @@ use super::output::null_output::NullOutput;
 use super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
 use super::prepare::{PrepareContext, prepare};
 use super::provenance::PositionProvenance;
-use super::reconnect::{Next, Outage, ReconnectPolicy};
+use super::reconnect::{Next, Outage, ReconnectPolicy, retryable};
 use super::resample::Converter;
 use super::spectrum::registry::{TapMapping, TapRegistry};
 use super::spectrum::worker::{
@@ -770,12 +770,12 @@ struct Worker {
     converter_flushed: bool,
     decoder_drained: bool,
     degraded: bool,
-    /// Whether a `fresh_open` is priming a source it has not adopted yet
-    /// (M7 §5.2). While set, `source_ended` reports through `attempt_failure`
-    /// instead of transitioning the session, so a station that dies during
-    /// priming is the attempt's failure rather than the session's.
+    /// Whether an attempt (a station's `fresh_open`, a finite `prime_attempt`)
+    /// is priming a source it has not committed to yet (M7 §5.2, M10 §5).
+    /// While set, a read failure is recorded in `attempt_failure` instead of
+    /// transitioning the session.
     attempting: bool,
-    attempt_failure: Option<RemoteFailure>,
+    attempt_failure: Option<PlaybackError>,
     shutting_down: bool,
     receivers_gone: bool,
     pending_events: VecDeque<PlaybackEvent>,
@@ -1746,7 +1746,7 @@ impl Worker {
         }
         if let Some(failure) = failure {
             self.abandon_attempt();
-            return Err(failure.into());
+            return Err(failure);
         }
         if !primed {
             self.abandon_attempt();
@@ -1766,6 +1766,82 @@ impl Worker {
         self.teardown();
         self.source_interrupt.retire();
         self.retire_remote_source();
+    }
+
+    /// M10 §5: one recovery attempt for a finite source.
+    ///
+    /// `Ok` means `Playing` was announced and the pending intent, if any, was
+    /// reported. On `Err` nothing of the attempt remains: no transport, no
+    /// decoder, `pending` untouched and the position as it was captured.
+    fn reconnect_finite(&mut self) -> Result<(), PlaybackError> {
+        // 1. Capture and tear down before any network I/O, so the ring cannot
+        //    move once the position is read. A no-op after the first attempt,
+        //    which already left no transport.
+        self.capture_and_teardown();
+        let previous = (self.position, self.position_provenance);
+        // 2.
+        let target = self.pending.map_or(self.position, PendingResume::target);
+        // 3 + 4. `ensure_source_open` sets `expected = Finite`, so a reopen
+        //    that answers as a station fails with `ResourceChanged`.
+        let landing = self.ensure_source_open().and_then(|_| self.reseek(target));
+        let (actual, provenance) = match landing {
+            Ok(landing) => landing,
+            Err(error) => {
+                self.abandon_attempt();
+                return Err(error);
+            }
+        };
+        // 5. The landing becomes the anchor: `open_transport` copies
+        //    `self.position` into the new `TransportCore`, so a landing
+        //    assigned afterwards would play from the target while progress
+        //    and every later capture counted from the old position.
+        self.position = adopt_preserved(target, actual);
+        self.position_provenance = self.landing_provenance(actual, provenance);
+        // 6 + 7.
+        if let Err(error) = self.prime_attempt() {
+            (self.position, self.position_provenance) = previous;
+            return Err(error);
+        }
+        // 8.
+        self.start_running();
+        self.announce_playing();
+        self.complete_pending(actual);
+        Ok(())
+    }
+
+    /// M10 §5 steps 6–7, shared by `reconnect_finite` and `restore`: install
+    /// and prime with a read failure reported here rather than through
+    /// `fail_with`, then commit only if nothing failed and nothing cancelled.
+    /// `Ok` leaves the transport primed and parked, for the caller to start;
+    /// `Err` leaves no transport and no decoder.
+    ///
+    /// No `primed` check, unlike `fresh_open`: a finite target at the very
+    /// end primes nothing and is still a landing, which end-of-track follows.
+    fn prime_attempt(&mut self) -> Result<(), PlaybackError> {
+        self.attempting = true;
+        self.attempt_failure = None;
+        let opened = self.reinstall(false);
+        self.attempting = false;
+        // First, as in `fresh_open`: a stop, shutdown, pause or seek retires
+        // the priming read, and `pump_audio` answers that quietly. Remote
+        // only: `do_stop` retires the shared interrupt and a local source
+        // never begins a new generation, so a local Stop → Play would read
+        // as cancelled forever.
+        let retired = self.source_is_remote() && self.source_interrupt.is_retired();
+        if retired || self.interrupted() {
+            self.abandon_attempt();
+            return Err(PlaybackError::Cancelled);
+        }
+        let failure = self.attempt_failure.take();
+        if let Err(error) = opened {
+            self.abandon_attempt();
+            return Err(error);
+        }
+        if let Some(error) = failure {
+            self.abandon_attempt();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Re-adopt the existing transport under a fresh generation: discard the
@@ -2144,28 +2220,47 @@ impl Worker {
                     self.source_ended(failure);
                     return;
                 }
-                Err(error) => match (remote_cause(&error), self.source_is_remote()) {
-                    // §7: never reinterpret a status failure, a malformed
-                    // range, a timeout or a truncated body as clean source
-                    // EOF.
-                    (Some(failure), _) => self.fail_with(format!("{failure}"), Some(failure)),
-                    // H8: "malformed audio cannot become successful
-                    // completion". A body that transferred perfectly and
-                    // decoded to garbage has no remote cause at all, so
-                    // keying on one alone lets exactly the case H8 names
-                    // drain to EndOfTrack and mark the episode complete. A
-                    // remote attempt that cannot finish decoding is a failed
-                    // attempt, whatever the transport did.
-                    (None, true) => self.fail_with(format!("decoding failed: {error}"), None),
-                    // Local files keep M1's contract: a decode error late in
-                    // a file the listener already heard most of drains what
-                    // it has rather than discarding the session.
-                    // `tests/decode_fixtures.rs` pins this.
-                    (None, false) => {
-                        self.source_eof = true;
-                        self.warn(format!("decoding stopped early: {error}"));
+                // M10 §5 step 6: while an attempt primes a remote source it
+                // has not committed to, the source's death is the attempt's
+                // failure. A local file keeps M1's drain-what-it-has rule
+                // below, even while `restore` primes it. The source is left
+                // for `abandon_attempt` to drop: dropping it here retires the
+                // shared interrupt, and `prime_attempt` would read that as a
+                // cancellation, retrying at once with no backoff or budget.
+                Err(error) if self.attempting && self.source_is_remote() => {
+                    self.attempt_failure = Some(error);
+                    return;
+                }
+                Err(error) => {
+                    // M10 §3: an eligible finite episode recovers rather than
+                    // failing. Everything else takes the path below unchanged.
+                    if let Some(failure) = self.recoverable(&error) {
+                        self.enter_reconnecting(failure);
+                        return;
                     }
-                },
+                    match (remote_cause(&error), self.source_is_remote()) {
+                        // §7: never reinterpret a status failure, a malformed
+                        // range, a timeout or a truncated body as clean source
+                        // EOF.
+                        (Some(failure), _) => self.fail_with(format!("{failure}"), Some(failure)),
+                        // H8: "malformed audio cannot become successful
+                        // completion". A body that transferred perfectly and
+                        // decoded to garbage has no remote cause at all, so
+                        // keying on one alone lets exactly the case H8 names
+                        // drain to EndOfTrack and mark the episode complete. A
+                        // remote attempt that cannot finish decoding is a
+                        // failed attempt, whatever the transport did.
+                        (None, true) => self.fail_with(format!("decoding failed: {error}"), None),
+                        // Local files keep M1's contract: a decode error late
+                        // in a file the listener already heard most of drains
+                        // what it has rather than discarding the session.
+                        // `tests/decode_fixtures.rs` pins this.
+                        (None, false) => {
+                            self.source_eof = true;
+                            self.warn(format!("decoding stopped early: {error}"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -2177,18 +2272,32 @@ impl Worker {
     /// means. Otherwise the established session has lost its station.
     fn source_ended(&mut self, failure: RemoteFailure) {
         if self.attempting {
-            self.attempt_failure = Some(failure);
+            self.attempt_failure = Some(failure.into());
             self.source = None;
             return;
         }
-        if failure.is_retryable() {
+        if retryable(&failure, Continuity::Indefinite) {
             self.enter_reconnecting(failure);
         } else {
             self.fail_with(format!("{failure}"), Some(failure));
         }
     }
 
-    /// M7 §7. A playing connection, or an attempt, failed retryably.
+    /// M10 §3: the failure a finite read error recovers from, or `None` when
+    /// it takes today's path. Only a playing, remote session whose resume
+    /// capability is `Supported` recovers, and only from a failure the retry
+    /// table calls retryable for finite media.
+    fn recoverable(&self, error: &PlaybackError) -> Option<RemoteFailure> {
+        let eligible = self.state == PlaybackState::Playing
+            && self.source_is_remote()
+            && self.capabilities.resume_capability() == ResumeCapability::Supported;
+        if !eligible {
+            return None;
+        }
+        remote_cause(error).filter(|failure| retryable(failure, Continuity::Finite))
+    }
+
+    /// M7 §7, M10 §3. A playing connection, or an attempt, failed retryably.
     ///
     /// The outage is the thing that spans attempts: it is begun by the first
     /// such failure and outlives every attempt until sustained playback ends
@@ -2200,7 +2309,12 @@ impl Worker {
         match outage.failed(now, &policy) {
             Next::GiveUp => self.fail_with(format!("{failure}"), Some(failure)),
             Next::AttemptAt(_) => {
-                tracing::info!(reason = %failure, "live source lost; reconnecting");
+                if self.is_indefinite() {
+                    tracing::info!(reason = %failure, "live source lost; reconnecting");
+                } else {
+                    let position = self.position;
+                    tracing::info!(reason = %failure, ?position, "connection lost; reconnecting");
+                }
                 // The output transport stays up so the ring plays out; only
                 // the source goes.
                 self.source_interrupt.retire();
@@ -2255,7 +2369,12 @@ impl Worker {
                 {
                     return;
                 }
-                match self.fresh_open() {
+                let attempt = if self.is_indefinite() {
+                    self.fresh_open()
+                } else {
+                    self.reconnect_finite()
+                };
+                match attempt {
                     Ok(()) => {
                         if let Some(outage) = self.outage.as_mut() {
                             outage.playing_from();
@@ -2277,10 +2396,10 @@ impl Worker {
                                 }
                             },
                         };
-                        // `fresh_open` may have torn the old transport down
+                        // The attempt may have torn the old transport down
                         // and announced nothing; stay in Reconnecting.
                         self.state = PlaybackState::Reconnecting;
-                        if failure.is_retryable() {
+                        if retryable(&failure, self.capabilities.continuity) {
                             self.enter_reconnecting(failure);
                         } else {
                             self.fail_with(format!("{failure}"), Some(failure));
@@ -3770,12 +3889,13 @@ fn describe_panic(panic: &(dyn Any + Send)) -> String {
     }
 }
 
-/// Keep the promised value when the shortfall is sub-frame quantization, and
-/// adopt the decoder's answer when it is a real difference. Dropping this makes
-/// both `play_from_stopped_resumes_at_the_preserved_position_without_resetting`
+/// Keep the promised value when the difference is sub-frame quantization, in
+/// either direction, and adopt the decoder's answer when it is a real
+/// difference. Dropping this makes both
+/// `play_from_stopped_resumes_at_the_preserved_position_without_resetting`
 /// and `transport_recreation_preserves_position` fail on their `>=`.
 fn adopt_preserved(promised: Duration, actual: Duration) -> Duration {
-    if actual <= promised && promised - actual <= RESUME_TOLERANCE {
+    if actual.abs_diff(promised) <= RESUME_TOLERANCE {
         promised
     } else {
         actual
