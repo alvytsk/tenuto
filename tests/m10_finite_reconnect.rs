@@ -45,6 +45,10 @@ fn server(faults: &[(usize, Script)]) -> TestServer {
 /// [`server`], except that every connection past the last fault is answered
 /// by `tail` rather than by `episode()`.
 fn server_then(faults: &[(usize, Script)], tail: Script) -> TestServer {
+    assert!(
+        faults.iter().all(|(n, _)| *n >= 2),
+        "connection 1 is always the episode; a fault keyed there is ignored"
+    );
     let last = faults.iter().map(|(n, _)| *n).max().unwrap_or(1);
     let mut script = episode();
     for n in 2..=last {
@@ -57,7 +61,8 @@ fn server_then(faults: &[(usize, Script)], tail: Script) -> TestServer {
 fn quick() -> ReconnectPolicy {
     ReconnectPolicy {
         backoff: [Duration::from_millis(20); 5],
-        budget: Duration::from_secs(2),
+        // Far past what any test's failed attempts take, even under load.
+        budget: Duration::from_secs(10),
         stable_after: Duration::from_secs(10),
     }
 }
@@ -243,13 +248,15 @@ fn assert_resumed_where_heard(indices: &[u32]) -> u32 {
     resumed[resumed.len() - 1]
 }
 
-/// [`quick`], with a backoff long enough that `play_until_event` has stopped
-/// the clock before the attempt's capture. The freeze is then answered at
-/// a fixed instant, so exactly [`UNHEARD_FRAMES`] are in flight; answered
-/// while the clock runs, it would advance one period first.
+/// A backoff long enough that `play_until_event` has stopped the clock
+/// before the attempt's capture, and that a test's own round trips (a seek
+/// stored, a device silenced) finish inside it even on a loaded machine.
+/// The freeze is then answered at a fixed instant, so exactly
+/// [`UNHEARD_FRAMES`] are in flight; answered while the clock runs, it would
+/// advance one period first.
 fn frozen_attempts() -> ReconnectPolicy {
     ReconnectPolicy {
-        backoff: [Duration::from_millis(300); 5],
+        backoff: [Duration::from_secs(1); 5],
         ..quick()
     }
 }
@@ -433,20 +440,20 @@ fn a_priming_failure_counts_against_the_budget() {
     // As above, but every attempt's reseek response ends inside the priming
     // fill. Read as a cancellation, that would retry at once, forever; read
     // as final, it would fail after one attempt.
-    // Attempt 1 runs 20 ms after the drop and fails well inside the 500 ms
-    // budget; attempt 2 waits 1 s, and its failure is past the budget. Each
+    // Attempt 1 runs 20 ms after the drop and fails well inside the 2 s
+    // budget; attempt 2 waits 3 s, and its failure is past the budget. Each
     // costs a reopen (OPEN) and a reseek (1).
     let server = server_then(
         &[(PLAYING, cut()), (RESUMED, short())],
         episode().truncate_body_after(24 * 1024),
     );
-    let mut backoff = [Duration::from_secs(1); 5];
+    let mut backoff = [Duration::from_secs(3); 5];
     backoff[0] = Duration::from_millis(20);
     let mut engine = start(
         &server,
         ReconnectPolicy {
             backoff,
-            budget: Duration::from_millis(500),
+            budget: Duration::from_secs(2),
             ..quick()
         },
     );
@@ -496,13 +503,7 @@ fn a_device_that_will_not_open_fails_the_attempt_at_once() {
     // reopens (OPEN) and reseeks (1) before it meets the dead device, and
     // nothing after it touches the network.
     let server = server(&[(PLAYING, cut()), (RESUMED, short())]);
-    let mut engine = start(
-        &server,
-        ReconnectPolicy {
-            backoff: [Duration::from_millis(300); 5],
-            ..quick()
-        },
-    );
+    let mut engine = start(&server, frozen_attempts());
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.silence_the_device();
     engine.await_state(PlaybackState::Failed);
@@ -622,9 +623,7 @@ fn a_failed_attempt_keeps_the_stored_target_for_the_next() {
         (RESUMED, short()),
         (ATTEMPT, Script::serving(Vec::new()).status(503)),
     ]);
-    let mut backoff = [Duration::from_millis(20); 5];
-    backoff[0] = Duration::from_millis(400);
-    let mut engine = start(&server, ReconnectPolicy { backoff, ..quick() });
+    let mut engine = start(&server, frozen_attempts());
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
@@ -647,9 +646,7 @@ fn a_restart_during_recovery_lands_at_zero_as_a_restart() {
         (RESUMED, short()),
         (ATTEMPT, Script::serving(Vec::new()).status(503)),
     ]);
-    let mut backoff = [Duration::from_millis(20); 5];
-    backoff[0] = Duration::from_millis(400);
-    let mut engine = start(&server, ReconnectPolicy { backoff, ..quick() });
+    let mut engine = start(&server, frozen_attempts());
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     assert_eq!(stored_target(engine.await_event(stored)), Duration::ZERO);
@@ -939,6 +936,42 @@ fn pause_cancels_a_blocked_priming_read() {
 }
 
 #[test]
+fn a_seek_cancels_a_blocked_attempt_and_the_next_runs_at_once() {
+    // 1..=RESUMED: dropped(). The first attempt's probe (ATTEMPT) never gets
+    // its headers. The seek retires it and is stored; the next attempt
+    // reopens (ATTEMPT+1..ATTEMPT+OPEN) and reseeks to the target
+    // (ATTEMPT+OPEN+1). Every backoff after the first is 30 s, past the
+    // harness's patience: a cancellation that spent one would never land.
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (ATTEMPT, episode().stall_headers()),
+    ]);
+    let mut backoff = [Duration::from_secs(30); 5];
+    backoff[0] = Duration::from_millis(20);
+    let policy = ReconnectPolicy {
+        backoff,
+        budget: Duration::from_secs(60),
+        ..quick()
+    };
+    let mut engine = start_with(&server, policy, Some(patient()));
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert!(server.wait_until_stalled(PATIENCE));
+    assert_eq!(server.requests().len(), ATTEMPT);
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(stored_target(engine.await_event(stored)), target);
+    engine.await_event(state(PlaybackState::Playing));
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    assert_eq!(engine.count_events(failed), 0);
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN + 1);
+    engine.finish();
+    server.release();
+    server.shutdown();
+}
+
+#[test]
 fn stop_cancels_a_blocked_priming_read_and_space_resumes() {
     // As `pause_cancels_a_blocked_priming_read`, with a stop.
     let reseek = ATTEMPT + OPEN;
@@ -1147,7 +1180,7 @@ fn a_backward_seek_does_not_stop_heard_playback_ending_the_outage() {
     let server = dropped_after_landing(BYTES_PER_SEC * 3 / 2);
     // A long backoff, so the exact request count below is read inside it.
     let policy = ReconnectPolicy {
-        backoff: [Duration::from_millis(300); 5],
+        backoff: [Duration::from_secs(1); 5],
         ..one_shot()
     };
     let mut engine = start(&server, policy);
