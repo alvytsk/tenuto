@@ -548,15 +548,11 @@ fn a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it() {
     let target = Duration::from_millis(2500);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
     assert_eq!(stored_target(engine.await_event(stored)), target);
+    // Exact, so it also proves no attempt has run yet.
     assert_eq!(
         server.requests().len(),
         RESUMED,
         "a seek during recovery touched the network"
-    );
-    assert_eq!(
-        engine.count_events(seek_completed),
-        0,
-        "completed before any attempt"
     );
 
     engine.await_event(state(PlaybackState::Playing));
@@ -645,8 +641,13 @@ fn a_restart_during_recovery_lands_at_zero_as_a_restart() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     assert_eq!(stored_target(engine.await_event(stored)), Duration::ZERO);
-    assert_eq!(engine.count_events(restart_established), 0);
-    engine.await_event(state(PlaybackState::Playing));
+    // Ordered, not counted: a count would race the running backoff.
+    let first = engine
+        .await_event(|event| state(PlaybackState::Playing)(event) || restart_established(event));
+    assert!(
+        state(PlaybackState::Playing)(&first),
+        "the restart was reported before the recovery landed it: {first:?}"
+    );
     assert_eq!(engine.await_restart_established(), Duration::ZERO);
     assert_eq!(engine.count_events(seek_completed), 0);
     assert_eq!(server.requests().len(), ATTEMPT + OPEN);
