@@ -231,6 +231,17 @@ fn assert_resumed_where_heard(indices: &[u32]) -> u32 {
     resumed[resumed.len() - 1]
 }
 
+/// [`quick`], with a backoff long enough that `play_until_event` has stopped
+/// the clock before the attempt's capture. The freeze is then answered at
+/// a fixed instant, so exactly [`UNHEARD_FRAMES`] are in flight; answered
+/// while the clock runs, it would advance one period first.
+fn frozen_attempts() -> ReconnectPolicy {
+    ReconnectPolicy {
+        backoff: [Duration::from_millis(300); 5],
+        ..quick()
+    }
+}
+
 /// The transport's own in-place resume of the playing connection: past one
 /// chunk, `http::service` re-requests the rest of a cut body itself.
 const RESUMED: usize = PLAYING + 1;
@@ -255,14 +266,14 @@ fn a_dropped_connection_resumes_with_no_frame_repeated_or_skipped() {
     // re-request of the rest, ends short and the drop reaches the engine.
     // ATTEMPT..ATTEMPT+OPEN-1: the attempt's reopen; ATTEMPT+OPEN: its
     // reseek, which plays on.
-    // The backoff (20 ms) is shorter than the 300 ms ring, so the attempt
-    // runs with audio still queued: the capture must account for exactly
-    // what was heard and discard exactly the rest.
+    // The clock stops at `Reconnecting`, so the attempt runs with audio
+    // still queued: the capture must account for exactly what was heard and
+    // discard exactly the rest.
     let server = server(&[(PLAYING, cut()), (RESUMED, short())]);
-    let mut engine = start(&server, quick());
+    let mut engine = start(&server, frozen_attempts());
     engine.clear_rendered();
     engine.play_until_event(state(PlaybackState::Reconnecting));
-    engine.play_until_event(state(PlaybackState::Playing));
+    engine.await_event(state(PlaybackState::Playing));
     // The decoder reads a ring and more ahead of what is heard, so the
     // landing sits a few hundred milliseconds short of the cut. A second
     // past it is well past the cut.
@@ -304,6 +315,39 @@ fn a_truncated_reopen_or_reseek_is_retried_inside_the_same_outage() {
     engine.play_until_event(state(PlaybackState::Playing));
     assert_eq!(engine.count_events(failed), 0);
     assert_eq!(server.requests().len(), reseek + OPEN + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_restart_whose_priming_drops_is_landed_by_the_recovery() {
+    // 1..=PLAYING: start(). The restart's reseek to zero is PLAYING+1
+    // (`bytes=44-`), and its priming read ends short there, while Playing.
+    // The attempt reopens (OPEN) and lands the restart with no reseek: a
+    // reopened decoder already sits at zero.
+    let server = server(&[(PLAYING + 1, short())]);
+    let mut engine = start(&server, quick());
+    engine.send(PlaybackCommand::Restart);
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    let restarted =
+        |event: &PlaybackEvent| matches!(event, PlaybackEvent::RestartEstablished { .. });
+    let first =
+        engine.play_until_event(|event| state(PlaybackState::Playing)(event) || restarted(event));
+    assert!(
+        state(PlaybackState::Playing)(&first),
+        "the restart was reported before the recovery landed it: {first:?}"
+    );
+    assert_eq!(engine.await_restart_established(), Duration::ZERO);
+    let landed = engine.position();
+    engine.play_for(landed + Duration::from_millis(500));
+    assert_eq!(engine.state(), PlaybackState::Playing);
+    assert!(engine.position() >= landed + Duration::from_millis(500));
+    assert_eq!(
+        engine.count_events(restarted),
+        0,
+        "the restart was reported twice"
+    );
+    assert_eq!(server.requests().len(), PLAYING + 1 + OPEN);
     engine.finish();
     server.shutdown();
 }
@@ -353,10 +397,10 @@ fn a_failure_while_priming_is_the_attempts_not_the_sessions() {
         (RESUMED, short()),
         (reseek, episode().truncate_body_after(24 * 1024)),
     ]);
-    let mut engine = start(&server, quick());
+    let mut engine = start(&server, frozen_attempts());
     engine.clear_rendered();
     engine.play_until_event(state(PlaybackState::Reconnecting));
-    engine.play_until_event(state(PlaybackState::Playing));
+    engine.await_event(state(PlaybackState::Playing));
     let landed = engine.position();
     engine.play_for(landed + Duration::from_millis(300));
 
@@ -375,21 +419,33 @@ fn a_failure_while_priming_is_the_attempts_not_the_sessions() {
 #[test]
 fn a_priming_failure_counts_against_the_budget() {
     // As above, but every attempt's reseek response ends inside the priming
-    // fill. Read as a cancellation, that would retry at once, forever.
+    // fill. Read as a cancellation, that would retry at once, forever; read
+    // as final, it would fail after one attempt.
+    // Attempt 1 runs 20 ms after the drop and fails well inside the 500 ms
+    // budget; attempt 2 waits 1 s, and its failure is past the budget. Each
+    // costs a reopen (OPEN) and a reseek (1).
     let server = server_then(
         &[(PLAYING, cut()), (RESUMED, short())],
         episode().truncate_body_after(24 * 1024),
     );
+    let mut backoff = [Duration::from_secs(1); 5];
+    backoff[0] = Duration::from_millis(20);
     let mut engine = start(
         &server,
         ReconnectPolicy {
-            budget: Duration::from_millis(300),
+            backoff,
+            budget: Duration::from_millis(500),
             ..quick()
         },
     );
     engine.play_until_terminal(PATIENCE);
     assert_eq!(engine.state(), PlaybackState::Failed);
     assert_eq!(engine.count_events(state(PlaybackState::Playing)), 0);
+    assert_eq!(
+        server.requests().len(),
+        RESUMED + 2 * (OPEN + 1),
+        "a priming failure must be retried, with backoff, until the budget"
+    );
     engine.finish();
     server.shutdown();
 }

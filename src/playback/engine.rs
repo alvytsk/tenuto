@@ -3052,6 +3052,9 @@ impl Worker {
             // behind a state that claims it can resume, so recover instead and
             // land parked - or fail with the position preserved.
             match self.rebuild("the audio device stopped responding while pausing", false) {
+                // The rebuild's priming lost the connection: the recovery, or
+                // the failure, now owns the session (M10 §3).
+                Ok(()) if self.state != PlaybackState::Playing => {}
                 Ok(()) => {
                     self.reconcile_frozen_by_hook();
                     self.set_state(PlaybackState::Paused);
@@ -3427,7 +3430,17 @@ impl Worker {
                 }
             }
         }
+        let before = self.state;
         match self.reinstall(true) {
+            // M10 §3: the priming lost the connection, and the recovery or
+            // the failure now owns the session. Announcing here would cover
+            // it with a `Playing` that has no source. A recovery lands the
+            // restart and reports it then.
+            Ok(()) if self.state != before => {
+                if self.state == PlaybackState::Reconnecting {
+                    self.pending = Some(PendingResume::Restart);
+                }
+            }
             Ok(()) => {
                 // G1: `restart()` is the only establishment that discards a
                 // stored target and lands at zero with no `SeekCompleted`

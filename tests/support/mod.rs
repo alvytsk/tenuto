@@ -63,10 +63,12 @@ const PERIOD: Duration = Duration::from_millis(2);
 /// been heard" are far apart in time and the end-of-track rule is observable.
 const LATENCY: Duration = Duration::from_millis(100);
 /// Frames the virtual device has rendered but not played when the worker
-/// freezes it: the buffers of the last output latency, less the one whose
-/// playback starts at the freeze instant. A capture counts them unheard, so
-/// a teardown that resumes at the captured position renders them again.
-pub const UNHEARD_FRAMES: u32 = LATENCY.as_millis() as u32 * RATE / 1000 - BUFFER_FRAMES;
+/// freezes it with the clock stopped: one output latency of buffers, each
+/// rendered a latency before it plays. A capture counts them unheard, so a
+/// teardown that resumes at the captured position renders them again. A
+/// freeze answered while the clock advances moves it one period first, and
+/// one period fewer is in flight.
+pub const UNHEARD_FRAMES: u32 = LATENCY.as_millis() as u32 * RATE / 1000;
 const DRIVER_NAP: Duration = Duration::from_micros(500);
 /// Between two periods of a drain that is still producing audio.
 const PACING_NAP: Duration = Duration::from_millis(1);
