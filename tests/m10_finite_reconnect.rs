@@ -26,6 +26,26 @@ fn episode() -> Script {
     Script::serving(frame_index_wav(FRAMES))
 }
 
+/// Requests one open of the episode costs: a probe, the open, Symphonia's
+/// tail-tag read and the rewind. A seek costs one more.
+const OPEN: usize = 4;
+/// The connection that plays after `start()`: the load's open, then its
+/// resume seek.
+const PLAYING: usize = OPEN + 1;
+
+/// A server for the episode that answers connection `n` (1-based) with the
+/// script paired with `n` in `faults`, and every other connection with
+/// `episode()`.
+fn server(faults: &[(usize, Script)]) -> TestServer {
+    let last = faults.iter().map(|(n, _)| *n).max().unwrap_or(1);
+    let mut script = episode();
+    for n in 2..=last {
+        let next = faults.iter().find(|(at, _)| *at == n);
+        script = script.then(next.map_or_else(episode, |(_, fault)| fault.clone()));
+    }
+    TestServer::start(script.then(episode()))
+}
+
 fn quick() -> ReconnectPolicy {
     ReconnectPolicy {
         backoff: [Duration::from_millis(20); 5],
@@ -49,8 +69,8 @@ fn stored_target(event: PlaybackEvent) -> Duration {
     target
 }
 
-/// Load at [`RESUME`] and play. Connection 1 is the probe; connection 2 is
-/// the resume seek, and it is the connection that plays.
+/// Load at [`RESUME`] and play: an open costs [`OPEN`] requests and the
+/// resume seek one more.
 fn start(server: &TestServer, policy: ReconnectPolicy) -> TestEngine {
     let mut engine = TestEngine::start_idle();
     engine.handle().set_reconnect_policy(policy);
@@ -99,6 +119,60 @@ fn a_reopen_keeps_a_seek_the_session_already_proved() {
         server.requests().len() - before,
         4,
         "the stopped seek must reopen once and run no trial seek"
+    );
+    engine.finish();
+    server.shutdown();
+}
+
+const PATIENCE: Duration = Duration::from_secs(20);
+
+fn failed(event: &PlaybackEvent) -> bool {
+    matches!(event, PlaybackEvent::Failed { .. })
+}
+
+#[test]
+fn a_failed_resume_keeps_the_stored_target_for_the_next_play() {
+    // 1..=PLAYING: start(). Then the stopped seek reopens (OPEN requests) and
+    // Space's range request is the next one, refused. The second Space lands.
+    let server = server(&[(PLAYING + OPEN + 1, Script::serving(Vec::new()).status(503))]);
+    let mut engine = start(&server, quick());
+    engine.handle().submit_stop();
+    engine.await_event(state(PlaybackState::Stopped));
+    let target = Duration::from_secs(2);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    engine.await_event(stored);
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    engine.await_event(failed);
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(
+        landed.actual.abs_diff(target) < Duration::from_millis(1),
+        "the second Space resumed at {:?}, not the stored {target:?}",
+        landed.actual
+    );
+    engine.await_event(state(PlaybackState::Playing));
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn seek_by_while_stopped_accumulates_on_the_stored_target() {
+    let server = server(&[]);
+    let mut engine = start(&server, quick());
+    engine.handle().submit_stop();
+    engine.await_event(state(PlaybackState::Stopped));
+    assert_eq!(
+        engine.handle().submit_seek(Duration::from_secs(2)),
+        Admission::Accepted
+    );
+    engine.await_event(stored);
+    engine.send(PlaybackCommand::SeekBy(1));
+    assert_eq!(
+        stored_target(engine.await_event(stored)),
+        Duration::from_secs(3),
+        "SeekBy must base on the stored target, not the stopped position"
     );
     engine.finish();
     server.shutdown();

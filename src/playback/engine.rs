@@ -697,6 +697,22 @@ impl TransportCore {
     }
 }
 
+/// M10 §4: what a resume must establish, held until a landing is installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingResume {
+    Seek(Duration),
+    Restart,
+}
+
+impl PendingResume {
+    fn target(self) -> Duration {
+        match self {
+            Self::Seek(target) => target,
+            Self::Restart => Duration::ZERO,
+        }
+    }
+}
+
 struct Worker {
     output: Box<dyn AudioOutput>,
     faults: Receiver<OutputFault>,
@@ -734,7 +750,9 @@ struct Worker {
     /// this into `facts.provenance` on every pass, the same way it mirrors
     /// `position` and `degraded`.
     position_provenance: PositionProvenance,
-    requested_target: Option<Duration>,
+    /// A seek or restart stored but not yet established (M10 §4). Read, never
+    /// taken, by every resume; cleared only once a landing is installed.
+    pending: Option<PendingResume>,
     media: Option<MediaId>,
     /// The load currently in flight, set by `load` before `StateChanged`
     /// announces `Loading` and taken (cleared) the moment that load reaches
@@ -900,7 +918,7 @@ impl Worker {
             session_rev: 0,
             position: Duration::ZERO,
             position_provenance: PositionProvenance::Established,
-            requested_target: None,
+            pending: None,
             media: None,
             loading: None,
             adopted_load: None,
@@ -2422,7 +2440,8 @@ impl Worker {
             },
             PlaybackCommand::SeekTo(target) => self.seek_to(target),
             PlaybackCommand::SeekBy(delta) => {
-                let base = self.position;
+                // M10 §7: presses accumulate on a stored intent.
+                let base = self.pending.map_or(self.position, PendingResume::target);
                 let step = Duration::from_secs(delta.unsigned_abs());
                 let target = if delta >= 0 {
                     base.saturating_add(step)
@@ -2468,7 +2487,7 @@ impl Worker {
         self.source = None;
         self.session_rev += 1;
         self.media = Some(media.clone());
-        self.requested_target = None;
+        self.pending = None;
         // This load's media is not yet held until `Loaded` says so, and its
         // token is now the one in flight - both before `set_state(Loading)`
         // reads `self.loading` for the announcement below (M5 §6).
@@ -2720,9 +2739,7 @@ impl Worker {
             PlaybackState::Idle => self.warn("nothing is loaded".into()),
             // Resuming a parked transport is the same generation released
             // again: nothing was discarded, so nothing has to be rebuilt.
-            PlaybackState::Paused
-                if lock(&self.transport).is_some() && self.requested_target.is_none() =>
-            {
+            PlaybackState::Paused if lock(&self.transport).is_some() && self.pending.is_none() => {
                 // Facts before transport (Ruling 1), even though neither lock
                 // here is ever held while the other is taken: consistent
                 // order is one less thing a future reader has to check.
@@ -2755,7 +2772,7 @@ impl Worker {
         // `position` is listening time, never a target. The one sequence
         // opens a fresh connection and keeps it.
         if self.is_indefinite() {
-            if self.requested_target.take().is_some() {
+            if self.pending.take().is_some() {
                 self.warn("a stored seek target was dropped: live media cannot seek".into());
             }
             match self.fresh_open() {
@@ -2802,19 +2819,14 @@ impl Worker {
         if lock(&self.transport).is_some() {
             self.capture_position();
         }
-        // A target stored while stopped was never validated against the decoder,
-        // so resuming is where it gets confirmed - and where the SeekCompleted
-        // the caller is still waiting for must finally be emitted.
-        let stored = self.requested_target.take();
-        let target = stored.unwrap_or(self.position);
-        let landed;
-        let landed_provenance;
-        match self.reseek(target) {
+        // M10 §4: read, not taken. A reseek or install that fails leaves the
+        // intent for the next Space and for the checkpoint.
+        let target = self.pending.map_or(self.position, PendingResume::target);
+        let landed = match self.reseek(target) {
             Ok((actual, provenance)) => {
-                landed = actual;
-                landed_provenance = provenance;
                 self.position = adopt_preserved(target, actual);
-                self.position_provenance = provenance;
+                self.position_provenance = self.landing_provenance(actual, provenance);
+                actual
             }
             // A stop or a shutdown arrived mid-refinement. The preserved
             // position still stands; the interrupt is handled by the loop.
@@ -2823,29 +2835,59 @@ impl Worker {
                 self.fail(format!("cannot resume at {target:?}: {error}"));
                 return;
             }
-        }
+        };
         match self.reinstall(true) {
             Ok(()) => {
                 self.announce_playing();
-                // Only now is a stored target both validated and installed,
-                // which is what SeekCompleted asserts. Emitting at store time
-                // would claim a landing no decoder had confirmed.
-                if let Some(requested) = stored {
-                    let actual = landed;
-                    // §11: requested/actual seek.
-                    tracing::debug!(?requested, ?actual, "stored seek target confirmed");
-                    let session_rev = self.session_rev;
-                    self.emit(PlaybackEvent::SeekCompleted {
-                        session_rev,
-                        requested,
-                        actual,
-                        refinement_truncated: false,
-                        provenance: landed_provenance,
-                    });
-                }
+                self.complete_pending(landed);
             }
             Err(error) if is_cancelled(&error) => {}
             Err(error) => self.fail(format!("cannot start the audio device: {error}")),
+        }
+    }
+
+    /// M10 §4: a stored intent is cleared only once its landing is installed,
+    /// and only then reported: `SeekCompleted` for a seek, `RestartEstablished`
+    /// for a restart. Emitting at store time would claim a landing no decoder
+    /// had confirmed.
+    fn complete_pending(&mut self, actual: Duration) {
+        let session_rev = self.session_rev;
+        let provenance = self.position_provenance;
+        match self.pending.take() {
+            Some(PendingResume::Seek(requested)) => {
+                // §11: requested/actual seek.
+                tracing::debug!(?requested, ?actual, "stored seek target confirmed");
+                self.emit(PlaybackEvent::SeekCompleted {
+                    session_rev,
+                    requested,
+                    actual,
+                    refinement_truncated: false,
+                    provenance,
+                });
+            }
+            Some(PendingResume::Restart) => {
+                let position = self.position;
+                self.emit(PlaybackEvent::RestartEstablished {
+                    session_rev,
+                    position,
+                    provenance,
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// A restart that lands at zero is exact, whatever provenance a reseek
+    /// that had nothing to do carried forward (M10 §4).
+    fn landing_provenance(
+        &self,
+        actual: Duration,
+        provenance: PositionProvenance,
+    ) -> PositionProvenance {
+        if self.pending == Some(PendingResume::Restart) && actual == Duration::ZERO {
+            PositionProvenance::Established
+        } else {
+            provenance
         }
     }
 
@@ -3071,7 +3113,7 @@ impl Worker {
                         }
                     }
                 }
-                self.requested_target = Some(target);
+                self.pending = Some(PendingResume::Seek(target));
                 let session_rev = self.session_rev;
                 self.emit(PlaybackEvent::SeekTargetStored {
                     session_rev,
@@ -3125,7 +3167,7 @@ impl Worker {
                 let actual = outcome.actual;
                 self.position = actual;
                 self.position_provenance = provenance;
-                self.requested_target = None;
+                self.pending = None;
                 // §6: any demonstrated seek is proof, not only the trial
                 // `verify_seek_support` runs for a stopped one - an ordinary
                 // playing seek that lands is just as conclusive.
@@ -3249,7 +3291,7 @@ impl Worker {
             // that clears a sticky `Estimated` (§4.4's `RestartEstablished`
             // exit), not merely a position reset.
             self.position_provenance = PositionProvenance::Established;
-            self.requested_target = None;
+            self.pending = None;
         } else {
             // Validate first: the transport is only started once the decoder
             // has actually landed at zero.
@@ -3257,7 +3299,7 @@ impl Worker {
                 Ok((actual, provenance)) => {
                     self.position = actual;
                     self.position_provenance = provenance;
-                    self.requested_target = None;
+                    self.pending = None;
                 }
                 Err(error) if is_cancelled(&error) => return,
                 Err(error) => {
