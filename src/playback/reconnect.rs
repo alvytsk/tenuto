@@ -12,8 +12,7 @@ pub struct ReconnectPolicy {
     /// something fails. It never cuts an in-flight open short and never stops
     /// playback that is succeeding.
     pub budget: Duration,
-    /// Listening time that must advance after a reconnect before the outage
-    /// is over. Played audio only: bytes and decoded frames do not count.
+    /// Heard audio after a reconnect that ends the outage. Played audio only: bytes, decoded frames and seeks do not count.
     pub stable_after: Duration,
 }
 
@@ -38,8 +37,11 @@ pub struct Outage {
     started: Instant,
     failures: usize,
     next_attempt_at: Instant,
-    /// Listening time when the latest reconnect started playing.
-    playing_from: Option<Duration>,
+    /// Whether a reconnect is playing and its stability window has started.
+    window_open: bool,
+    /// Audio heard since the window opened (M10 §6). Seeks move the position
+    /// but not this, so they neither end nor extend the window.
+    heard: Duration,
 }
 
 impl Outage {
@@ -48,13 +50,15 @@ impl Outage {
             started: now,
             failures: 0,
             next_attempt_at: now,
-            playing_from: None,
+            window_open: false,
+            heard: Duration::ZERO,
         }
     }
 
     /// A playing connection or an attempt failed.
     pub fn failed(&mut self, now: Instant, policy: &ReconnectPolicy) -> Next {
-        self.playing_from = None;
+        self.window_open = false;
+        self.heard = Duration::ZERO;
         if now.duration_since(self.started) >= policy.budget {
             return Next::GiveUp;
         }
@@ -65,16 +69,25 @@ impl Outage {
     }
 
     pub fn due(&self, now: Instant) -> bool {
-        self.playing_from.is_none() && now >= self.next_attempt_at
+        !self.window_open && now >= self.next_attempt_at
     }
 
-    pub fn playing_from(&mut self, position: Duration) {
-        self.playing_from = Some(position);
+    /// A reconnect started playing: the stability window opens at zero.
+    pub fn playing_from(&mut self) {
+        self.window_open = true;
+        self.heard = Duration::ZERO;
     }
 
-    pub fn is_over(&self, position: Duration, policy: &ReconnectPolicy) -> bool {
-        self.playing_from
-            .is_some_and(|from| position.saturating_sub(from) >= policy.stable_after)
+    /// Credit audio heard since the last reading. Ignored until a reconnect
+    /// is playing, so ring drain during backoff never counts.
+    pub fn add_heard(&mut self, heard: Duration) {
+        if self.window_open {
+            self.heard = self.heard.saturating_add(heard);
+        }
+    }
+
+    pub fn is_over(&self, policy: &ReconnectPolicy) -> bool {
+        self.window_open && self.heard >= policy.stable_after
     }
 }
 
@@ -105,10 +118,7 @@ mod tests {
         let mut outage = Outage::begin(t0);
         assert!(matches!(outage.failed(t0, &policy()), Next::AttemptAt(_)));
         let late = t0 + Duration::from_secs(301);
-        assert!(
-            !outage.is_over(Duration::ZERO, &policy()),
-            "time alone ends nothing"
-        );
+        assert!(!outage.is_over(&policy()), "time alone ends nothing");
         assert_eq!(outage.failed(late, &policy()), Next::GiveUp);
     }
 
@@ -122,22 +132,53 @@ mod tests {
     }
 
     #[test]
-    fn short_connections_stay_one_outage_and_thirty_played_seconds_end_it() {
+    fn short_connections_stay_one_outage_and_thirty_heard_seconds_end_it() {
         let t0 = Instant::now();
         let mut outage = Outage::begin(t0);
         outage.failed(t0, &policy());
-        outage.playing_from(Duration::from_secs(100));
+        outage.playing_from();
         assert!(
             !outage.due(t0 + Duration::from_secs(60)),
             "no attempt while playing"
         );
-        assert!(!outage.is_over(Duration::from_secs(102), &policy()));
+        outage.add_heard(Duration::from_secs(2));
+        assert!(!outage.is_over(&policy()));
         // It closed after two seconds: same outage, next backoff step.
         assert_eq!(
             outage.failed(t0 + Duration::from_secs(3), &policy()),
             Next::AttemptAt(t0 + Duration::from_secs(5))
         );
-        outage.playing_from(Duration::from_secs(102));
-        assert!(outage.is_over(Duration::from_secs(132), &policy()));
+        outage.playing_from();
+        outage.add_heard(Duration::from_secs(29));
+        assert!(!outage.is_over(&policy()));
+        outage.add_heard(Duration::from_secs(1));
+        assert!(outage.is_over(&policy()));
+    }
+
+    #[test]
+    fn heard_time_counts_only_once_a_reconnect_is_playing() {
+        // M10 §6: the ring drains during backoff, and that audio is heard,
+        // but no reconnect has started playing yet, so it is not stability.
+        let t0 = Instant::now();
+        let mut outage = Outage::begin(t0);
+        outage.failed(t0, &policy());
+        outage.add_heard(Duration::from_secs(60));
+        assert!(!outage.is_over(&policy()));
+        outage.playing_from();
+        assert!(!outage.is_over(&policy()), "the window starts from zero");
+    }
+
+    #[test]
+    fn a_failure_closes_the_window_and_forgets_what_was_heard() {
+        let t0 = Instant::now();
+        let mut outage = Outage::begin(t0);
+        outage.failed(t0, &policy());
+        outage.playing_from();
+        outage.add_heard(Duration::from_secs(29));
+        outage.failed(t0 + Duration::from_secs(30), &policy());
+        outage.add_heard(Duration::from_secs(5));
+        outage.playing_from();
+        outage.add_heard(Duration::from_secs(1));
+        assert!(!outage.is_over(&policy()));
     }
 }

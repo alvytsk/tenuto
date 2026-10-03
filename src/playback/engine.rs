@@ -807,6 +807,9 @@ struct Worker {
     /// shutdown). `None` at every other moment - which is what lets each
     /// outage be judged against a budget of its own.
     outage: Option<Outage>,
+    /// Where heard-time accounting last read the current generation (M10
+    /// §6): its number and how far past its anchor the position was.
+    heard_mark: Option<(u16, Duration)>,
     /// A `Send + Sync` mirror of the device's current instant, so
     /// `WaitService` — reachable from inside a decoder read that already
     /// holds `&mut self.source` and so cannot see the rest of `Worker`, let
@@ -934,6 +937,7 @@ impl Worker {
             http,
             reconnect_policy,
             outage: None,
+            heard_mark: None,
             device_clock,
             backlog_empty,
             spectrum,
@@ -1854,6 +1858,25 @@ impl Worker {
         stop_or_shutdown(self.interrupt.load(Ordering::Acquire))
     }
 
+    /// M10 §6: credit the outage with what was heard since the last reading.
+    /// A new generation (a seek, a reopen, a device rebuild) starts again from
+    /// its own anchor, so a seek moves nothing here.
+    fn settle_heard(&mut self) {
+        let Some(anchor) = lock(&self.transport).as_ref().map(|core| core.anchor) else {
+            return;
+        };
+        let generation = self.generation;
+        let offset = self.position.saturating_sub(anchor);
+        let since = match self.heard_mark {
+            Some((marked, last)) if marked == generation => offset.saturating_sub(last),
+            _ => offset,
+        };
+        self.heard_mark = Some((generation, offset));
+        if let Some(outage) = self.outage.as_mut() {
+            outage.add_heard(since);
+        }
+    }
+
     /// Freeze the callback and read back the frames it really played.
     ///
     /// Returns `false` when the device did not answer, in which case the
@@ -1885,6 +1908,7 @@ impl Worker {
         match captured {
             Ok(position) => {
                 self.position = position;
+                self.settle_heard();
                 true
             }
             Err(_) => false,
@@ -2174,11 +2198,12 @@ impl Worker {
     fn service_reconnect(&mut self) {
         match self.state {
             PlaybackState::Playing => {
+                self.settle_heard();
                 let policy = *lock(&self.reconnect_policy);
                 if self
                     .outage
                     .as_ref()
-                    .is_some_and(|outage| outage.is_over(self.position, &policy))
+                    .is_some_and(|outage| outage.is_over(&policy))
                 {
                     self.outage = None;
                 }
@@ -2214,9 +2239,8 @@ impl Worker {
                 }
                 match self.fresh_open() {
                     Ok(()) => {
-                        let position = self.position;
                         if let Some(outage) = self.outage.as_mut() {
-                            outage.playing_from(position);
+                            outage.playing_from();
                         }
                     }
                     // The command that cancelled it decides what happens next.
