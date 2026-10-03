@@ -3480,9 +3480,21 @@ impl Worker {
         if self.media.is_some() && self.capabilities.continuity == Continuity::Finite {
             context.expected = Some(Continuity::Finite);
         }
-        let prepared = prepare(&location, &context)?;
+        let mut prepared = prepare(&location, &context)?;
         if self.source_interrupt.is_retired() {
             return Err(PlaybackError::Cancelled);
+        }
+        // M10: a reopen of the same finite location reads the same container,
+        // so a demuxer this session already proved seekable stays proven.
+        // Without this every reopen falls back to `Unknown`: an episode would
+        // recover from its first outage but never from a second, and a
+        // stopped seek would spend a trial seek re-proving what it knew.
+        if self.capabilities.seek == SeekSupport::Native
+            && prepared.capabilities.continuity == Continuity::Finite
+            && prepared.capabilities.seek == SeekSupport::Unknown
+        {
+            prepared.source.note_demuxer_proven();
+            prepared.capabilities = prepared.source.capabilities();
         }
         // MINOR 6 (fix round 1): a stop-then-play cycle reopens against the
         // same location and answers with the same capabilities every time;

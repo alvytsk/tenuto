@@ -23,6 +23,7 @@
 
 pub mod browse;
 pub mod server;
+pub mod wav;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
