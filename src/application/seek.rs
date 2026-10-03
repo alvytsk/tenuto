@@ -87,6 +87,11 @@ pub struct KeyRouter {
     /// has to keep showing the target across that window too - and a further
     /// press has to accumulate from it rather than from the mirror.
     submitted: Option<Duration>,
+    /// A target the worker stored rather than ran (a seek while stopped or
+    /// recovering, M10 §7). Held until a landing resolves it, so a later
+    /// burst accumulates from it, not from a mirror that progress has put
+    /// back at the heard position.
+    stored: Option<Duration>,
 }
 
 impl KeyRouter {
@@ -117,7 +122,7 @@ impl KeyRouter {
     /// The target the display is currently showing, if it is showing one
     /// rather than the worker's own position.
     fn displayed_target(&self) -> Option<Duration> {
-        self.burst.target().or(self.submitted)
+        self.burst.target().or(self.submitted).or(self.stored)
     }
 
     /// The target to submit, marking the wait for its landing as begun.
@@ -128,8 +133,8 @@ impl KeyRouter {
     }
 
     /// Lets the router see each drained event, so it can tell when the seek
-    /// it is waiting on has settled - landed, been refused, or been
-    /// overtaken.
+    /// it is waiting on has settled: landed, been refused, been overtaken, or
+    /// been stored to land later.
     ///
     /// A superseding load — `Loaded`, `LoadCancelled` or `Failed` — cancels
     /// any unsubmitted burst outright rather than merely releasing the
@@ -137,24 +142,21 @@ impl KeyRouter {
     /// left is not a seek this session should ever go on to submit once a
     /// different (or no) track is current.
     pub fn observe(&mut self, event: &PlaybackEvent) {
-        if matches!(
-            event,
+        match event {
+            // Stored, not run: hold the worker's own (clamped) target.
+            PlaybackEvent::SeekTargetStored { target, .. } => {
+                self.submitted = None;
+                self.stored = Some(*target);
+            }
             PlaybackEvent::SeekCompleted { .. }
-                | PlaybackEvent::SeekRejected { .. }
-                | PlaybackEvent::SeekCancelled { .. }
-                | PlaybackEvent::SeekTargetStored { .. }
-                | PlaybackEvent::RestartEstablished { .. }
-                | PlaybackEvent::EndOfTrack { .. }
-        ) {
-            self.release();
-        }
-        if matches!(
-            event,
+            | PlaybackEvent::SeekRejected { .. }
+            | PlaybackEvent::SeekCancelled { .. }
+            | PlaybackEvent::RestartEstablished { .. }
+            | PlaybackEvent::EndOfTrack { .. } => self.release(),
             PlaybackEvent::Loaded { .. }
-                | PlaybackEvent::LoadCancelled { .. }
-                | PlaybackEvent::Failed { .. }
-        ) {
-            self.cancel();
+            | PlaybackEvent::LoadCancelled { .. }
+            | PlaybackEvent::Failed { .. } => self.cancel(),
+            _ => {}
         }
     }
 
@@ -167,6 +169,15 @@ impl KeyRouter {
 
     /// Hands the display back to the worker's own position.
     fn release(&mut self) {
+        self.submitted = None;
+        self.stored = None;
+    }
+
+    /// Drops an unsubmitted burst and the wait for a submitted one, keeping a
+    /// stored target: the worker keeps its `pending` across a stop, and a
+    /// restart replaces it with a `SeekTargetStored` of its own.
+    fn drop_burst(&mut self) {
+        self.burst.cancel();
         self.submitted = None;
     }
 
@@ -195,7 +206,7 @@ impl KeyRouter {
             // accumulated relative seek outright. Submitting the burst first
             // would spend a fetch on a target the very next command discards.
             PlaybackCommand::Restart | PlaybackCommand::Stop | PlaybackCommand::Shutdown => {
-                self.cancel();
+                self.drop_burst();
             }
             // Volume and pause/play move nothing, so they coexist with an open
             // burst: routing them must not cost the listener their scrub.
@@ -221,7 +232,7 @@ impl KeyRouter {
     /// Whether the display is currently showing an optimistic target rather
     /// than the worker's own position.
     pub fn is_seeking(&self) -> bool {
-        self.burst.is_open() || self.submitted.is_some()
+        self.burst.is_open() || self.submitted.is_some() || self.stored.is_some()
     }
 
     pub(crate) fn poll_budget(&self, now: Instant, cap: Duration) -> Duration {
@@ -676,6 +687,102 @@ mod tests {
         assert_eq!(
             router.poll_budget(now + SEEK_COALESCE_WINDOW, cap),
             Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn a_stored_target_holds_the_display_and_seeds_the_next_burst() {
+        // M10 §7: a seek while stopped or recovering is stored, not run. The
+        // progress that follows reports the heard position, which the next
+        // burst must not start from.
+        let now = Instant::now();
+        let mut router = KeyRouter::new();
+        router.press(Duration::from_secs(100), SEEK_STEP_SECS, now, None);
+        assert_eq!(
+            router.take_due(now + SEEK_COALESCE_WINDOW),
+            Some(Duration::from_secs(110))
+        );
+        router.observe(&PlaybackEvent::SeekTargetStored {
+            session_rev: 0,
+            target: Duration::from_secs(110),
+        });
+        assert!(
+            router.is_seeking(),
+            "a stored target must keep the display on it"
+        );
+        let later = now + Duration::from_secs(5);
+        assert_eq!(
+            router.press(Duration::from_secs(100), SEEK_STEP_SECS, later, None),
+            Duration::from_secs(120),
+            "the burst started from the mirror instead of the stored target"
+        );
+    }
+
+    #[test]
+    fn the_stored_target_is_the_workers_clamped_one() {
+        let now = Instant::now();
+        let mut router = KeyRouter::new();
+        router.press(Duration::from_secs(100), SEEK_STEP_SECS, now, None);
+        router.take_due(now + SEEK_COALESCE_WINDOW);
+        router.observe(&PlaybackEvent::SeekTargetStored {
+            session_rev: 0,
+            target: Duration::from_secs(105),
+        });
+        assert_eq!(
+            router.press(Duration::from_secs(100), -SEEK_STEP_SECS, now, None),
+            Duration::from_secs(95)
+        );
+    }
+
+    #[test]
+    fn the_landing_releases_a_stored_target() {
+        let mut router = KeyRouter::new();
+        router.observe(&PlaybackEvent::SeekTargetStored {
+            session_rev: 0,
+            target: Duration::from_secs(110),
+        });
+        router.observe(&PlaybackEvent::SeekCompleted {
+            session_rev: 0,
+            requested: Duration::from_secs(110),
+            actual: Duration::from_secs(110),
+            refinement_truncated: false,
+            provenance: PositionProvenance::Established,
+        });
+        assert!(!router.is_seeking());
+    }
+
+    #[test]
+    fn a_restart_landing_releases_a_stored_target() {
+        let mut router = KeyRouter::new();
+        router.observe(&PlaybackEvent::SeekTargetStored {
+            session_rev: 0,
+            target: Duration::ZERO,
+        });
+        router.observe(&PlaybackEvent::RestartEstablished {
+            session_rev: 0,
+            position: Duration::ZERO,
+            provenance: PositionProvenance::Established,
+        });
+        assert!(!router.is_seeking());
+    }
+
+    #[test]
+    fn a_stop_drops_the_burst_but_keeps_the_stored_target() {
+        // The worker keeps `pending` across a stop, so the next burst must
+        // still accumulate on it.
+        let now = Instant::now();
+        let mut router = KeyRouter::new();
+        router.observe(&PlaybackEvent::SeekTargetStored {
+            session_rev: 0,
+            target: Duration::from_secs(110),
+        });
+        router.press(Duration::from_secs(100), SEEK_STEP_SECS, now, None);
+        router.drop_burst();
+        assert_eq!(router.take_due(now + SEEK_COALESCE_WINDOW), None);
+        assert!(router.is_seeking());
+        assert_eq!(
+            router.press(Duration::from_secs(100), SEEK_STEP_SECS, now, None),
+            Duration::from_secs(120)
         );
     }
 }

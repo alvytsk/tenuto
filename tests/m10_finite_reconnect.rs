@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use support::server::{Script, TestServer};
 use support::wav::{RATE, frame_index_wav, frame_indices};
 use support::{TestEngine, UNHEARD_FRAMES};
+use tenuto::app::KeyRouter;
 use tenuto::http::limits::Limits;
 use tenuto::media::capabilities::SeekSupport;
 use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
@@ -1159,6 +1160,38 @@ fn a_backward_seek_does_not_stop_heard_playback_ending_the_outage() {
     assert_eq!(server.requests().len(), AFTER_LANDING + 1);
     engine.play_until_event(state(PlaybackState::Playing));
     assert_eq!(engine.count_events(failed), 0);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn arrow_bursts_during_recovery_accumulate_across_progress() {
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    let mut router = KeyRouter::new();
+    // Past the router's 250 ms quiet window.
+    let quiet = Duration::from_millis(300);
+    let mut targets = Vec::new();
+    for _ in 0..2 {
+        let now = Instant::now();
+        let mirror = engine.handle().progress().position;
+        router.route(
+            &engine.handle(),
+            true,
+            mirror,
+            None,
+            now,
+            PlaybackCommand::SeekBy(1),
+        );
+        router.flush(&engine.handle(), now + quiet);
+        let event = engine.await_event(stored);
+        router.observe(&event);
+        targets.push(stored_target(event));
+        // Progress ticks: the ring drains during backoff, so the mirror moves.
+        engine.let_time_pass(Duration::from_millis(100));
+    }
+    assert_eq!(targets[1], targets[0] + Duration::from_secs(1));
     engine.finish();
     server.shutdown();
 }
