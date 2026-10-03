@@ -1144,7 +1144,12 @@ fn a_backward_seek_does_not_stop_heard_playback_ending_the_outage() {
     // The seek's response is cut 1.5 s in: about 1.2 s heard after the
     // landing, past stable_after.
     let server = dropped_after_landing(BYTES_PER_SEC * 3 / 2);
-    let mut engine = start(&server, one_shot());
+    // A long backoff, so the exact request count below is read inside it.
+    let policy = ReconnectPolicy {
+        backoff: [Duration::from_millis(300); 5],
+        ..one_shot()
+    };
+    let mut engine = start(&server, policy);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.play_until_event(state(PlaybackState::Playing));
     assert_eq!(engine.handle().submit_seek(RESUME), Admission::Accepted);
