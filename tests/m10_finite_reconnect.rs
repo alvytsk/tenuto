@@ -4,11 +4,12 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use support::server::{Script, TestServer};
 use support::wav::{RATE, frame_index_wav, frame_indices};
 use support::{TestEngine, UNHEARD_FRAMES};
+use tenuto::http::limits::Limits;
 use tenuto::media::capabilities::SeekSupport;
 use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::PlaybackEvent;
@@ -75,12 +76,22 @@ fn stored_target(event: PlaybackEvent) -> Duration {
     target
 }
 
-/// Load at [`RESUME`] and play: an open costs [`OPEN`] requests and the
-/// resume seek one more.
 fn start(server: &TestServer, policy: ReconnectPolicy) -> TestEngine {
+    start_with(server, policy, None)
+}
+
+/// Load at [`RESUME`] and play: an open costs [`OPEN`] requests and the
+/// resume seek one more. `limits` replaces the harness's brisk ones.
+fn start_with(server: &TestServer, policy: ReconnectPolicy, limits: Option<Limits>) -> TestEngine {
     let mut engine = TestEngine::start_idle();
     engine.handle().set_reconnect_policy(policy);
-    engine.load_remote_with_resume(&server.url("/episode.wav"), ResumeIntent::StartAt(RESUME));
+    let url = server.url("/episode.wav");
+    match limits {
+        Some(limits) => {
+            engine.load_remote_with_resume_and_limits(&url, ResumeIntent::StartAt(RESUME), limits);
+        }
+        None => engine.load_remote_with_resume(&url, ResumeIntent::StartAt(RESUME)),
+    }
     assert_eq!(
         engine.await_loaded().capabilities.seek,
         SeekSupport::Native,
@@ -592,7 +603,7 @@ fn seek_by_presses_during_recovery_accumulate() {
             RESUME + 2 * second,
             RESUME + 3 * second,
             // Clamped to the duration cached on entry: the decoder is gone.
-            Duration::from_secs(u64::from(FRAMES / RATE)),
+            DURATION,
         ]
     );
     assert_eq!(server.requests().len(), RESUMED);
@@ -749,5 +760,324 @@ fn a_seek_near_the_end_during_recovery_plays_out_and_ends() {
     assert_eq!(engine.count_events(failed), 0);
     assert_eq!(server.requests().len(), ATTEMPT + OPEN);
     engine.finish();
+    server.shutdown();
+}
+
+/// Deadlines far past the harness's 20 s patience: what these tests prove is
+/// a command waking a blocked attempt, never a timeout expiring under it.
+fn patient() -> Limits {
+    Limits {
+        headers: Duration::from_secs(60),
+        stall: Duration::from_secs(60),
+        open: Duration::from_secs(60),
+        ..Limits::brisk()
+    }
+}
+
+/// The episode's length, which a seek in a recovery-pause is clamped to.
+const DURATION: Duration = Duration::from_secs((FRAMES / RATE) as u64);
+
+#[test]
+fn pausing_during_recovery_keeps_the_target_and_space_resumes_at_it() {
+    // 1..=RESUMED: dropped(). The seek, the pause and the stored target cost
+    // nothing. Space reopens (ATTEMPT..ATTEMPT+OPEN-1) and reseeks to the
+    // target (ATTEMPT+OPEN).
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    engine.await_event(stored);
+
+    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    engine.await_event(state(PlaybackState::Paused));
+    assert!(
+        !engine.handle().source_interrupt().is_frozen(),
+        "a recovery pause must leave no freeze level standing"
+    );
+    assert_eq!(server.requests().len(), RESUMED);
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_seek_in_a_recovery_pause_is_stored_offline_and_space_lands_at_it() {
+    // Decision 6. 1..=RESUMED: dropped(). The pause leaves no source and no
+    // transport, so both seeks are stored with no request. Space reopens
+    // (ATTEMPT..ATTEMPT+OPEN-1) and reseeks to the target (ATTEMPT+OPEN).
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    engine.await_event(state(PlaybackState::Paused));
+
+    assert_eq!(
+        engine.handle().submit_seek(Duration::from_secs(10)),
+        Admission::Accepted
+    );
+    assert_eq!(
+        stored_target(engine.await_event(stored)),
+        DURATION,
+        "clamped to the duration cached when the connection was lost"
+    );
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(stored_target(engine.await_event(stored)), target);
+    assert_eq!(
+        server.requests().len(),
+        RESUMED,
+        "a seek in a recovery pause touched the network"
+    );
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn stopping_during_recovery_keeps_the_target_and_space_resumes_at_it() {
+    // 1..=RESUMED: dropped(). The seek and the stop cost nothing. Space
+    // reopens (ATTEMPT..ATTEMPT+OPEN-1) and reseeks (ATTEMPT+OPEN).
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    engine.await_event(stored);
+    engine.handle().submit_stop();
+    engine.await_event(state(PlaybackState::Stopped));
+    assert_eq!(server.requests().len(), RESUMED);
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_restart_stored_during_recovery_survives_pause_and_space() {
+    // 1..=RESUMED: dropped(). The restart and the pause cost nothing. Space
+    // reopens (ATTEMPT..ATTEMPT+OPEN-1) and lands at zero with no reseek.
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.send(PlaybackCommand::Restart);
+    engine.await_event(stored);
+    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    engine.await_event(state(PlaybackState::Paused));
+    assert_eq!(server.requests().len(), RESUMED);
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(engine.await_restart_established(), Duration::ZERO);
+    assert_eq!(server.requests().len(), RESUMED + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+/// Pauses while the first attempt is blocked at the server on the request
+/// `stalled`. Under `patient()` limits only the pause can end the wait inside
+/// the harness's patience. Space then reopens (OPEN) and reseeks (1).
+fn pause_cancels_a_blocked_attempt(stalled: usize, fault: Script) {
+    let server = server(&[(PLAYING, cut()), (RESUMED, short()), (stalled, fault)]);
+    let mut engine = start_with(&server, quick(), Some(patient()));
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert!(
+        server.wait_until_stalled(PATIENCE),
+        "the attempt never reached its stall"
+    );
+    assert_eq!(server.requests().len(), stalled);
+    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    engine.await_event(state(PlaybackState::Paused));
+    assert!(
+        !engine.handle().source_interrupt().is_frozen(),
+        "a recovery pause must leave no freeze level standing"
+    );
+    // The outage is gone: no attempt can run while these counts are taken.
+    assert_eq!(engine.count_events(failed), 0);
+    assert_eq!(
+        engine.count_events(state(PlaybackState::Paused)),
+        0,
+        "Paused was announced twice"
+    );
+    server.release();
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(server.requests().len(), stalled + OPEN + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn pause_cancels_a_blocked_reopen() {
+    // The attempt's probe (ATTEMPT) never gets its headers.
+    pause_cancels_a_blocked_attempt(ATTEMPT, episode().stall_headers());
+}
+
+#[test]
+fn pause_cancels_a_blocked_reseek() {
+    // The attempt reopens (ATTEMPT..ATTEMPT+OPEN-1); its reseek never gets
+    // its headers.
+    pause_cancels_a_blocked_attempt(ATTEMPT + OPEN, episode().stall_headers());
+}
+
+#[test]
+fn pause_cancels_a_blocked_priming_read() {
+    // The reseek needs a few KiB; priming wants the 300 ms ring (about
+    // 56 KiB), so the stall at 16 KiB lands inside priming.
+    pause_cancels_a_blocked_attempt(ATTEMPT + OPEN, episode().stall_body_after(16 * 1024));
+}
+
+#[test]
+fn stop_cancels_a_blocked_priming_read_and_space_resumes() {
+    // As `pause_cancels_a_blocked_priming_read`, with a stop.
+    let reseek = ATTEMPT + OPEN;
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (reseek, episode().stall_body_after(16 * 1024)),
+    ]);
+    let mut engine = start_with(&server, quick(), Some(patient()));
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert!(server.wait_until_stalled(PATIENCE));
+    assert_eq!(server.requests().len(), reseek);
+    engine.handle().submit_stop();
+    engine.await_event(state(PlaybackState::Stopped));
+    assert_eq!(engine.count_events(failed), 0);
+    server.release();
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(server.requests().len(), reseek + OPEN + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+/// Waits until the worker is inside a blocked source read: only the wait
+/// hook publishes `buffering`.
+fn await_blocked_read(engine: &mut TestEngine) {
+    let deadline = Instant::now() + PATIENCE;
+    while !engine.progress().buffering {
+        assert!(
+            Instant::now() < deadline,
+            "the worker never blocked in a read"
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn a_pause_raced_by_a_dropped_connection_lands_paused_not_reconnecting() {
+    // §3. PLAYING stalls a second of audio in and ends one byte after its
+    // release; RESUMED, the transport's re-request of the rest, ends short,
+    // so the drop reaches a worker blocked in that read with the pause
+    // submitted but not yet dispatched. Both seeks in the recovery-pause are
+    // stored with no request. Space reopens (ATTEMPT..ATTEMPT+OPEN-1) and
+    // reseeks (ATTEMPT+OPEN).
+    let server = server(&[
+        (
+            PLAYING,
+            episode()
+                .stall_body_after(BYTES_PER_SEC)
+                .truncate_body_after(BYTES_PER_SEC + 1),
+        ),
+        (RESUMED, short()),
+    ]);
+    let mut engine = start_with(&server, quick(), Some(patient()));
+    // Drain what the stalled body supplied, then demand far more without a
+    // round trip a blocked worker could not answer (m7_cancellation's
+    // StalledBody arrangement).
+    engine.play_for(RESUME + Duration::from_millis(200));
+    engine.let_time_pass_while_unresponsive(Duration::from_millis(1500));
+    assert!(server.wait_until_stalled(PATIENCE));
+    await_blocked_read(&mut engine);
+    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    // The hook announces this from inside the blocked read.
+    engine.await_event(state(PlaybackState::Paused));
+    server.release();
+    // A round trip queued behind the pause: the worker answers it only once
+    // the drop has reached the read it is blocked in. A seek sent before it
+    // would retire that read and race the drop.
+    engine.position();
+
+    // Seeks are stored only offline, so the stored clamp also proves the
+    // drop landed in a recovery-pause, at the duration it cached (Decision 6).
+    assert_eq!(
+        engine.handle().submit_seek(Duration::from_secs(10)),
+        Admission::Accepted
+    );
+    assert_eq!(stored_target(engine.await_event(stored)), DURATION);
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(stored_target(engine.await_event(stored)), target);
+    assert_eq!(server.requests().len(), RESUMED);
+    assert_eq!(engine.count_events(state(PlaybackState::Reconnecting)), 0);
+    assert!(!engine.handle().source_interrupt().is_frozen());
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(
+        server.requests().len(),
+        ATTEMPT + OPEN,
+        "Space must reopen: a recovery pause holds no connection"
+    );
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_new_load_during_recovery_drops_the_outage_and_the_target() {
+    // 1..=RESUMED: dropped(). The seek is stored with no request. The new
+    // load opens (ATTEMPT..ATTEMPT+OPEN-1) and resume-seeks (ATTEMPT+OPEN),
+    // which plays.
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert_eq!(
+        engine.handle().submit_seek(Duration::from_millis(2500)),
+        Admission::Accepted
+    );
+    engine.await_event(stored);
+    engine.load_remote_with_resume(&server.url("/episode.wav"), ResumeIntent::StartAt(RESUME));
+    engine.send(PlaybackCommand::Play);
+    engine.await_event(state(PlaybackState::Playing));
+    engine.play_for(RESUME + Duration::from_millis(200));
+    assert_eq!(engine.count_events(seek_completed), 0);
+    assert!(engine.position() < Duration::from_millis(2500));
+    assert_eq!(engine.count_events(state(PlaybackState::Reconnecting)), 0);
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn shutdown_during_a_blocked_attempt_joins_promptly() {
+    // 1..=RESUMED: dropped(). The attempt's probe (ATTEMPT) never gets its
+    // headers.
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (ATTEMPT, episode().stall_headers()),
+    ]);
+    let mut engine = start_with(&server, quick(), Some(patient()));
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert!(server.wait_until_stalled(PATIENCE));
+    assert_eq!(server.requests().len(), ATTEMPT);
+    engine.handle().submit_shutdown();
+    assert!(
+        engine.join_within(Duration::from_secs(5)),
+        "shutdown waited on a blocked attempt"
+    );
+    server.release();
     server.shutdown();
 }

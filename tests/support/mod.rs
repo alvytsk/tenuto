@@ -453,6 +453,20 @@ impl TestEngine {
         request
     }
 
+    /// `load_remote_with_limits` under a caller-decided `ResumeIntent`: M10's
+    /// cancellation tests need both a proven (resumed) episode and deadlines
+    /// only a command can beat.
+    pub fn load_remote_with_resume_and_limits(
+        &mut self,
+        url: &str,
+        resume: ResumeIntent,
+        limits: Limits,
+    ) -> LoadRequestId {
+        let request = self.next_request();
+        self.load_remote_inner(request, url, resume, Some(limits), true);
+        request
+    }
+
     /// `load_remote`, but for a load this test expects to fail rather than
     /// reach `Paused` (§12's closing paragraph: a sequential-only source
     /// opening a tail-`moov` file). The `HttpService` still has to be

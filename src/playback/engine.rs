@@ -184,6 +184,9 @@ impl EventStream {
 pub(crate) struct SourceTraits {
     pub indefinite: AtomicBool,
     pub seek_unsupported: AtomicBool,
+    /// A finite recovery is in progress (M10 §7): `submit_pause` must retire
+    /// the attempt's read, not freeze it, as for a station.
+    pub recovering: AtomicBool,
 }
 
 pub struct EngineHandle {
@@ -452,12 +455,16 @@ impl EngineHandle {
     /// the stall timer, so a stalled live read that is frozen never wakes at
     /// all. Aimed at the generation observed *before* the send, exactly like
     /// `submit_seek` — a superseded generation means the worker is no longer
-    /// blocked in anything this had to wake.
+    /// blocked in anything this had to wake. A finite recovery is retired too
+    /// (M10 §7): a frozen reopen or priming read would also never wake, and a
+    /// parked half-built transport would announce `Paused` mid-attempt.
     pub fn submit_pause(&self) -> Admission {
         let generation = self.source_interrupt.generation();
         let admission = self.try_send(PlaybackCommand::Pause);
         if admission == Admission::Accepted {
-            if self.traits.indefinite.load(Ordering::Acquire) {
+            if self.traits.indefinite.load(Ordering::Acquire)
+                || self.traits.recovering.load(Ordering::Acquire)
+            {
                 self.source_interrupt.retire_generation(generation);
             } else {
                 self.source_interrupt.freeze();
@@ -1238,6 +1245,10 @@ impl Worker {
     }
 
     fn set_state(&mut self, state: PlaybackState) {
+        // M10 §7: every exit from Reconnecting ends a finite recovery.
+        if state != PlaybackState::Reconnecting {
+            self.traits.recovering.store(false, Ordering::Release);
+        }
         if self.state == state {
             return;
         }
@@ -2311,6 +2322,13 @@ impl Worker {
             .source
             .as_ref()
             .and_then(|source| established_duration(source.metadata()));
+        // M10 §3: a pause submitted but not yet dispatched raised the freeze
+        // level, and the hook may already have announced `Paused`. The
+        // listener asked to pause, so land there rather than reconnecting.
+        if self.source_interrupt.is_frozen() {
+            self.pause_closing();
+            return;
+        }
         self.enter_reconnecting(failure);
     }
 
@@ -2331,6 +2349,7 @@ impl Worker {
                 } else {
                     let position = self.position;
                     tracing::info!(reason = %failure, ?position, "connection lost; reconnecting");
+                    self.traits.recovering.store(true, Ordering::Release);
                 }
                 // The output transport stays up so the ring plays out; only
                 // the source goes.
@@ -3051,10 +3070,14 @@ impl Worker {
     /// keeps its audio, the callback keeps counting from where it stopped, and
     /// the timeline keeps its floor, so resuming is a single `release`.
     fn pause(&mut self) {
-        // First, ahead of the `Playing`-only guard below: a `Reconnecting`
-        // station is pausable too, and a station never parks — it closes.
-        if self.is_indefinite() {
-            self.pause_indefinite();
+        // First, ahead of the `Playing`-only guard below: a station never
+        // parks, and neither does a finite session in recovery or one whose
+        // recovery-time pause already retired its source (M10 §7).
+        if self.is_indefinite()
+            || self.state == PlaybackState::Reconnecting
+            || self.lost_source_while_playing()
+        {
+            self.pause_closing();
             return;
         }
         if self.state != PlaybackState::Playing {
@@ -3116,12 +3139,22 @@ impl Worker {
         self.set_state(PlaybackState::Paused);
     }
 
-    /// M7 §6.2. Both pause routes end here: the dispatched `Pause`, and the
-    /// one where the hook parked first and already announced `Paused`.
-    ///
-    /// A station holds no connection while paused. Listening time survives in
-    /// `self.position`, and the next Play rejoins the live edge from there.
-    fn pause_indefinite(&mut self) {
+    /// M10 §7's race: `submit_pause` read `recovering` just before the
+    /// attempt committed, so its retirement landed on the generation that is
+    /// now playing. Parking a transport with no source behind it would strand
+    /// the resume; close instead, and let Space reopen.
+    fn lost_source_while_playing(&self) -> bool {
+        self.state == PlaybackState::Playing
+            && self.source_is_remote()
+            && (self.source.is_none() || self.source_interrupt.is_retired())
+    }
+
+    /// M7 §6.2, M10 §7. A pause that keeps no connection: a station's, and a
+    /// finite session's during recovery. Both pause routes end here, the
+    /// dispatched `Pause` and the one where the hook parked first and
+    /// already announced `Paused`. Position and `pending` survive; the next
+    /// Play runs `restore()` (or `fresh_open` for a station).
+    fn pause_closing(&mut self) {
         if !matches!(
             self.state,
             PlaybackState::Playing | PlaybackState::Reconnecting
@@ -3142,6 +3175,7 @@ impl Worker {
         self.source_interrupt.retire();
         self.retire_remote_source();
         self.session_rev += 1;
+        self.traits.recovering.store(false, Ordering::Release);
         if announced {
             self.state = PlaybackState::Paused;
         } else {
