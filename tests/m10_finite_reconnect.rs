@@ -503,3 +503,250 @@ fn a_device_that_will_not_open_fails_the_attempt_at_once() {
     engine.finish();
     server.shutdown();
 }
+
+/// A backoff long enough that no attempt runs while a test acts.
+fn parked() -> ReconnectPolicy {
+    ReconnectPolicy {
+        backoff: [Duration::from_secs(30); 5],
+        budget: Duration::from_secs(60),
+        stable_after: Duration::from_secs(10),
+    }
+}
+
+/// Splits a render log after its first discontinuity: before and after.
+fn split_at_gap(indices: &[u32]) -> (&[u32], &[u32]) {
+    match indices.windows(2).position(|pair| pair[1] != pair[0] + 1) {
+        Some(at) => indices.split_at(at + 1),
+        None => (indices, &[]),
+    }
+}
+
+fn seek_completed(event: &PlaybackEvent) -> bool {
+    matches!(event, PlaybackEvent::SeekCompleted { .. })
+}
+
+fn restart_established(event: &PlaybackEvent) -> bool {
+    matches!(event, PlaybackEvent::RestartEstablished { .. })
+}
+
+/// 1..=RESUMED: start(), the cut and the short re-request; the drop reaches
+/// the engine there.
+fn dropped() -> TestServer {
+    server(&[(PLAYING, cut()), (RESUMED, short())])
+}
+
+#[test]
+fn a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it() {
+    // 1..=RESUMED: dropped(). The seek is stored with no request. The attempt
+    // reopens (ATTEMPT..ATTEMPT+OPEN-1) and reseeks to the target
+    // (ATTEMPT+OPEN), which plays on.
+    let server = dropped();
+    let mut engine = start(&server, frozen_attempts());
+    engine.clear_rendered();
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert_eq!(server.requests().len(), RESUMED);
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(stored_target(engine.await_event(stored)), target);
+    assert_eq!(
+        server.requests().len(),
+        RESUMED,
+        "a seek during recovery touched the network"
+    );
+    assert_eq!(
+        engine.count_events(seek_completed),
+        0,
+        "completed before any attempt"
+    );
+
+    engine.await_event(state(PlaybackState::Playing));
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    // §5 step 5: progress counts from the landing, not from the capture. The
+    // clock is frozen, so nothing has been heard since.
+    assert_eq!(engine.position(), target);
+    engine.play_for(target + Duration::from_millis(300));
+    let indices = frame_indices(&engine.rendered());
+    let (_, after) = split_at_gap(&indices);
+    assert_eq!(after.first().copied(), Some(frame_at(target)));
+    assert_consecutive(after);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn seek_by_presses_during_recovery_accumulate() {
+    // 1..=RESUMED: dropped(). Nothing after it: every press is stored.
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert_eq!(engine.handle().submit_seek(RESUME), Admission::Accepted);
+    engine.await_event(stored);
+    let mut targets = Vec::new();
+    for _ in 0..4 {
+        engine.send(PlaybackCommand::SeekBy(1));
+        targets.push(stored_target(engine.await_event(stored)));
+    }
+    let second = Duration::from_secs(1);
+    assert_eq!(
+        targets,
+        [
+            RESUME + second,
+            RESUME + 2 * second,
+            RESUME + 3 * second,
+            // Clamped to the duration cached on entry: the decoder is gone.
+            Duration::from_secs(u64::from(FRAMES / RATE)),
+        ]
+    );
+    assert_eq!(server.requests().len(), RESUMED);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_failed_attempt_keeps_the_stored_target_for_the_next() {
+    // 1..=RESUMED: dropped(). ATTEMPT: the first attempt's probe is refused.
+    // ATTEMPT+1..ATTEMPT+OPEN: the second attempt reopens; ATTEMPT+OPEN+1:
+    // its reseek to the target, which lands.
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (ATTEMPT, Script::serving(Vec::new()).status(503)),
+    ]);
+    let mut backoff = [Duration::from_millis(20); 5];
+    backoff[0] = Duration::from_millis(400);
+    let mut engine = start(&server, ReconnectPolicy { backoff, ..quick() });
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    engine.await_event(stored);
+    engine.await_event(state(PlaybackState::Playing));
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_restart_during_recovery_lands_at_zero_as_a_restart() {
+    // 1..=RESUMED: dropped(). ATTEMPT: the first attempt's probe is refused.
+    // ATTEMPT+1..ATTEMPT+OPEN: the second attempt reopens, and lands with no
+    // reseek: a reopened decoder already sits at zero.
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (ATTEMPT, Script::serving(Vec::new()).status(503)),
+    ]);
+    let mut backoff = [Duration::from_millis(20); 5];
+    backoff[0] = Duration::from_millis(400);
+    let mut engine = start(&server, ReconnectPolicy { backoff, ..quick() });
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.send(PlaybackCommand::Restart);
+    assert_eq!(stored_target(engine.await_event(stored)), Duration::ZERO);
+    assert_eq!(engine.count_events(restart_established), 0);
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(engine.await_restart_established(), Duration::ZERO);
+    assert_eq!(engine.count_events(seek_completed), 0);
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_seek_after_a_restart_supersedes_it() {
+    // 1..=RESUMED: dropped(). The attempt reopens (ATTEMPT..) and reseeks
+    // to the seek's target (ATTEMPT+OPEN).
+    let server = dropped();
+    let mut engine = start(&server, frozen_attempts());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.send(PlaybackCommand::Restart);
+    engine.await_event(stored);
+    let target = Duration::from_secs(1);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(stored_target(engine.await_event(stored)), target);
+    engine.await_event(state(PlaybackState::Playing));
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    assert_eq!(engine.count_events(restart_established), 0);
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_restart_stored_during_recovery_survives_stop_and_space() {
+    // 1..=RESUMED: dropped(). The restart is stored and the stop costs
+    // nothing. Space reopens (ATTEMPT..ATTEMPT+OPEN-1) and lands at zero
+    // with no reseek.
+    let server = dropped();
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.send(PlaybackCommand::Restart);
+    engine.await_event(stored);
+    engine.handle().submit_stop();
+    engine.await_event(state(PlaybackState::Stopped));
+    assert_eq!(server.requests().len(), RESUMED);
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(engine.await_restart_established(), Duration::ZERO);
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(server.requests().len(), RESUMED + OPEN);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_priming_failure_on_space_fails_honestly_and_keeps_the_target() {
+    // 1..=RESUMED: dropped(). The seek is stored and the stop costs nothing.
+    // ATTEMPT..: the first Space reopens (OPEN) and reseeks, and that range
+    // response ends 24 KiB in, inside the priming fill. reseek+1..: the
+    // second Space reopens (OPEN) and reseeks (1), and lands.
+    let reseek = ATTEMPT + OPEN;
+    let server = server(&[
+        (PLAYING, cut()),
+        (RESUMED, short()),
+        (reseek, episode().truncate_body_after(24 * 1024)),
+    ]);
+    let mut engine = start(&server, parked());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    let target = Duration::from_millis(2500);
+    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    engine.await_event(stored);
+    engine.handle().submit_stop();
+    engine.await_event(state(PlaybackState::Stopped));
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    engine.await_event(failed);
+    assert_eq!(engine.count_events(state(PlaybackState::Playing)), 0);
+    assert_eq!(engine.count_events(seek_completed), 0);
+    assert_eq!(server.requests().len(), reseek);
+
+    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    let landed = engine.await_seek_completed(PATIENCE);
+    assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
+    engine.await_event(state(PlaybackState::Playing));
+    assert_eq!(server.requests().len(), reseek + OPEN + 1);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn a_seek_near_the_end_during_recovery_plays_out_and_ends() {
+    // 1..=RESUMED: dropped(). The attempt reopens (ATTEMPT..) and reseeks
+    // (ATTEMPT+OPEN) 200 ms short of the end, which plays out.
+    let server = dropped();
+    let mut engine = start(&server, frozen_attempts());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    assert_eq!(
+        engine.handle().submit_seek(Duration::from_millis(3800)),
+        Admission::Accepted
+    );
+    engine.await_event(stored);
+    engine.play_until_terminal(PATIENCE);
+    assert!(engine.saw_end_of_track(), "the episode did not end");
+    assert_eq!(engine.count_events(failed), 0);
+    assert_eq!(server.requests().len(), ATTEMPT + OPEN);
+    engine.finish();
+    server.shutdown();
+}

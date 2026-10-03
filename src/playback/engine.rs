@@ -753,6 +753,10 @@ struct Worker {
     /// A seek or restart stored but not yet established (M10 §4). Read, never
     /// taken, by every resume; cleared only once a landing is installed.
     pending: Option<PendingResume>,
+    /// The established duration of a finite source in recovery, cached on
+    /// entry because the decoder that knew it is gone (M10 §3). Clamps a seek
+    /// stored offline. Cleared by `load`.
+    recovery_duration: Option<Duration>,
     media: Option<MediaId>,
     /// The load currently in flight, set by `load` before `StateChanged`
     /// announces `Loading` and taken (cleared) the moment that load reaches
@@ -919,6 +923,7 @@ impl Worker {
             position: Duration::ZERO,
             position_provenance: PositionProvenance::Established,
             pending: None,
+            recovery_duration: None,
             media: None,
             loading: None,
             adopted_load: None,
@@ -2235,7 +2240,7 @@ impl Worker {
                     // M10 §3: an eligible finite episode recovers rather than
                     // failing. Everything else takes the path below unchanged.
                     if let Some(failure) = self.recoverable(&error) {
-                        self.enter_reconnecting(failure);
+                        self.connection_lost(failure);
                         return;
                     }
                     match (remote_cause(&error), self.source_is_remote()) {
@@ -2295,6 +2300,18 @@ impl Worker {
             return None;
         }
         remote_cause(error).filter(|failure| retryable(failure, Continuity::Finite))
+    }
+
+    /// M10 §3: an eligible finite episode lost its connection while playing.
+    /// The transport stays up so the ring plays out, as for a station.
+    fn connection_lost(&mut self, failure: RemoteFailure) {
+        // Before `enter_reconnecting` retires the decoder that knows it.
+        // Established only: an estimate is not a ceiling (`clamp_target`).
+        self.recovery_duration = self
+            .source
+            .as_ref()
+            .and_then(|source| established_duration(source.metadata()));
+        self.enter_reconnecting(failure);
     }
 
     /// M7 §7, M10 §3. A playing connection, or an attempt, failed retryably.
@@ -2607,6 +2624,7 @@ impl Worker {
         self.session_rev += 1;
         self.media = Some(media.clone());
         self.pending = None;
+        self.recovery_duration = None;
         // This load's media is not yet held until `Loaded` says so, and its
         // token is now the one in flight - both before `set_state(Loading)`
         // reads `self.loading` for the announcement below (M5 §6).
@@ -2938,8 +2956,9 @@ impl Worker {
         if lock(&self.transport).is_some() {
             self.capture_position();
         }
-        // M10 §4: read, not taken. A reseek or install that fails leaves the
-        // intent for the next Space and for the checkpoint.
+        // M10 §4: read, not taken. A reseek, install or priming failure
+        // leaves the intent for the next Space and for the checkpoint.
+        let previous = (self.position, self.position_provenance);
         let target = self.pending.map_or(self.position, PendingResume::target);
         let landed = match self.reseek(target) {
             Ok((actual, provenance)) => {
@@ -2955,13 +2974,31 @@ impl Worker {
                 return;
             }
         };
-        match self.reinstall(true) {
+        // M10 §5: the same commit check as a recovery attempt, so a priming
+        // failure fails honestly instead of announcing Playing over a
+        // `Failed` that `pump_audio` already set.
+        match self.prime_attempt() {
             Ok(()) => {
+                self.start_running();
                 self.announce_playing();
                 self.complete_pending(landed);
             }
-            Err(error) if is_cancelled(&error) => {}
-            Err(error) => self.fail(format!("cannot start the audio device: {error}")),
+            Err(error) => {
+                (self.position, self.position_provenance) = previous;
+                if !is_cancelled(&error) {
+                    self.fail_attempt(error);
+                }
+            }
+        }
+    }
+
+    /// Space is one attempt: when it fails, say what failed. A remote cause
+    /// travels typed; anything else is the device or the decoder.
+    fn fail_attempt(&mut self, error: PlaybackError) {
+        if matches!(error, PlaybackError::Remote(_)) || remote_cause(&error).is_some() {
+            self.fail_from(error);
+        } else {
+            self.fail(format!("cannot start playback: {error}"));
         }
     }
 
@@ -3149,9 +3186,42 @@ impl Worker {
         self.set_state(PlaybackState::Stopped);
     }
 
+    /// M10 §7: a finite session holding its intent with nothing open: in
+    /// recovery, or paused out of one (no decoder, no transport). Seek
+    /// support is already proven for any session that got here, so seeks and
+    /// restarts are stored without network I/O.
+    fn holds_intent_offline(&self) -> bool {
+        if self.is_indefinite() || !self.source_is_remote() {
+            return false;
+        }
+        match self.state {
+            PlaybackState::Reconnecting => true,
+            PlaybackState::Paused => self.source.is_none() && lock(&self.transport).is_none(),
+            _ => false,
+        }
+    }
+
+    /// Store `intent` and announce it, so the display and the checkpoint
+    /// follow. The outage, backoff and schedule are untouched.
+    fn store_intent(&mut self, intent: PendingResume) {
+        self.pending = Some(intent);
+        let session_rev = self.session_rev;
+        self.emit(PlaybackEvent::SeekTargetStored {
+            session_rev,
+            target: intent.target(),
+        });
+    }
+
     fn seek_to(&mut self, requested: Duration) {
         if self.state == PlaybackState::Failed {
             self.reject_seek("playback failed; load the media again".into());
+            return;
+        }
+        if self.holds_intent_offline() {
+            let target = self
+                .recovery_duration
+                .map_or(requested, |duration| requested.min(duration));
+            self.store_intent(PendingResume::Seek(target));
             return;
         }
         // A source known to be unsupported is rejected before any reopen,
@@ -3381,6 +3451,12 @@ impl Worker {
         // below would zero listening time and report a restart.
         if self.is_indefinite() {
             self.reject_seek("a live stream cannot restart".into());
+            return;
+        }
+        // M10 §7: stored, never collapsed into `Seek(ZERO)`. The landing
+        // reports `RestartEstablished`.
+        if self.holds_intent_offline() {
+            self.store_intent(PendingResume::Restart);
             return;
         }
         let reopened = match self.ensure_source_open() {
