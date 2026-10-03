@@ -10,18 +10,21 @@ Branch `feature/finite-reconnect`, from `main` at `4fb5245`.
 
 ## Gate
 
-Run on this branch after the last code change (`3ded602`); the commits after
-it touch documentation only.
+Run on this branch after the final-review fix wave; the commit after it
+touches documentation only.
 
 | Check | Command | Result |
 |---|---|---|
 | Format | `cargo fmt --check` | exit 0, no output |
 | Lints | `cargo clippy --locked --all-targets --all-features -- -D warnings` | finished with no warnings |
-| Tests | `cargo test --locked --no-fail-fast` | exit 0; 107 result lines (integration binaries, unit-test binaries and doc-tests): 1421 passed, 0 failed, 3 ignored |
+| Tests | `cargo test --locked --no-fail-fast` | exit 0; 107 result lines (integration binaries, unit-test binaries and doc-tests): 1423 passed, 0 failed, 3 ignored |
 | Docs | `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps` | finished with no warnings |
 
 The 3 ignored are the intentional ones: `device_smoke` and the two
 `m8_snapshot_size` measurements.
+
+Stress: the `m10_finite_reconnect` binary pinned with `taskset -c 0-1` beside
+eight `yes` loops, 12 runs: 12 passed, 0 failed.
 
 ## Unchanged suites
 
@@ -40,6 +43,7 @@ All names are in `tests/m10_finite_reconnect.rs` unless a path is given.
    proof carried across a reopen: `a_reopen_keeps_a_seek_the_session_already_proved`.
 4. Seek while reconnecting: `a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it`,
    `seek_by_presses_during_recovery_accumulate`,
+   `a_seek_cancels_a_blocked_attempt_and_the_next_runs_at_once`,
    `a_seek_near_the_end_during_recovery_plays_out_and_ends`.
 5. Pending intent survives failure: `a_failed_attempt_keeps_the_stored_target_for_the_next`,
    `a_failed_resume_keeps_the_stored_target_for_the_next_play` (restore).
@@ -71,6 +75,7 @@ All names are in `tests/m10_finite_reconnect.rs` unless a path is given.
    `the_stored_target_is_the_workers_clamped_one`, `the_landing_releases_a_stored_target`,
    `a_restart_landing_releases_a_stored_target`, `a_stop_drops_the_burst_but_keeps_the_stored_target`.
 8. Budget: `past_the_budget_it_fails_and_space_tries_exactly_once`,
+   `a_pause_inside_the_stability_window_ends_the_outage` (a park clears the outage),
    `reconnect::tests::the_budget_is_judged_only_when_something_fails`.
 9. Heard-time window: `a_forward_seek_does_not_end_the_outage`,
    `a_backward_seek_does_not_stop_heard_playback_ending_the_outage`;
@@ -92,11 +97,16 @@ Deferred minors from the review ledger:
 - The 16 KiB stall in the blocked-priming pause/stop tests is not confirmed to
   land in priming rather than in the reseek.
 - The exact commit-versus-pause race is untested.
-- Spec §7's "a seek during an in-flight attempt cancels it, and the next
-  attempt runs at once with no backoff spent" is untested.
 - `lost_source_while_playing` also closes a pause queued before a seek on a
   healthy remote episode; Space then costs one extra reopen. Untested and
   documented only in architecture §7.6.
+- Space out of a recovery pause, then a seek before playback starts: the
+  seek cancels `restore()`'s priming (spec §7, cancelled means nothing
+  happens), so the player stays paused with the new target stored, and the
+  next Space lands on it.
+- The landing clamp (spec decision 10) has no test: reaching a stored target
+  with no cached duration needs the broad pause race, which the harness
+  cannot order deterministically.
 
 ## Manual check (pending, user)
 

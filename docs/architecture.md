@@ -380,7 +380,7 @@ A failed attempt restores the captured position and keeps the stored intent. `re
 **Heard time.** The outage ends after `stable_after` of heard playback since the last successful attempt. Heard time is the position's advance from the pass's anchor, counted per generation (equivalent to the `Timeline` played frames), so a seek neither ends nor extends it.
 
 **Commands while recovering, or paused out of recovery:**
-- `SeekTo`, `SeekBy` and `Restart` are stored with no network I/O, clamped to the duration cached on entry. A recovery pause (`Paused`, remote finite, no source, no transport) stores them the same way.
+- `SeekTo`, `SeekBy` and `Restart` are stored with no network I/O, clamped to the duration cached on entry, and clamped again to the reopened decoder's duration at the landing. A recovery pause (`Paused`, remote finite, no source, no transport) stores them the same way.
 - `submit_pause` retires the attempt's read instead of freezing it, and the dispatched pause closes everything (`pause_closing`). The race predicate (`lost_source_while_playing`) is broad: a pause queued just before a seek on a healthy remote episode also closes rather than parks, the seek is stored, and Space reopens (one extra reopen).
 - Stop and Load behave as for a station.
 - The frontend holds an arrow-key target across progress until the landing releases it; `Session` checkpoints a stored target (`SeekTargetStored`) in every state.
