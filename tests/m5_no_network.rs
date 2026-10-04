@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ratatui::{Terminal, backend::TestBackend};
-use runtime::{enqueue, pump_for, rig_with, rig_with_probe, row_ids};
+use runtime::{enqueue, pump_for, rig_with, rig_with_probe, row_ids, step};
 use serde_json::json;
 use support::browse::wait_for_result;
 use support::server::{Script, TestServer};
@@ -134,7 +134,7 @@ fn restoring_enqueueing_and_browsing_remote_entries_make_no_requests() {
     );
     let view = rig.runtime.view();
     assert_eq!(view.rows.len(), 5, "{view:?}");
-    pump_for(&mut rig.runtime, Duration::from_millis(300));
+    pump_for(&mut rig, Duration::from_millis(300));
     let probed: Vec<_> = probed
         .lock()
         .unwrap_or_else(|error| panic!("probe log: {error}"))
@@ -195,7 +195,7 @@ fn restoring_enqueueing_and_browsing_remote_entries_make_no_requests() {
 fn only_an_explicit_play_prepares_the_remote_source() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut rig = rig_with(seeded(vec![remote_entry(&server.url("/a.mp3"))]));
-    pump_for(&mut rig.runtime, Duration::from_millis(100));
+    pump_for(&mut rig, Duration::from_millis(100));
     assert!(server.requests().is_empty());
 
     let remote = row_ids(&rig.runtime)[0];
@@ -207,8 +207,7 @@ fn only_an_explicit_play_prepares_the_remote_source() {
             "an explicit play never reached the server: {:?}",
             rig.runtime.view()
         );
-        rig.runtime.pump();
-        std::thread::sleep(Duration::from_millis(10));
+        step(&mut rig);
     }
     let _ = rig.runtime.shutdown();
     server.shutdown();
@@ -246,7 +245,7 @@ fn station_active(url: &str) -> PersistedState {
 fn a_restored_active_station_is_listed_and_drawn_without_a_request() {
     let server = TestServer::start(Script::from_fixture("sine-noxing.mp3").icy_station());
     let mut rig = rig_with(station_active(&server.url("/radio")));
-    pump_for(&mut rig.runtime, Duration::from_millis(300));
+    pump_for(&mut rig, Duration::from_millis(300));
 
     let view = rig.runtime.view();
     assert_eq!(view.rows.len(), 1, "{view:?}");
@@ -288,7 +287,7 @@ fn a_restored_station_is_listed_and_drawn_without_a_request() {
     let server = TestServer::start(Script::from_fixture("sine-noxing.mp3").icy_station());
     let url = server.url("/radio");
     let mut rig = rig_with(station_active(&url));
-    pump_for(&mut rig.runtime, Duration::from_millis(300));
+    pump_for(&mut rig, Duration::from_millis(300));
 
     let view = rig.runtime.view();
     assert_eq!(view.rows.len(), 1, "{view:?}");

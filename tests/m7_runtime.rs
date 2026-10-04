@@ -15,9 +15,8 @@ use tenuto::persistence::model::PersistedState;
 use tenuto::playback::reconnect::ReconnectPolicy;
 use tenuto::playback::state::PlaybackState;
 
-/// About two seconds of the 64 kbps fixture before the connection dies. The
-/// rig's engine runs on the real-time-paced `NullOutput`, so this is two
-/// seconds of the test's own patience, not of a virtual clock.
+/// About two seconds of the 64 kbps fixture before the connection dies: two
+/// seconds of the rig's virtual clock, which never runs ahead of real time.
 const CUT: usize = 16 * 1024;
 
 #[test]
@@ -44,15 +43,13 @@ fn space_during_a_reconnect_pauses_and_arrow_keys_never_reach_the_engine() {
     );
     let station = row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
-    pump_until(&mut rig.runtime, "the station reconnects", |view| {
-        view.reconnecting
-    });
+    pump_until(&mut rig, "the station reconnects", |view| view.reconnecting);
     assert!(rig.runtime.view().live, "{:?}", rig.runtime.view());
 
     rig.runtime.handle(AppCommand::SeekBy(10));
     // Past `KeyRouter`'s 250ms quiet window: a burst that had opened would
     // have flushed by now.
-    pump_for(&mut rig.runtime, Duration::from_millis(350));
+    pump_for(&mut rig, Duration::from_millis(350));
     let status = rig.runtime.view().status;
     assert!(
         status.as_deref().is_some_and(|s| s.contains("live stream")),
@@ -60,7 +57,7 @@ fn space_during_a_reconnect_pauses_and_arrow_keys_never_reach_the_engine() {
     );
 
     rig.runtime.handle(AppCommand::PlayPause);
-    pump_until(&mut rig.runtime, "the station pauses", |view| {
+    pump_until(&mut rig, "the station pauses", |view| {
         view.now_playing
             .as_ref()
             .is_some_and(|now| now.state == PlaybackState::Paused)
@@ -68,7 +65,7 @@ fn space_during_a_reconnect_pauses_and_arrow_keys_never_reach_the_engine() {
     // A paused station holds no connection, so the reconnect attempts stop
     // with it.
     let settled = server.requests().len();
-    pump_for(&mut rig.runtime, Duration::from_millis(300));
+    pump_for(&mut rig, Duration::from_millis(300));
     assert_eq!(server.requests().len(), settled);
 
     let _ = rig.runtime.shutdown();

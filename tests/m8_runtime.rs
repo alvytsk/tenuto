@@ -3,6 +3,8 @@
 //! folder add costs the metadata workers (§5, §8) and the one navigation
 //! exception a pending load makes (P5).
 
+mod support;
+
 #[path = "support/runtime.rs"]
 mod runtime;
 
@@ -13,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids};
+use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids, step};
 use tenuto::application::browse::TreeCollected;
 use tenuto::application::enrich::{TagProbe, default_probe};
 use tenuto::application::runtime::{
@@ -128,7 +130,7 @@ fn enter_in_another_playlist_moves_playing_only_once_the_load_is_adopted() {
     );
 
     rig.runtime.handle(AppCommand::PlayEntry(id));
-    pump_until(&mut rig.runtime, "Jazz is the playing playlist", |view| {
+    pump_until(&mut rig, "Jazz is the playing playlist", |view| {
         view.active == Some(id) && view.tabs.iter().any(|tab| tab.id == jazz && tab.playing)
     });
 }
@@ -165,7 +167,7 @@ fn a_refused_delete_cancels_nothing() {
     });
     let id = row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(id));
-    pump_until(&mut rig.runtime, "the only row is playing", |view| {
+    pump_until(&mut rig, "the only row is playing", |view| {
         view.now_playing
             .as_ref()
             .is_some_and(|now| now.loaded && now.entry == Some(id) && now.duration.is_some())
@@ -197,7 +199,7 @@ fn a_refused_delete_cancels_nothing() {
 
     // Past `KeyRouter`'s 250ms quiet window: a burst still standing has
     // flushed and landed, and 400ms of playback cannot account for the jump.
-    pump_for(&mut rig.runtime, Duration::from_millis(400));
+    pump_for(&mut rig, Duration::from_millis(400));
     let landed = position(&rig.runtime);
     assert!(
         landed >= before + Duration::from_millis(2500),
@@ -228,7 +230,7 @@ fn clearing_an_inactive_playlist_neither_stops_playback_nor_loses_anothers_enric
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        rig.runtime.pump();
+        step(&mut rig);
         if rig
             .runtime
             .rows_of(first)
@@ -237,7 +239,6 @@ fn clearing_an_inactive_playlist_neither_stops_playback_nor_loses_anothers_enric
         {
             return;
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
     panic!("Default's pending tag probe was lost when Scratch was cleared");
 }
@@ -259,7 +260,7 @@ fn a_restored_inactive_playlist_is_enriched_on_the_first_pump() {
     let mut rig = rig_with_probe(state, default_probe(TestHook::None));
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        rig.runtime.pump();
+        step(&mut rig);
         if rig
             .runtime
             .rows_of(other)
@@ -268,7 +269,6 @@ fn a_restored_inactive_playlist_is_enriched_on_the_first_pump() {
         {
             return;
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
     panic!(
         "the restored entries of a non-playing playlist were never offered to the metadata workers"
@@ -288,7 +288,7 @@ fn another_playlists_clear_does_not_cancel_a_standing_seek() {
     });
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
-    pump_until(&mut rig.runtime, "the first row is playing", |view| {
+    pump_until(&mut rig, "the first row is playing", |view| {
         view.now_playing
             .as_ref()
             .is_some_and(|now| now.loaded && now.entry == Some(ids[0]) && now.duration.is_some())
@@ -309,7 +309,7 @@ fn another_playlists_clear_does_not_cancel_a_standing_seek() {
     // Past `KeyRouter`'s 250ms quiet window, so a burst still standing has
     // flushed; a cancelled one never will, and 400ms of playback cannot
     // account for a three-second jump.
-    pump_for(&mut rig.runtime, Duration::from_millis(400));
+    pump_for(&mut rig, Duration::from_millis(400));
     let landed = position(&rig.runtime);
     assert!(
         landed >= before + Duration::from_millis(2500),
@@ -360,7 +360,7 @@ fn toggling_shuffle_marks_the_tab_and_keeps_the_track_playing() {
     });
     let id = row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(id));
-    pump_until(&mut rig.runtime, "playing", |view| view.active == Some(id));
+    pump_until(&mut rig, "playing", |view| view.active == Some(id));
 
     rig.runtime.handle(AppCommand::ToggleShuffle(first));
     let view = rig.runtime.view();
@@ -500,7 +500,7 @@ fn every_file_of_a_folder_add_is_titled_however_large_the_folder() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut titled = 0;
     while Instant::now() < deadline {
-        rig.runtime.pump();
+        step(&mut rig);
         titled = rig
             .runtime
             .rows_of(first)
@@ -510,7 +510,6 @@ fn every_file_of_a_folder_add_is_titled_however_large_the_folder() {
         if titled == FILES {
             return;
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
     panic!("only {titled} of {FILES} rows were ever titled");
 }
@@ -556,9 +555,7 @@ fn during_loading_next_steps_inside_the_requested_playlist_not_the_playing_one()
     });
     let in_a = row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(in_a));
-    pump_until(&mut rig.runtime, "A is playing", |view| {
-        view.active == Some(in_a)
-    });
+    pump_until(&mut rig, "A is playing", |view| view.active == Some(in_a));
 
     rig.runtime
         .handle(AppCommand::CreatePlaylist("Jazz".into()));

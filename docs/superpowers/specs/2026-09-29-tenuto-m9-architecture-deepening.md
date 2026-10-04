@@ -108,6 +108,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 **Runtime rig on the virtual clock.**
 - Problem: `tests/support/runtime.rs` builds the runtime over `NullOutput` with `SystemClock`, and `pump_until` and `pump_for` sleep 10 ms per pass.
 - Direction: the rig's `EngineFactory` builds the virtual-clock `TestOutput` engine instead. Do not fake `EngineHandle` behind a trait (§12).
+- Status: shipped. Every engine the rig spawns plays into one `VirtualDevice` (`tests/support/mod.rs`), and the runtime, the writer and the engine's network budgets read one `FakeClock`. `pump_until`, `pump_for` and `step` advance both a 2 ms period at a time, with a nap of one period so virtual time never outruns real time. `KeyRouter` reads the runtime's clock, not `Instant::now()`. The runtime's own unit tests in `application/runtime.rs` still pump over `NullOutput`.
 
 ## 8. Out of scope
 
