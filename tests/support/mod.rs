@@ -865,7 +865,10 @@ impl TestEngine {
                 break;
             }
             if Instant::now() >= deadline {
-                panic!("position never reached {target:?}; it stalled at {position:?}");
+                panic!(
+                    "position never reached {target:?}; it stalled at {position:?}; {}",
+                    self.history()
+                );
             }
             // How far the clock has run beyond the playback it is supposed to
             // be driving. One output latency of it is the pipeline and cannot
@@ -1198,6 +1201,22 @@ impl TestEngine {
         }
     }
 
+    /// The states the engine went through and every failure it reported,
+    /// for a panic that has to explain itself from a CI log alone.
+    fn history(&self) -> String {
+        let failures: Vec<String> = lock(&self.inbox)
+            .iter()
+            .filter_map(|event| match event {
+                PlaybackEvent::Failed { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        format!(
+            "it went through {:?}, failing with {failures:?}",
+            lock(&self.states)
+        )
+    }
+
     pub fn await_state(&mut self, state: PlaybackState) {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -1206,10 +1225,7 @@ impl TestEngine {
                 return;
             }
             if Instant::now() >= deadline {
-                panic!(
-                    "the engine never reached {state:?}; it went through {:?}",
-                    lock(&self.states)
-                );
+                panic!("the engine never reached {state:?}; {}", self.history());
             }
             std::thread::sleep(Duration::from_millis(1));
         }

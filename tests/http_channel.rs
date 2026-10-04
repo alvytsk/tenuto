@@ -473,7 +473,10 @@ fn a_delivery_resets_the_stall_budget() {
     // A trickling server that keeps delivering is not stalled, however long the
     // whole transfer takes. §8: ordinary playback has no whole-response
     // deadline, so the budget must measure the gap between deliveries.
-    let interrupt = SourceInterrupt::new(CAPACITY);
+    // On a fake network clock the feeder steps by exactly the gap, so a
+    // runner that oversleeps cannot turn a 150 ms gap into a 300 ms one.
+    let clock = Arc::new(FakeClock::new());
+    let interrupt = SourceInterrupt::with_clock(CAPACITY, Arc::clone(&clock) as Arc<dyn Clock>);
     let channel = ByteChannel::new(Arc::clone(&interrupt));
     let generation = channel.generation();
     let stall = Duration::from_millis(300);
@@ -489,7 +492,8 @@ fn a_delivery_resets_the_stall_budget() {
                 Err(error) => panic!("a current-thread runtime must build: {error}"),
             };
             for _ in 0..6 {
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(Duration::from_millis(20));
+                clock.advance_monotonic(Duration::from_millis(150));
                 rt.block_on(channel.push(generation, b"x"));
             }
         })

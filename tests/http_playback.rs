@@ -120,7 +120,18 @@ fn mp3_flac_and_wav_play_before_the_body_completes() {
             Script::from_fixture(fixture).trickle(body_len / 400, Duration::from_millis(10)),
         );
         let mut engine = TestEngine::start_idle();
-        engine.load_remote(&server.url(path));
+        // Opening reads the paced body too, so `brisk`'s 2 s open deadline is
+        // about half the transfer: a runner whose sleeps overshoot (the macOS
+        // leg) failed every load. What this test measures starts after
+        // opening, so opening gets all the time it needs.
+        engine.load_remote_with_resume_and_limits(
+            &server.url(path),
+            ResumeIntent::StartAt(Duration::ZERO),
+            Limits {
+                open: Duration::from_secs(30),
+                ..Limits::brisk()
+            },
+        );
         assert_eq!(engine.handle().submit_play(), Admission::Accepted);
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(150));
