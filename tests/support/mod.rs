@@ -23,6 +23,7 @@
 
 pub mod browse;
 pub mod server;
+pub mod wav;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -61,6 +62,13 @@ const PERIOD: Duration = Duration::from_millis(2);
 /// Deliberately generous, so that "the ring is empty" and "the last frame has
 /// been heard" are far apart in time and the end-of-track rule is observable.
 const LATENCY: Duration = Duration::from_millis(100);
+/// Frames the virtual device has rendered but not played when the worker
+/// freezes it with the clock stopped: one output latency of buffers, each
+/// rendered a latency before it plays. A capture counts them unheard, so a
+/// teardown that resumes at the captured position renders them again. A
+/// freeze answered while the clock advances moves it one period first, and
+/// one period fewer is in flight.
+pub const UNHEARD_FRAMES: u32 = LATENCY.as_millis() as u32 * RATE / 1000;
 const DRIVER_NAP: Duration = Duration::from_micros(500);
 /// Between two periods of a drain that is still producing audio.
 const PACING_NAP: Duration = Duration::from_millis(1);
@@ -445,6 +453,20 @@ impl TestEngine {
         request
     }
 
+    /// `load_remote_with_limits` under a caller-decided `ResumeIntent`: M10's
+    /// cancellation tests need both a proven (resumed) episode and deadlines
+    /// only a command can beat.
+    pub fn load_remote_with_resume_and_limits(
+        &mut self,
+        url: &str,
+        resume: ResumeIntent,
+        limits: Limits,
+    ) -> LoadRequestId {
+        let request = self.next_request();
+        self.load_remote_inner(request, url, resume, Some(limits), true);
+        request
+    }
+
     /// `load_remote`, but for a load this test expects to fail rather than
     /// reach `Paused` (§12's closing paragraph: a sequential-only source
     /// opening a tail-`moov` file). The `HttpService` still has to be
@@ -661,6 +683,17 @@ impl TestEngine {
             .captured()
             .iter()
             .any(|sample| *sample != 0.0)
+    }
+
+    /// Every sample the virtual device rendered since the last
+    /// `clear_rendered`, interleaved. `TestOutput` already keeps the whole
+    /// log; this only hands it out.
+    pub fn rendered(&self) -> Vec<f32> {
+        lock(&self.device).output.captured().to_vec()
+    }
+
+    pub fn clear_rendered(&mut self) {
+        lock(&self.device).output.clear_captured();
     }
 
     pub fn inject_xruns(&mut self, count: usize) {

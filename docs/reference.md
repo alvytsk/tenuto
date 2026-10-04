@@ -25,7 +25,8 @@ The rules the player and the feed commands follow, stated precisely. The [README
 - A range-less server plays through from the start. It cannot seek or resume.
 - A live stream (Icecast, Shoutcast v2) plays without a position bar. It cannot seek or restart, and is never resumed: pausing closes the connection and playing rejoins the live edge.
 - If a live stream drops, Tenuto reconnects with backoff for up to five minutes, then fails; Space tries once more. Stop, pause, or another track cancels it immediately.
-- A dropped connection on a finite track fails. Playing again makes one attempt to reopen at the saved position.
+- If a podcast episode drops mid-play and its server supports range requests (most do), Tenuto reconnects with the same backoff and carries on from where you were. The five-minute budget is judged only when something fails, so an attempt already under way can finish after it. Seeking, pausing and stopping work while it reconnects, and a seek takes effect when the connection comes back. Episodes on servers without range support still fail, and Space tries once more.
+- A dropped connection on a finite track from a server without range support fails. Playing again makes one attempt to reopen at the saved position.
 - A stream that interleaves ICY metadata, an HLS playlist, or a source whose continuity cannot be established is refused.
 
 ### Seeking accuracy

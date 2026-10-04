@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A podcast episode that loses its connection mid-play (a VPN switch, a Wi-Fi
+  drop, a server hiccup) now reconnects with the same backoff as a live
+  stream and carries on from where you were, instead of failing with "the
+  server went quiet". Seeking, pausing and stopping work while it
+  reconnects. Servers that cannot resume at a position still fail, and Space
+  tries once more.
+
+### Fixed
+
+- A seek stored while stopped is no longer lost when the next Play fails to
+  resume; the Play after that still lands on it.
+- Arrow-key seeks made while stopped accumulate on the stored target instead
+  of starting again from the stopped position.
+
 ### Changed
 
 - Titles after a large folder add fill in about four times as fast: 4,000
