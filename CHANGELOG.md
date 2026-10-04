@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budgets read one fake clock that `pump_until`, `pump_for` and `step`
   advance together. The runtime reads its seek-burst timing from its own
   clock instead of the system's.
+- Opening a remote source is one operation, `HttpMediaSource::open_and_probe`:
+  it applies the opening deadline and the probe cap, runs the caller's probe,
+  then lifts both. Playback and the station probe no longer repeat those
+  steps by hand.
 
 ## [0.2.0] - 2026-09-23
 

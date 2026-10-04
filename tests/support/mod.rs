@@ -38,7 +38,7 @@ use tenuto::clock::{Clock, FakeClock, SystemClock};
 use tenuto::http::channel::{SourceInterrupt, WaitHook};
 use tenuto::http::limits::Limits;
 use tenuto::http::service::HttpService;
-use tenuto::http::source::{HttpMediaSource, OpeningDeadline};
+use tenuto::http::source::HttpMediaSource;
 use tenuto::media::capabilities::MediaCapabilities;
 use tenuto::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use tenuto::media::source::SourceLocation;
@@ -148,17 +148,15 @@ pub fn open_station(server: &server::TestServer) -> HttpMediaSource {
     let service = HttpService::spawn(limits).unwrap_or_else(|error| panic!("service: {error}"));
     let url = Url::parse(&server.url("/radio")).unwrap_or_else(|error| panic!("{error}"));
     let interrupt = SourceInterrupt::new(limits.buffer_bytes);
-    let (source, opening) = HttpMediaSource::open(
+    HttpMediaSource::open_and_probe(
         service,
         url,
         interrupt,
         Arc::new(NoopHook),
         limits,
-        OpeningDeadline(Instant::now() + limits.open),
+        |source| source,
     )
-    .unwrap_or_else(|error| panic!("open: {error}"));
-    opening.finish_opening();
-    source
+    .unwrap_or_else(|error| panic!("open: {error}"))
 }
 
 struct Device {
