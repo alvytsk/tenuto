@@ -754,6 +754,37 @@ impl TransportCore {
     }
 }
 
+/// How [`Worker::land`] treats the decoder's answer (M9.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Approach {
+    /// The listener's own seek: refinement may give up after `SEEK_BUDGET`,
+    /// and the position is what the decoder reports.
+    Seek,
+    /// A position the session already promised (a resume, a recovery, a
+    /// restart): refined to the end, and a sub-frame difference keeps the
+    /// promised value (`adopt_preserved`).
+    Preserve,
+}
+
+/// Where a landing put the decoder.
+#[derive(Clone, Copy, Debug)]
+struct Landing {
+    actual: Duration,
+    /// Refinement gave up early, or the decoder stopped short of the target.
+    truncated: bool,
+}
+
+/// [`Worker::land`]'s closed outcome. A caller maps each arm to state and
+/// events; none of them has to re-derive which errors are cancellations.
+#[derive(Debug)]
+enum Landed {
+    At(Landing),
+    /// A stop, a shutdown or a newer seek retired the landing. The decoder
+    /// is at an arbitrary point, and the interrupt still stands for the loop.
+    Cancelled,
+    Failed(PlaybackError),
+}
+
 /// M10 §4: what a resume must establish, held until a landing is installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingResume {
@@ -801,7 +832,7 @@ struct Worker {
     position: Duration,
     /// Whether `position` is decoder-established or a byte-offset estimate
     /// (§3, M3.1). Sticky: ordinary playback never changes it, and a seek
-    /// that performs no actual `seek_refined` call (`reseek`'s no-op, or a
+    /// that performs no actual `seek_refined` call (`land`'s no-op, or a
     /// load that never moves off zero) leaves it exactly as it was, never
     /// resetting it to `Established` by default. `publish_progress` mirrors
     /// this into `facts.provenance` on every pass, the same way it mirrors
@@ -1600,16 +1631,11 @@ impl Worker {
         // Re-seeking it would fail on a source that cannot seek at all, and
         // turn a device fault into a lost session.
         if !self.is_indefinite() {
-            let target = self.position;
-            match self.reseek(target) {
-                Ok((actual, provenance)) => {
-                    self.position = adopt_preserved(target, actual);
-                    self.position_provenance = provenance;
-                }
-                Err(error) => {
-                    if !is_cancelled(&error) {
-                        self.fail(format!("cannot recover after {reason}: {error}"));
-                    }
+            match self.land(self.position, Approach::Preserve) {
+                Landed::At(_) => {}
+                Landed::Cancelled => return Err(PlaybackError::Cancelled),
+                Landed::Failed(error) => {
+                    self.fail(format!("cannot recover after {reason}: {error}"));
                     return Err(error);
                 }
             }
@@ -1854,20 +1880,26 @@ impl Worker {
         let target = self.pending.map_or(self.position, PendingResume::target);
         // 3 + 4. `ensure_source_open` sets `expected = Finite`, so a reopen
         //    that answers as a station fails with `ResourceChanged`.
-        let landing = self.ensure_source_open().and_then(|_| self.reseek(target));
-        let (actual, provenance) = match landing {
-            Ok(landing) => landing,
-            Err(error) => {
+        // 5. `land` adopts the landing as the anchor before the transport
+        //    exists: `open_transport` copies `self.position` into the new
+        //    `TransportCore`, so a landing assigned afterwards would play from
+        //    the target while progress and every later capture counted from
+        //    the old position.
+        let landed = match self.ensure_source_open() {
+            Ok(_) => self.land(target, Approach::Preserve),
+            Err(error) => Landed::Failed(error),
+        };
+        let landing = match landed {
+            Landed::At(landing) => landing,
+            Landed::Cancelled => {
+                self.abandon_attempt();
+                return Err(PlaybackError::Cancelled);
+            }
+            Landed::Failed(error) => {
                 self.abandon_attempt();
                 return Err(error);
             }
         };
-        // 5. The landing becomes the anchor: `open_transport` copies
-        //    `self.position` into the new `TransportCore`, so a landing
-        //    assigned afterwards would play from the target while progress
-        //    and every later capture counted from the old position.
-        self.position = adopt_preserved(target, actual);
-        self.position_provenance = self.landing_provenance(actual, provenance);
         // 6 + 7.
         if let Err(error) = self.prime_attempt() {
             (self.position, self.position_provenance) = previous;
@@ -1876,7 +1908,7 @@ impl Worker {
         // 8.
         self.start_running();
         self.announce_playing();
-        self.complete_pending(actual);
+        self.complete_pending(landing);
         Ok(())
     }
 
@@ -2758,7 +2790,7 @@ impl Worker {
                 return;
             }
         };
-        let mut decoded = prepared.source;
+        let decoded = prepared.source;
         self.set_capabilities(prepared.capabilities);
 
         // M7 §5: a station starts where its connection joined, which is zero
@@ -2845,49 +2877,21 @@ impl Worker {
             }
         };
 
+        self.source = Some(decoded);
         if start_at > Duration::ZERO {
-            // Whether this attempt is the first demonstration of a demuxer
-            // seek this source had not yet proven - read before the attempt,
-            // since a successful seek below is exactly what promotes it.
-            let was_unknown = self.capabilities.seek == SeekSupport::Unknown;
-            // R2: this is one of `seek_refined`'s four call sites, routed
-            // through the shared `seek_bounded` so the deadline and the
-            // unconditional `Estimated` provenance apply here exactly as
-            // they do to every other caller - a launch resume at a stored
-            // position is exactly the case the field report's "two presses
-            // of the right arrow" generalises from.
-            let deadline = self.seek_deadline();
-            let seek = seek_bounded(
-                &mut decoded,
-                &self.source_interrupt,
-                &self.interrupt,
-                deadline,
-                start_at,
-                None,
-            );
-            match seek {
-                Ok((outcome, provenance)) => {
-                    self.position = adopt_preserved(start_at, outcome.actual);
-                    self.position_provenance = provenance;
-                    // A successful seek on a source whose demuxer seek
-                    // support was still unproven IS the proof (§6). Recording
-                    // it here means `Loaded`'s own `capabilities` already
-                    // reflects it, and a listener watching
-                    // `CapabilitiesChanged` specifically sees the upgrade
-                    // too, rather than only inferring it from a later seek.
-                    if was_unknown {
-                        decoded.note_demuxer_proven();
-                        self.set_capabilities(decoded.capabilities());
-                        self.emit_capabilities(self.capabilities);
-                    }
-                }
+            // A demuxer seek this source had not yet proven is proven here,
+            // so `Loaded`'s own `capabilities` already reflects it (§6).
+            match self.land(start_at, Approach::Preserve) {
+                Landed::At(_) => {}
                 // Abandon the load, leaving no decoder open. The interrupt
                 // still stands and the loop's next pass acts on it.
-                Err(error) if is_cancelled(&error) => {
+                Landed::Cancelled => {
+                    self.source = None;
                     self.cancel_load();
                     return;
                 }
-                Err(error) => {
+                Landed::Failed(error) => {
+                    self.source = None;
                     self.fail_from(error);
                     return;
                 }
@@ -2896,6 +2900,11 @@ impl Worker {
         let session_rev = self.session_rev;
         let position = self.position;
         let capabilities = self.capabilities;
+        let metadata = self
+            .source
+            .as_ref()
+            .map(|source| source.metadata().clone())
+            .unwrap_or_default();
         // Takes `loading`: this outcome closes it. `adopted_load` now holds
         // the same token until the next `load` clears it (M5 §6, Decision 2).
         self.loading = None;
@@ -2904,12 +2913,11 @@ impl Worker {
             session_rev,
             request,
             media,
-            metadata: decoded.metadata().clone(),
+            metadata,
             capabilities,
             position,
             disposition,
         });
-        self.source = Some(decoded);
         match self.open_transport(false) {
             Ok(()) => self.set_state(PlaybackState::Paused),
             Err(error) => self.fail(format!("cannot open the audio device: {error}")),
@@ -3045,16 +3053,12 @@ impl Worker {
         // leaves the intent for the next Space and for the checkpoint.
         let previous = (self.position, self.position_provenance);
         let target = self.pending.map_or(self.position, PendingResume::target);
-        let landed = match self.reseek(target) {
-            Ok((actual, provenance)) => {
-                self.position = adopt_preserved(target, actual);
-                self.position_provenance = self.landing_provenance(actual, provenance);
-                actual
-            }
+        let landing = match self.land(target, Approach::Preserve) {
+            Landed::At(landing) => landing,
             // A stop or a shutdown arrived mid-refinement. The preserved
             // position still stands; the interrupt is handled by the loop.
-            Err(error) if is_cancelled(&error) => return,
-            Err(error) => {
+            Landed::Cancelled => return,
+            Landed::Failed(error) => {
                 self.fail(format!("cannot resume at {target:?}: {error}"));
                 return;
             }
@@ -3066,7 +3070,7 @@ impl Worker {
             Ok(()) => {
                 self.start_running();
                 self.announce_playing();
-                self.complete_pending(landed);
+                self.complete_pending(landing);
             }
             Err(error) => {
                 (self.position, self.position_provenance) = previous;
@@ -3091,7 +3095,8 @@ impl Worker {
     /// and only then reported: `SeekCompleted` for a seek, `RestartEstablished`
     /// for a restart. Emitting at store time would claim a landing no decoder
     /// had confirmed.
-    fn complete_pending(&mut self, actual: Duration) {
+    fn complete_pending(&mut self, landing: Landing) {
+        let Landing { actual, truncated } = landing;
         let session_rev = self.session_rev;
         let provenance = self.position_provenance;
         match self.pending.take() {
@@ -3102,7 +3107,7 @@ impl Worker {
                     session_rev,
                     requested,
                     actual,
-                    refinement_truncated: false,
+                    refinement_truncated: truncated,
                     provenance,
                 });
             }
@@ -3115,20 +3120,6 @@ impl Worker {
                 });
             }
             None => {}
-        }
-    }
-
-    /// A restart that lands at zero is exact, whatever provenance a reseek
-    /// that had nothing to do carried forward (M10 §4).
-    fn landing_provenance(
-        &self,
-        actual: Duration,
-        provenance: PositionProvenance,
-    ) -> PositionProvenance {
-        if self.pending == Some(PendingResume::Restart) && actual == Duration::ZERO {
-            PositionProvenance::Established
-        } else {
-            provenance
         }
     }
 
@@ -3433,48 +3424,9 @@ impl Worker {
         // short forward seek satisfies entirely from `MediaSourceStream`'s
         // own read-ahead buffer, with no `seek()` call at all - and nothing
         // would ever open a new fetch to replace it.
-        // R2: this is one of `seek_refined`'s four call sites, routed
-        // through the shared `seek_bounded` so the deadline applies here
-        // exactly as it does to the other three - this is the user's own
-        // seek, the case the field report is about.
-        let deadline = self.seek_deadline();
-        let outcome = {
-            let Some(source) = self.source.as_mut() else {
-                return;
-            };
-            // Not the SEEK bit: `submit_seek` sets it for exactly this
-            // dispatch, and checking it here would make this seek cancel
-            // its own first attempt.
-            seek_bounded(
-                source,
-                &self.source_interrupt,
-                &self.interrupt,
-                deadline,
-                target,
-                Some(SEEK_BUDGET),
-            )
-        };
-        match outcome {
-            Ok((outcome, provenance)) => {
-                // `refinement_truncated` is false when refinement ran into the
-                // end of the media, so a short landing is checked separately.
-                let truncated = outcome.refinement_truncated
-                    || outcome.actual.saturating_add(RESUME_TOLERANCE) < target;
-                let actual = outcome.actual;
-                self.position = actual;
-                self.position_provenance = provenance;
+        match self.land(target, Approach::Seek) {
+            Landed::At(landing) => {
                 self.pending = None;
-                // §6: any demonstrated seek is proof, not only the trial
-                // `verify_seek_support` runs for a stopped one - an ordinary
-                // playing seek that lands is just as conclusive.
-                if self.capabilities.seek == SeekSupport::Unknown
-                    && let Some(source) = self.source.as_mut()
-                {
-                    source.note_demuxer_proven();
-                    let capabilities = source.capabilities();
-                    self.set_capabilities(capabilities);
-                    self.emit_capabilities(capabilities);
-                }
                 if let Err(error) = self.reinstall(playing) {
                     if !is_cancelled(&error) {
                         self.fail(format!("cannot restart the audio device: {error}"));
@@ -3484,9 +3436,11 @@ impl Worker {
                 if self.state == PlaybackState::Ended {
                     self.set_state(PlaybackState::Paused);
                 }
+                let Landing { actual, truncated } = landing;
                 // §11: requested/actual seek.
                 tracing::debug!(requested = ?target, ?actual, truncated, "seek completed");
                 let session_rev = self.session_rev;
+                let provenance = self.position_provenance;
                 self.emit(PlaybackEvent::SeekCompleted {
                     session_rev,
                     requested: target,
@@ -3499,39 +3453,33 @@ impl Worker {
             // stop, a shutdown or a newer seek retires it before it commits -
             // never silence, and never `SeekRejected`, which would misreport
             // a cancellation as a validation failure.
-            Err(error) if is_cancelled(&error) => {
+            Landed::Cancelled => {
                 self.position = preserved;
                 let session_rev = self.session_rev;
                 self.emit(PlaybackEvent::SeekCancelled {
                     session_rev,
                     requested: target,
                 });
-                // Best-effort restoration at the preserved position (§5.4): one
-                // fresh bounded attempt, never the expired deadline this seek
-                // may have just hit - `reseek` routes through `seek_bounded`
-                // too, so `self.seek_deadline()` is read again from scratch
-                // rather than any value carried over from above.
-                if let Ok((actual, provenance)) = self.reseek(preserved) {
-                    self.position = adopt_preserved(preserved, actual);
-                    self.position_provenance = provenance;
+                // Best-effort restoration at the preserved position (§5.4):
+                // one fresh bounded attempt, never the expired deadline this
+                // seek may have just hit.
+                if let Landed::At(_) = self.land(preserved, Approach::Preserve) {
                     let _ = self.reinstall(playing);
                 }
             }
-            Err(error) => {
+            Landed::Failed(error) => {
                 // The captured value stands. The decoder is parked at an
                 // arbitrary point inside the refinement, so the position has
                 // to be re-established explicitly, never assumed.
                 self.position = preserved;
                 // §5.4: the same fresh-deadline recovery as the cancelled arm
                 // above.
-                match self.reseek(preserved) {
+                match self.land(preserved, Approach::Preserve) {
                     // Cancelled again: the stop or shutdown that cancelled the
                     // seek is about to be handled, and it tears the decoder
                     // down anyway. The preserved position stands.
-                    Err(restore_error) if is_cancelled(&restore_error) => {}
-                    Ok((actual, provenance)) => {
-                        self.position = adopt_preserved(preserved, actual);
-                        self.position_provenance = provenance;
+                    Landed::Cancelled => {}
+                    Landed::At(_) => {
                         if let Err(reinstall_error) = self.reinstall(playing) {
                             if !is_cancelled(&reinstall_error) {
                                 self.fail(format!(
@@ -3542,7 +3490,7 @@ impl Worker {
                         }
                         self.reject_seek(format!("{error}"));
                     }
-                    Err(restore_error) => self.fail(format!(
+                    Landed::Failed(restore_error) => self.fail(format!(
                         "seek failed ({error}) and the decoder could not be restored ({restore_error})"
                     )),
                 }
@@ -3597,14 +3545,10 @@ impl Worker {
         } else {
             // Validate first: the transport is only started once the decoder
             // has actually landed at zero.
-            match self.reseek(Duration::ZERO) {
-                Ok((actual, provenance)) => {
-                    self.position = actual;
-                    self.position_provenance = provenance;
-                    self.pending = None;
-                }
-                Err(error) if is_cancelled(&error) => return,
-                Err(error) => {
+            match self.land(Duration::ZERO, Approach::Preserve) {
+                Landed::At(_) => self.pending = None,
+                Landed::Cancelled => return,
+                Landed::Failed(error) => {
                     self.reject_seek(format!("{error}"));
                     return;
                 }
@@ -3638,7 +3582,7 @@ impl Worker {
                     // Task 6: the `reopened` branch above sets this
                     // Established unconditionally (a fresh open at byte
                     // zero is exact); the `else` branch reads it back from
-                    // `reseek`'s own outcome, which for an MP3 restart that
+                    // `land`'s own outcome, which for an MP3 restart that
                     // reuses an already-open decoder can still be
                     // `Estimated` (decode.rs's format check is
                     // target-independent). The session policy needs the
@@ -3653,44 +3597,77 @@ impl Worker {
         }
     }
 
-    /// A preserving seek: no budget, because it promises to land exactly where
-    /// it was told to, but cancellable, so that a stop or a shutdown is not
-    /// left waiting for a refinement to finish. A cancelled one leaves the
-    /// decoder at an arbitrary point, which is why every caller either
-    /// re-establishes it or abandons the operation entirely.
+    /// The one landing (M9.4): seek the decoder to `target` and adopt the
+    /// result - position, provenance, and the proof an unproven demuxer
+    /// earns from any real seek (§6). Every caller that moves the decoder
+    /// goes through here, so the rules cannot drift between them.
     ///
-    /// R2: one of `seek_refined`'s four call sites, routed through
-    /// `seek_bounded` - stop→play (`restore`) and device recovery both reach
-    /// `seek_refined` only through here. The no-op short-circuit below is
-    /// deliberately *not* routed: nothing seeks, so nothing about
-    /// `self.position_provenance` should change, and the caller's own
-    /// `Ok((target, self.position_provenance))` says exactly that -
-    /// carrying it forward unchanged rather than manufacturing a landing
-    /// that never happened.
-    fn reseek(
-        &mut self,
-        target: Duration,
-    ) -> Result<(Duration, PositionProvenance), PlaybackError> {
-        // A target stored offline with no duration to clamp it to (M10 §7)
-        // meets the reopened decoder's duration here, rather than failing
-        // past the end on every Space.
+    /// The target is clamped to an established duration first: a target
+    /// stored offline with no duration to clamp it to (M10 §7) meets the
+    /// decoder's here, rather than failing past the end on every Space.
+    /// A decoder already at the target is not seeked at all: nothing about
+    /// the provenance changes, rather than a landing being manufactured that
+    /// never happened. Nothing is written on `Cancelled` or `Failed`.
+    ///
+    /// Cancellable, so a stop or a shutdown is not left waiting for a
+    /// refinement to finish; the deadline is fresh on every call (§5.4).
+    fn land(&mut self, target: Duration, approach: Approach) -> Landed {
         let target = self.clamp_target(target);
         let deadline = self.seek_deadline();
         let Some(source) = self.source.as_mut() else {
-            return Ok((target, self.position_provenance));
+            return Landed::Failed(PlaybackError::UnsupportedInput {
+                path: Default::default(),
+                reason: "no media is loaded".into(),
+            });
         };
-        if source.position() == target {
-            return Ok((target, self.position_provenance));
+        let seeked = source.position() != target;
+        let (actual, provenance, truncated) = if seeked {
+            let budget = match approach {
+                Approach::Seek => Some(SEEK_BUDGET),
+                Approach::Preserve => None,
+            };
+            let (outcome, provenance) = match seek_bounded(
+                source,
+                &self.source_interrupt,
+                &self.interrupt,
+                deadline,
+                target,
+                budget,
+            ) {
+                Ok(landed) => landed,
+                Err(error) if is_cancelled(&error) => return Landed::Cancelled,
+                Err(error) => return Landed::Failed(error),
+            };
+            // `refinement_truncated` is false when refinement ran into the
+            // end of the media, so a short landing is checked separately.
+            let truncated = outcome.refinement_truncated
+                || outcome.actual.saturating_add(RESUME_TOLERANCE) < target;
+            (outcome.actual, provenance, truncated)
+        } else {
+            (target, self.position_provenance, false)
+        };
+        self.position = match approach {
+            Approach::Seek => actual,
+            Approach::Preserve => adopt_preserved(target, actual),
+        };
+        // A restart that lands at zero is exact, whatever provenance the
+        // decoder reports for its format (M10 §4).
+        self.position_provenance =
+            if self.pending == Some(PendingResume::Restart) && actual == Duration::ZERO {
+                PositionProvenance::Established
+            } else {
+                provenance
+            };
+        if seeked
+            && self.capabilities.seek == SeekSupport::Unknown
+            && let Some(source) = self.source.as_mut()
+        {
+            source.note_demuxer_proven();
+            let capabilities = source.capabilities();
+            self.set_capabilities(capabilities);
+            self.emit_capabilities(capabilities);
         }
-        seek_bounded(
-            source,
-            &self.source_interrupt,
-            &self.interrupt,
-            deadline,
-            target,
-            None,
-        )
-        .map(|(outcome, provenance)| (outcome.actual, provenance))
+        Landed::At(Landing { actual, truncated })
     }
 
     fn clamp_target(&self, requested: Duration) -> Duration {
@@ -3887,7 +3864,7 @@ impl Worker {
     /// seek".
     fn verify_seek_support(&mut self) -> Result<bool, PlaybackError> {
         let current = self.position;
-        // R2: the fourth of `seek_refined`'s four call sites, routed through
+        // R2: the other `seek_refined` call site beside `land`, routed through
         // `seek_bounded` so a stopped-seek validation is bounded exactly like
         // an ordinary one - this trial goes over the network precisely
         // because the source has never demonstrated a seek before, so an
@@ -3991,17 +3968,13 @@ fn stop_or_shutdown(word: u8) -> bool {
 }
 
 /// The one seat every `seek_refined` call goes through (R2 of M3.1 Task 4):
-/// `load`, `seek_to`, `reseek` (so `restore`/stop→play and `restart` reach it
-/// too) and `verify_seek_support` all call this rather than `DecodedSource::
-/// seek_refined` directly, so the deadline policy below cannot drift between
-/// them.
+/// `Worker::land` (every landing: load, seek, restore, restart, rebuild and
+/// recovery) and `verify_seek_support` call this rather than
+/// `DecodedSource::seek_refined` directly, so the deadline policy below
+/// cannot drift between them.
 ///
-/// A free function rather than a `Worker` method: `load` calls this before
-/// `decoded` is installed as `self.source`, so `source` has to be a
-/// standalone parameter the caller already holds, and threading `self`
-/// through as well would force every caller to give up the disjoint
-/// `self.source`/`self.source_interrupt`/`self.interrupt` borrows the
-/// existing call sites already rely on.
+/// A free function rather than a `Worker` method, so its callers keep the
+/// disjoint `self.source`/`self.source_interrupt`/`self.interrupt` borrows.
 ///
 /// Sets a fresh, operation-scoped deadline on `source_interrupt` for the
 /// duration of `seek_refined`'s own `reader.seek()` call and clears it back
@@ -4023,10 +3996,9 @@ fn stop_or_shutdown(word: u8) -> bool {
 /// `seek_refined` itself computes from the reader's own `format_info()` -
 /// `Estimated` for MP3, `Established` for every other format this crate
 /// supports, exactly as it always reported before this task, never inferred
-/// from the target, a Xing/Info tag, or which of the four callers reached
-/// it. A caller that must not manufacture a landing that never happened
-/// (`reseek`'s own no-op short-circuit, already at target) is the one place
-/// that deliberately does not call this at all - see its own comment.
+/// from the target, a Xing/Info tag, or which caller reached it. A landing
+/// already at its target does not call this at all (`land`'s no-op), so it
+/// never manufactures a landing that never happened.
 fn seek_bounded(
     source: &mut DecodedSource,
     source_interrupt: &SourceInterrupt,

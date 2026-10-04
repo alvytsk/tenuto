@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every command reaches the playback engine through one `submit`, which
   applies the command's out-of-band rule itself. A seek submitted the plain
   way no longer skips waking a read blocked on the network.
+- Every path that moves the decoder (resume, seek, restore, restart, device
+  rebuild, reconnect) lands through one operation. A reconnect that lands
+  now also proves the episode seekable, as any landed seek does.
 
 ## [0.2.0] - 2026-09-23
 

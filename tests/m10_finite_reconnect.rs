@@ -435,6 +435,13 @@ fn an_episode_played_from_zero_recovers() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.play_until_event(state(PlaybackState::Playing));
     assert_eq!(engine.count_events(failed), 0);
+    // The reseek that landed is the proof (§6): the session is Native now,
+    // as if the episode had been resumed by a seek.
+    let proven = |event: &PlaybackEvent| {
+        matches!(event, PlaybackEvent::CapabilitiesChanged { capabilities, .. }
+            if capabilities.seek == SeekSupport::Native)
+    };
+    assert_eq!(engine.count_events(proven), 1);
     engine.finish();
     server.shutdown();
 }
