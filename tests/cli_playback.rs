@@ -14,13 +14,15 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn no_arguments_prints_help_and_exits_nonzero() {
+fn no_arguments_opens_the_player_and_fails_cleanly_without_a_terminal() {
+    // A bare `tenuto` opens the full-screen player (reference.md). With no
+    // tty it cannot, and says so rather than panicking or printing help.
     let output = run(&[]);
     assert!(!output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(
-        text.contains("play"),
-        "help must mention the play subcommand: {text}"
+        text.contains("cannot set up the terminal"),
+        "a bare run must try the player: {text}"
     );
 }
 

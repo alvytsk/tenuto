@@ -82,9 +82,18 @@ pub(super) async fn fetch_document(
     limits: Limits,
     request: DocumentRequest,
 ) -> Result<DocumentOutcome, RemoteFailure> {
-    tokio::time::timeout(limits.open, fetch_inner(client, limits, request))
-        .await
-        .map_err(|_| RemoteFailure::Timeout { phase: Phase::Open })?
+    let deadline = tokio::time::Instant::now() + limits.open;
+    match tokio::time::timeout_at(deadline, fetch_inner(client, limits, request)).await {
+        Err(_) => Err(RemoteFailure::Timeout { phase: Phase::Open }),
+        // A hop's own timeout that fired with the whole deadline also spent
+        // is the deadline expiring: which of two timers due together the
+        // runtime polled first is a race, and `timeout` polls its inner
+        // future first. `HttpMediaSource` reclassifies the same way.
+        Ok(Err(RemoteFailure::Timeout { .. })) if tokio::time::Instant::now() >= deadline => {
+            Err(RemoteFailure::Timeout { phase: Phase::Open })
+        }
+        Ok(result) => result,
+    }
 }
 
 /// Reuses `resolve_source`'s policy (`src/app.rs`) as a reference, not a

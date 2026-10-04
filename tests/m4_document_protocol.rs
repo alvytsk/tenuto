@@ -620,6 +620,37 @@ fn the_open_deadline_bounds_the_whole_redirect_chain_not_each_hop()
     Ok(())
 }
 
+#[test]
+fn a_hop_timeout_that_lands_with_the_open_deadline_reports_open()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Equal budgets wake both timers together, which is what a late runner
+    // (the macOS leg) does to the test above: the expiry is still the whole
+    // operation's, whichever timer the runtime polled first.
+    let replies = vec![DocumentReply {
+        header_delay: Duration::from_millis(300),
+        ..reply("/a", 200, vec![], b"<rss/>")
+    }];
+    let server = TestServer::start(Script::documents(replies));
+    let limits = Limits {
+        headers: Duration::from_millis(100),
+        open: Duration::from_millis(100),
+        ..Limits::brisk()
+    };
+    let service = HttpService::spawn(limits)?;
+    let result = service
+        .handle()
+        .block_on(service.fetch_document(DocumentRequest {
+            origin: server.url("/a").parse()?,
+            validators: None,
+        }));
+    match result {
+        Err(RemoteFailure::Timeout { phase: Phase::Open }) => {}
+        other => panic!("expected Timeout {{ phase: Phase::Open }}, got {other:?}"),
+    }
+    server.shutdown();
+    Ok(())
+}
+
 // An invalid cached header value (here, one containing a raw CR/LF, which
 // `HeaderValue` refuses) must fail safely while building the request rather
 // than panicking — reqwest defers the conversion error to `.build()`.
