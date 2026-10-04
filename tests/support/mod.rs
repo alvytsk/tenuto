@@ -51,6 +51,7 @@ use tenuto::playback::output::cpal_output::OutputFault;
 use tenuto::playback::output::test_output::TestOutput;
 use tenuto::playback::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest};
 use tenuto::playback::provenance::PositionProvenance;
+use tenuto::playback::reconnect::ReconnectPolicy;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::volume::Volume;
 
@@ -353,6 +354,18 @@ impl TestEngine {
     /// so this cannot be a zero-argument `start()` alongside `start(name)`.
     pub fn start_idle() -> Self {
         Self::bare()
+    }
+
+    /// [`start_idle`](Self::start_idle) with a zero reconnect budget: the
+    /// first drop of a remote episode fails the session, as it did before
+    /// M10 recovery. For tests about what a failure is, not how it heals.
+    pub fn start_without_recovery() -> Self {
+        let engine = Self::bare();
+        engine.handle().set_reconnect_policy(ReconnectPolicy {
+            budget: Duration::ZERO,
+            ..ReconnectPolicy::default()
+        });
+        engine
     }
 
     fn bare() -> Self {

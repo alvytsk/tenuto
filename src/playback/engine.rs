@@ -22,7 +22,7 @@ use crate::http::error::{Operation, RemoteFailure, redact_url};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{is_retired, remote_cause};
-use crate::media::capabilities::{Continuity, MediaCapabilities, ResumeCapability, SeekSupport};
+use crate::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 use crate::media::source::SourceLocation;
@@ -2287,10 +2287,14 @@ impl Worker {
     /// While `fresh_open` is priming, the source has not been adopted yet, so
     /// its death is that attempt's failure and the caller decides what it
     /// means. Otherwise the established session has lost its station.
+    ///
+    /// The attempt's source is left for `abandon_attempt` to drop, as on the
+    /// finite path: dropping it here retires the shared interrupt, which
+    /// `fresh_open` reads as a cancellation and the loop retries at once,
+    /// with no backoff and no budget.
     fn source_ended(&mut self, failure: RemoteFailure) {
         if self.attempting {
             self.attempt_failure = Some(failure.into());
-            self.source = None;
             return;
         }
         if retryable(&failure, Continuity::Indefinite) {
@@ -2301,13 +2305,19 @@ impl Worker {
     }
 
     /// M10 §3: the failure a finite read error recovers from, or `None` when
-    /// it takes today's path. Only a playing, remote session whose resume
-    /// capability is `Supported` recovers, and only from a failure the retry
+    /// it takes today's path. Only a playing, remote, finite session on a
+    /// range-capable server recovers, and only from a failure the retry
     /// table calls retryable for finite media.
+    ///
+    /// `Unknown` seek support qualifies: the server already takes ranges and
+    /// only the demuxer is untried, which is every episode played from zero
+    /// without a seek. The attempt's reseek is that trial; a demuxer that
+    /// refuses it fails the session, as it would have without recovery.
     fn recoverable(&self, error: &PlaybackError) -> Option<RemoteFailure> {
         let eligible = self.state == PlaybackState::Playing
             && self.source_is_remote()
-            && self.capabilities.resume_capability() == ResumeCapability::Supported;
+            && self.capabilities.continuity == Continuity::Finite
+            && self.capabilities.seek != SeekSupport::Unsupported;
         if !eligible {
             return None;
         }

@@ -86,10 +86,11 @@ All names are in `tests/m10_finite_reconnect.rs` unless a path is given.
 ## Known issues
 
 Pre-existing, out of M10's scope:
-- The live path drops its source while attempting (`source_ended`), so
+- ~~The live path drops its source while attempting (`source_ended`), so
   `fresh_open` reads `Cancelled` and a station dying during priming retries
-  without backoff or budget. The finite path was fixed; the m7 suites had to
-  stay unchanged.
+  without backoff or budget.~~ Fixed after M10: `source_ended` leaves the
+  attempt's source for `abandon_attempt`, as the finite path does
+  (`m7_reconnect::a_station_that_keeps_dying_while_priming_backs_off_and_exhausts_the_budget`).
 
 Deferred minors from the review ledger:
 - `pause()`'s rebuild guard (state changed to `Reconnecting`/`Failed`) has no

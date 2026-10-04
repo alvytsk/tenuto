@@ -356,7 +356,7 @@ fn a_truncated_tail_cannot_become_end_of_track() {
     // than was actually recorded.
     let server =
         TestServer::start(Script::from_fixture("sine-5s.flac").truncate_body_after(16 << 10));
-    let mut engine = TestEngine::start_idle();
+    let mut engine = TestEngine::start_without_recovery();
     engine.load_remote(&server.url("/audio.flac"));
     assert_eq!(engine.handle().submit_play(), Admission::Accepted);
     engine.play_until_terminal(Duration::from_secs(10));
@@ -578,7 +578,7 @@ fn play_after_a_remote_failure_reopens_once_at_the_preserved_position() {
     // an automatic retry - brings it back there.
     let server =
         TestServer::start(Script::from_fixture("sine-5s.flac").truncate_body_after(16 << 10));
-    let mut engine = TestEngine::start_idle();
+    let mut engine = TestEngine::start_without_recovery();
     engine.load_remote(&server.url("/audio.flac"));
     assert_eq!(engine.handle().submit_play(), Admission::Accepted);
     engine.await_state(PlaybackState::Playing);
@@ -679,7 +679,7 @@ fn a_second_explicit_play_after_a_still_broken_server_fails_again_rather_than_si
     // comes. `play_until_terminal` keeps the clock running until it does.
     let server =
         TestServer::start(Script::from_fixture("sine-5s.flac").truncate_body_after(16 << 10));
-    let mut engine = TestEngine::start_idle();
+    let mut engine = TestEngine::start_without_recovery();
     engine.load_remote(&server.url("/audio.flac"));
     assert_eq!(engine.handle().submit_play(), Admission::Accepted);
     engine.await_state(PlaybackState::Playing);

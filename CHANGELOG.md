@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A live station that keeps dropping right after it connects now waits
+  between reconnects and gives up when the reconnect budget runs out, instead
+  of reconnecting in a tight loop forever.
 - A seek stored while stopped is no longer lost when the next Play fails to
   resume; the Play after that still lands on it.
 - Arrow-key seeks made while stopped accumulate on the stored target instead

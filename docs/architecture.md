@@ -385,7 +385,7 @@ Success is step 7, not the return of any earlier call. `reinstall()` is never us
 
 ### 7.6 Finite media recovery
 
-A remote finite source whose resume capability is `Supported` recovers from a dropped or stalled connection through the same `Reconnecting` state, `Outage` and `ReconnectPolicy` as a station. Range-less servers and sources whose seek support is still `Unknown` fail as before. A reopen of an already-proven location keeps its `Native` seek support.
+A remote finite source on a range-capable server (seek support `Native` or `Unknown`) recovers from a dropped or stalled connection through the same `Reconnecting` state, `Outage` and `ReconnectPolicy` as a station. `Unknown` qualifies because the server already takes ranges; the attempt's reseek is the demuxer's first trial, and a refusal fails the session. Range-less servers fail as before. A reopen of an already-proven location keeps its `Native` seek support.
 
 **Entry** (`Playing`, remote, `Supported`, not a retirement): a read failure that `retryable(failure, Finite)` accepts. The table: `Transport`, `Timeout`, 429 and 5xx retry for both continuities; `LiveEnded` only for a station; `TruncatedBody` only for finite media; everything else fails. The transport stays up so the ring plays out. A failure that arrives with a pause already submitted (the freeze level up) lands in the recovery pause instead.
 

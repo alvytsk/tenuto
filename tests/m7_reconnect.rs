@@ -273,6 +273,36 @@ fn a_source_that_probes_but_dies_while_priming_is_a_failed_attempt() {
 }
 
 #[test]
+fn a_station_that_keeps_dying_while_priming_backs_off_and_exhausts_the_budget() {
+    // Every reconnect probes and then dies before a frame primes. Each one is
+    // a failed attempt: it waits out the backoff, and the outage's budget
+    // ends them, rather than retrying at once and forever.
+    let server = TestServer::start(
+        station()
+            .truncate_body_after(CUT)
+            .then(station().truncate_body_after(2 * 1024)),
+    );
+    let mut engine = start_with(
+        &server,
+        ReconnectPolicy {
+            backoff: [100; 5].map(Duration::from_millis),
+            ..quick()
+        },
+    );
+    engine.play_until_event(failed);
+    // One playing connection, then at most one attempt per 100 ms backoff
+    // step inside the 600 ms budget. No lower bound: a loaded machine may
+    // spend the whole budget on one attempt.
+    let requests = server.requests().len();
+    assert!(
+        requests <= 8,
+        "{requests} requests: the attempts did not back off"
+    );
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
 fn a_reconnect_that_comes_back_finite_fails_as_resource_changed() {
     let server = TestServer::start(
         station()
