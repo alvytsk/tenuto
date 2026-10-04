@@ -41,7 +41,7 @@ fn main() -> ExitCode {
         Err(error) => {
             // A closed terminal must not turn the report into a panic.
             let _ = writeln!(std::io::stderr(), "tenuto: {error}");
-            tracing::error!(error = ?error, "playback failed");
+            tracing::error!(error = ?error, "command failed");
             ExitCode::FAILURE
         }
     }
