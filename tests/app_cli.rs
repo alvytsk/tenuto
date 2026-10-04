@@ -43,7 +43,10 @@ fn a_pause_routed_through_the_cli_reaches_a_stalled_read_promptly() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.flac"), patient_limits);
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     assert!(
@@ -62,7 +65,6 @@ fn a_pause_routed_through_the_cli_reaches_a_stalled_read_promptly() {
     let issued = Instant::now();
     KeyRouter::new().route(
         &engine.handle(),
-        true,
         Duration::ZERO,
         None,
         Instant::now(),
@@ -93,7 +95,10 @@ fn an_arrow_key_seek_routed_through_the_cli_retires_a_stalled_fetch_promptly() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.flac"), patient_limits);
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     assert!(
@@ -113,7 +118,6 @@ fn an_arrow_key_seek_routed_through_the_cli_retires_a_stalled_fetch_promptly() {
     let pressed = Instant::now();
     router.route(
         &engine.handle(),
-        true,
         position,
         None,
         pressed,
@@ -159,7 +163,10 @@ fn a_burst_of_arrow_presses_costs_one_seek_rather_than_one_per_press() {
     let server = TestServer::start(Script::from_fixture("sine-5s.mp3"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.mp3"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
@@ -179,7 +186,6 @@ fn a_burst_of_arrow_presses_costs_one_seek_rather_than_one_per_press() {
     for _ in 0..4 {
         router.route(
             &engine.handle(),
-            true,
             position,
             None,
             pressed,

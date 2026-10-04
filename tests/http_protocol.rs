@@ -19,7 +19,7 @@ use tenuto::media::id::{MediaId, NormalizedUrl};
 use tenuto::media::source::SourceLocation;
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::store::StateStore;
-use tenuto::playback::command::{Admission, ResumeIntent};
+use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::error::PlaybackError;
 use tenuto::playback::event::PlaybackEvent;
 use tenuto::playback::prepare::{PrepareContext, prepare};
@@ -215,7 +215,10 @@ fn every_malformed_range_response_fails_without_committing_a_target() {
         let healthy = TestServer::start(Script::from_fixture("sine-5s.flac"));
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&healthy.url("/audio.flac"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(200));
         let before = engine.progress().position;
@@ -224,7 +227,9 @@ fn every_malformed_range_response_fails_without_committing_a_target() {
 
         let malformed = TestServer::start_on(port, malformed_script);
         assert_eq!(
-            engine.handle().submit_seek(Duration::from_secs(3)),
+            engine
+                .handle()
+                .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
             Admission::Accepted
         );
         // Either outcome commits nothing: `Failed` (the common case, since
@@ -324,7 +329,10 @@ fn no_broken_transfer_can_become_a_completed_track() {
             .unwrap_or_else(|error| panic!("{name}: registered: {error:?}"));
         rig.engine
             .load_remote_as(request, &url, ResumeIntent::StartAt(Duration::ZERO));
-        assert_eq!(rig.engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            rig.engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         rig.engine.await_state(PlaybackState::Playing);
         rig.engine.play_for(Duration::from_millis(200));
         rig.pump();
@@ -421,7 +429,10 @@ fn no_broken_transfer_can_become_a_completed_track() {
         &stalled_url,
         ResumeIntent::StartAt(Duration::ZERO),
     );
-    assert_eq!(rig.engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        rig.engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     rig.engine.await_state(PlaybackState::Playing);
     rig.engine.play_for(Duration::from_millis(200));
     rig.pump();

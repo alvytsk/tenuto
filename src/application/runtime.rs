@@ -211,8 +211,7 @@ pub(crate) fn shut_down_engine(
     writer: &WriterHandle,
     clock: &dyn Clock,
 ) {
-    engine.interrupt_shutdown();
-    engine.commands().send(PlaybackCommand::Shutdown).ok();
+    engine.submit(PlaybackCommand::Shutdown);
     let report = engine.join();
     writer.submit(
         session.reconcile_shutdown(&report, clock.sample()),
@@ -578,7 +577,7 @@ impl PlayerRuntime {
             AppCommand::Stop => {
                 self.router.cancel();
                 if let Some(engine) = &self.engine {
-                    engine.interrupt_stop();
+                    engine.submit(PlaybackCommand::Stop);
                 }
             }
             AppCommand::AdjustVolume(delta) => self.adjust_volume(delta),
@@ -674,7 +673,7 @@ impl PlayerRuntime {
         if self.session.pending_load_count() == 0
             && let Some(engine) = &self.engine
         {
-            engine.interrupt_stop();
+            engine.submit(PlaybackCommand::Stop);
         }
     }
 
@@ -830,10 +829,6 @@ impl PlayerRuntime {
         };
         let optimistic = self.router.route(
             engine,
-            matches!(
-                mirror.state,
-                PlaybackState::Playing | PlaybackState::Reconnecting
-            ),
             mirror.position,
             mirror.duration,
             Instant::now(),
@@ -856,7 +851,7 @@ impl PlayerRuntime {
         });
         if seekable
             && let Some(engine) = &self.engine
-            && engine.submit_seek(target) != Admission::Accepted
+            && engine.submit(PlaybackCommand::SeekTo(target)) != Admission::Accepted
         {
             self.status = Some(PLAYER_BUSY.to_owned());
         }
@@ -1379,7 +1374,7 @@ impl PlayerRuntime {
             && self.session.pending_load_count() == 0
             && let Some(engine) = &self.engine
         {
-            engine.interrupt_stop();
+            engine.submit(PlaybackCommand::Stop);
         }
         if self.session.adopted().is_none() {
             self.mirror = None;

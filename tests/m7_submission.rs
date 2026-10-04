@@ -20,7 +20,9 @@ fn a_rejected_seek_leaves_a_range_less_stream_playing_on_its_one_connection() {
     engine.play_for(Duration::from_millis(300));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     engine.await_event(|event| matches!(event, PlaybackEvent::SeekRejected { .. }));
@@ -58,7 +60,10 @@ fn a_replacement_load_interrupts_a_stalled_read_instead_of_waiting_it_out() {
             ..Limits::brisk()
         },
     );
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     // Drain the ring so the decoder has to go back to the byte channel, and
     // give it more than the stalled body ever delivers: only then is the

@@ -9,51 +9,19 @@ use crate::playback::command::{Admission, PlaybackCommand};
 use crate::playback::engine::EngineHandle;
 use crate::playback::event::PlaybackEvent;
 
-/// Sends one decoded key command to the `EngineHandle` action §8 actually
-/// built for it — the out-of-band `submit_pause`/`submit_play`/`submit_seek`,
-/// or the non-blocking `submit` for everything else — rather than the
-/// blocking `commands().send` every command but `Stop`/`Shutdown` used to
-/// travel on (IMPORTANT 2, final review). `Shutdown` never reaches here:
-/// `handle_keys` decides to end the loop itself and has nothing left to route.
+/// Sends one decoded key command through `EngineHandle::submit`, which
+/// applies each command's out-of-band rule itself (M9.4). `Shutdown` never
+/// reaches here: `handle_keys` decides to end the loop itself and has nothing
+/// left to route.
 ///
 /// `SeekBy` is the one command this does not handle: an arrow press
 /// accumulates into a [`SeekBurst`] rather than reaching the engine on its
 /// own, so it is routed by [`KeyRouter::route`] before it ever gets here.
-fn route_command(engine: &EngineHandle, pausable: bool, command: PlaybackCommand) {
+fn route_command(engine: &EngineHandle, command: PlaybackCommand) {
     match command {
         // Loop control, decided by `handle_keys` itself before this is ever
         // called - nothing to route.
         PlaybackCommand::Shutdown => {}
-        // Out of band, like `Shutdown`. The ordinary command queue stops
-        // being read while an event backlog exists, and a queued Stop cannot
-        // interrupt a refinement already running, so pressing `s` would not
-        // stop anything when it matters most.
-        PlaybackCommand::Stop => engine.interrupt_stop(),
-        // `TogglePause`'s direction has to be decided here rather than left
-        // for the worker's own `dispatch` to read off `self.state`: routing
-        // through `submit_pause`/`submit_play` means picking one of the two
-        // *before* it is queued, since only the one actually chosen also
-        // freezes or thaws the source interrupt a blocked read is waiting on
-        // (§9). The mirror is this thread's freshest view of which playback
-        // means "toggle" answers to; a worker that has since moved on treats
-        // the resulting `Pause`/`Play` as the no-op it already is for a state
-        // it is not in; the freeze/thaw level is the part that actually has
-        // to be right, and the mirror lags the worker by at most one drain
-        // cycle - the same staleness every other read of it in this file
-        // already lives with.
-        PlaybackCommand::TogglePause => {
-            report_admission(if pausable {
-                engine.submit_pause()
-            } else {
-                engine.submit_play()
-            });
-        }
-        PlaybackCommand::Play => {
-            report_admission(engine.submit_play());
-        }
-        PlaybackCommand::Pause => {
-            report_admission(engine.submit_pause());
-        }
         // Never reaches here - `KeyRouter::route` intercepts it into the
         // burst. Submitting it raw would resolve the target against a mirror
         // that cannot have moved since the last press, which is the defect
@@ -185,14 +153,11 @@ impl KeyRouter {
     /// immediately when an arrow press accumulated into the burst, and `None`
     /// for every command that leaves the displayed position alone.
     ///
-    /// `pausable` is whether `TogglePause` means *pause*: true while playing
-    /// **or reconnecting** (M7 §6.3). It, `position` and `duration` are the
-    /// three `Mirror` fields this routing reads, taken separately so `Mirror`
-    /// itself can stay private.
+    /// `position` and `duration` are the two `Mirror` fields this routing
+    /// reads, taken separately so `Mirror` itself can stay private.
     pub fn route(
         &mut self,
         engine: &EngineHandle,
-        pausable: bool,
         position: Duration,
         duration: Option<Duration>,
         now: Instant,
@@ -212,7 +177,7 @@ impl KeyRouter {
             // burst: routing them must not cost the listener their scrub.
             _ => {}
         }
-        route_command(engine, pausable, command);
+        route_command(engine, command);
         None
     }
 
@@ -223,7 +188,9 @@ impl KeyRouter {
             // A seek the queue refuses will never report a landing, so the
             // hold has to end here rather than wait for an event that is not
             // coming.
-            if report_admission(engine.submit_seek(target)) != Admission::Accepted {
+            if report_admission(engine.submit(PlaybackCommand::SeekTo(target)))
+                != Admission::Accepted
+            {
                 self.release();
             }
         }
@@ -240,7 +207,7 @@ impl KeyRouter {
     }
 }
 
-/// The absolute target an arrow-key seek asks for. `submit_seek` takes a
+/// The absolute target an arrow-key seek asks for. `SeekTo` takes a
 /// `Duration`, not a delta, so this is the same clamp-at-zero arithmetic
 /// `engine.rs`'s own `SeekBy` dispatch performs, computed here instead
 /// against the mirror's position now that the CLI resolves the target rather

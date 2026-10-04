@@ -16,7 +16,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use tenuto::playback::command::Admission;
+use tenuto::playback::command::{Admission, PlaybackCommand};
 use tenuto::playback::event::PlaybackEvent;
 use tenuto::playback::state::PlaybackState;
 
@@ -64,7 +64,10 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
             TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&server.url("/audio.flac"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(100));
         assert!(
@@ -72,7 +75,7 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
             "case 1: the read never blocked, so there was no wait to cancel"
         );
 
-        engine.handle().submit_stop();
+        engine.handle().submit(PlaybackCommand::Stop);
         // `await_state`'s own bounded deadline is the proof: a worker still
         // blocked on the network could never answer this.
         engine.await_state(PlaybackState::Stopped);
@@ -128,7 +131,7 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
              the producer never actually blocked"
         );
 
-        engine.handle().submit_stop();
+        engine.handle().submit(PlaybackCommand::Stop);
         engine.await_state(PlaybackState::Stopped);
 
         engine.finish();
@@ -145,7 +148,10 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
         let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&server.url("/audio.flac"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(100));
         let before = engine.progress().position;
@@ -163,7 +169,9 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
             Script::from_fixture("sine-5s.flac").stall_body_after(4 << 10),
         );
         assert_eq!(
-            engine.handle().submit_seek(Duration::from_secs(3)),
+            engine
+                .handle()
+                .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
             Admission::Accepted
         );
         assert!(
@@ -171,7 +179,7 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
             "case 3: the seek's read never blocked"
         );
 
-        engine.handle().submit_stop();
+        engine.handle().submit(PlaybackCommand::Stop);
         engine.await_state(PlaybackState::Stopped);
         let cancelled = engine.await_event(|e| matches!(e, PlaybackEvent::SeekCancelled { .. }));
         assert!(matches!(cancelled, PlaybackEvent::SeekCancelled { .. }));
@@ -213,12 +221,17 @@ fn every_wait_wakes_and_stale_responses_cannot_repopulate() {
         // a real one to stumble over.
         let healed = TestServer::start_on(port, Script::from_fixture("sine-5s.flac"));
         assert_eq!(
-            engine.handle().submit_seek(Duration::from_secs(2)),
+            engine
+                .handle()
+                .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
             Admission::Accepted
         );
         let stored = engine.await_event(|e| matches!(e, PlaybackEvent::SeekTargetStored { .. }));
         assert!(matches!(stored, PlaybackEvent::SeekTargetStored { .. }));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         let landed = engine.await_seek_completed(Duration::from_secs(10));
         assert!(

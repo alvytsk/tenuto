@@ -103,14 +103,20 @@ fn a_forward_seek_on_a_no_index_mp3_lands_without_rescanning_from_the_first_pack
         TestServer::start(Script::from_fixture(NOXING).trickle(4096, Duration::from_millis(5)));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.mp3"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(300));
 
     let requests_before = server.requests().len();
     let bytes_before = server.bytes_written();
     let target = Duration::from_secs(60);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     assert!(
         wait_for_new_request(&server, requests_before, Duration::from_secs(5)),
         "the seek's own request never reached the server"
@@ -174,14 +180,20 @@ fn repeated_seeks_stay_responsive() {
         TestServer::start(Script::from_fixture(NOXING).trickle(4096, Duration::from_millis(5)));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.mp3"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(200));
 
     let mut previous = Duration::ZERO;
     for step in 1..=5u64 {
         let target = Duration::from_secs(step * 30);
-        assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::SeekTo(target)),
+            Admission::Accepted
+        );
         let landed = await_event_within(&mut engine, Duration::from_millis(500), |event| {
             matches!(event, PlaybackEvent::SeekCompleted { .. })
         });
@@ -225,11 +237,14 @@ fn a_seek_against_a_stalled_source_fails_within_its_deadline() {
     let server = TestServer::start(Script::from_fixture(NOXING));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.mp3"), Limits::brisk());
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     let before = engine.progress().position;
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
     let port = server.port();
     server.shutdown();
@@ -237,7 +252,9 @@ fn a_seek_against_a_stalled_source_fails_within_its_deadline() {
     let stalling = TestServer::start_on(port, Script::from_fixture(NOXING).stall_body_after(256));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(300)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(300))),
         Admission::Accepted
     );
     assert!(
@@ -297,13 +314,18 @@ fn pause_stop_and_quit_are_serviced_during_a_seek() {
             ..Limits::brisk()
         },
     );
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(200));
 
     let requests_before = server.requests().len();
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(300)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(300))),
         Admission::Accepted
     );
     assert!(
@@ -312,7 +334,10 @@ fn pause_stop_and_quit_are_serviced_during_a_seek() {
     );
 
     let pause_deadline = Instant::now() + Duration::from_millis(750);
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     loop {
         if engine.state() == PlaybackState::Paused {
             break;
@@ -326,7 +351,7 @@ fn pause_stop_and_quit_are_serviced_during_a_seek() {
     }
 
     let stop_deadline = Instant::now() + Duration::from_millis(750);
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     loop {
         if engine.state() == PlaybackState::Stopped {
             break;
@@ -353,12 +378,17 @@ fn an_estimated_landing_reports_estimated_provenance() {
     let server = TestServer::start(Script::from_fixture(NOXING));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.mp3"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(120)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(120))),
         Admission::Accepted
     );
     let landed = engine.await_seek_completed(Duration::from_secs(10));
@@ -399,11 +429,16 @@ fn a_remote_mp3_seek_reports_estimated_and_a_local_flac_seek_reports_established
     let server = TestServer::start(Script::from_fixture("sine-5s.mp3"));
     let mut remote = TestEngine::start_idle();
     remote.load_remote(&server.url("/audio.mp3"));
-    assert_eq!(remote.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        remote.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     remote.await_state(PlaybackState::Playing);
     remote.play_for(Duration::from_millis(100));
     assert_eq!(
-        remote.handle().submit_seek(Duration::from_millis(3_000)),
+        remote
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_millis(3_000))),
         Admission::Accepted
     );
     let remote_landing = remote.await_seek_completed(Duration::from_secs(10));
@@ -440,10 +475,13 @@ fn recovery_after_a_failed_seek_gets_a_fresh_deadline() {
     let server = TestServer::start(Script::from_fixture(NOXING));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.mp3"), Limits::brisk());
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
     let port = server.port();
     server.shutdown();
@@ -452,7 +490,9 @@ fn recovery_after_a_failed_seek_gets_a_fresh_deadline() {
 
     let first_start = Instant::now();
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(200)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(200))),
         Admission::Accepted
     );
     let first = await_event_within(&mut engine, Duration::from_secs(2), |event| {
@@ -476,7 +516,9 @@ fn recovery_after_a_failed_seek_gets_a_fresh_deadline() {
 
     let second_start = Instant::now();
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(250)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(250))),
         Admission::Accepted
     );
     let second = await_event_within(&mut engine, Duration::from_secs(2), |event| {
@@ -510,11 +552,17 @@ fn a_seek_that_stalls_while_paused_still_fails_within_its_deadline() {
     let server = TestServer::start(Script::from_fixture(NOXING));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.mp3"), Limits::brisk());
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Paused);
     let before = engine.progress().position;
 
@@ -523,7 +571,9 @@ fn a_seek_that_stalls_while_paused_still_fails_within_its_deadline() {
     let stalling = TestServer::start_on(port, Script::from_fixture(NOXING).stall_body_after(256));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(300)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(300))),
         Admission::Accepted
     );
     // Proves the read was actually entered — before asserting anything about
@@ -573,11 +623,14 @@ fn a_seek_on_an_indexed_remote_mp3_is_bounded_too() {
     let server = TestServer::start(Script::from_fixture("sine-5s.mp3"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.mp3"), Limits::brisk());
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     let before = engine.progress().position;
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
     let port = server.port();
     server.shutdown();
@@ -588,7 +641,9 @@ fn a_seek_on_an_indexed_remote_mp3_is_bounded_too() {
     );
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_millis(3_500)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_millis(3_500))),
         Admission::Accepted
     );
     assert!(
@@ -656,17 +711,26 @@ fn every_seek_entry_point_is_routed() {
         let server = TestServer::start(Script::from_fixture(NOXING));
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&server.url("/audio.mp3"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(100));
         let target = Duration::from_secs(300);
-        assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::SeekTo(target)),
+            Admission::Accepted
+        );
         engine.await_seek_completed(Duration::from_secs(10));
 
-        engine.handle().submit_stop();
+        engine.handle().submit(PlaybackCommand::Stop);
         engine.await_state(PlaybackState::Stopped);
         let requests_before_play = server.requests().len();
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
 
         // The reopen `ensure_source_open` performs first requests byte 0,
@@ -702,10 +766,16 @@ fn every_seek_entry_point_is_routed() {
         let server = TestServer::start(Script::from_fixture(NOXING));
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&server.url("/audio.mp3"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         let target = Duration::from_secs(300);
-        assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::SeekTo(target)),
+            Admission::Accepted
+        );
         engine.await_seek_completed(Duration::from_secs(10));
         engine.play_for(target + Duration::from_millis(500));
 
@@ -761,18 +831,23 @@ fn every_seek_entry_point_is_routed() {
         let server = TestServer::start(Script::from_fixture("sine-5s.mp3"));
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&server.url("/audio.mp3"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         // Ordinary continuous playback only, never a seek: capabilities stay
         // `Unknown` right up to the stopped seek below, exactly the case
         // `verify_seek_support` exists for.
         engine.play_for(Duration::from_millis(4_500));
-        engine.handle().submit_stop();
+        engine.handle().submit(PlaybackCommand::Stop);
         engine.await_state(PlaybackState::Stopped);
 
         let requests_before_validation = server.requests().len();
         assert_eq!(
-            engine.handle().submit_seek(Duration::from_secs(3)),
+            engine
+                .handle()
+                .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
             Admission::Accepted
         );
         engine.await_event(|event| matches!(event, PlaybackEvent::SeekTargetStored { .. }));

@@ -15,7 +15,7 @@ use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::id::{MediaId, NormalizedUrl};
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::store::StateStore;
-use tenuto::playback::command::{Admission, ResumeIntent};
+use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, StartDisposition};
 use tenuto::playback::state::PlaybackState;
 use tenuto::resume::resume_candidate;
@@ -166,7 +166,10 @@ fn a_second_session_resumes_from_the_flushed_checkpoint() {
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
-    assert_eq!(engine1.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine1.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine1.await_state(PlaybackState::Playing);
     engine1.play_for(Duration::from_secs(2));
     let mut rig1 = RemoteRig {
@@ -239,7 +242,10 @@ fn a_second_session_resumes_from_the_flushed_checkpoint() {
     // the trailing assertion below would hold even if `rig2` never wrote
     // anything at all (exactly the defect `pump_until_loaded`'s doc comment
     // describes), since it would just be restating `flushed.completed`.
-    assert_eq!(rig2.engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        rig2.engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     rig2.engine.await_state(PlaybackState::Playing);
     // `play_for` waits for the *absolute* position to reach its argument,
     // not for a span of further playback — session 2 resumed past 300ms
@@ -297,7 +303,10 @@ fn the_protection_survives_a_process_boundary() {
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
-    assert_eq!(engine1.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine1.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine1.await_state(PlaybackState::Playing);
     engine1.play_for(Duration::from_secs(2));
     let mut rig1 = RemoteRig {
@@ -349,7 +358,10 @@ fn the_protection_survives_a_process_boundary() {
         }
         other => panic!("expected ResumeUnavailable, got {other:?}"),
     }
-    assert_eq!(rig2.engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        rig2.engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     rig2.engine.await_state(PlaybackState::Playing);
     rig2.engine.play_for(Duration::from_millis(300));
     rig2.pump();
@@ -406,7 +418,10 @@ fn the_protection_survives_a_process_boundary() {
     // established, so nothing overwrites the position") is what preserves
     // the checkpoint below, not the protection this test exists to prove
     // survives a second boundary.
-    assert_eq!(rig3.engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        rig3.engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     rig3.engine.await_state(PlaybackState::Playing);
     rig3.engine.play_for(Duration::from_millis(300));
     rig3.pump();

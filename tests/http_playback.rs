@@ -17,7 +17,7 @@ use tenuto::media::capabilities::SeekSupport;
 use tenuto::media::id::{MediaId, NormalizedUrl};
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::store::StateStore;
-use tenuto::playback::command::{Admission, ResumeIntent};
+use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, StartDisposition};
 use tenuto::playback::state::PlaybackState;
 use tenuto::resume::resume_candidate;
@@ -132,7 +132,10 @@ fn mp3_flac_and_wav_play_before_the_body_completes() {
                 ..Limits::brisk()
             },
         );
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(150));
 
@@ -165,12 +168,17 @@ fn seeking_installs_the_media_position_and_requests_that_byte() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(4)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(4))),
         Admission::Accepted
     );
     let forward_landed = engine.await_seek_completed(Duration::from_secs(10));
@@ -195,7 +203,9 @@ fn seeking_installs_the_media_position_and_requests_that_byte() {
     );
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_millis(500)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_millis(500))),
         Admission::Accepted
     );
     let backward_landed = engine.await_seek_completed(Duration::from_secs(10));
@@ -239,12 +249,17 @@ fn a_range_less_server_plays_but_cannot_seek_or_resume() {
         let server = TestServer::start(script);
         let mut engine = TestEngine::start_idle();
         engine.load_remote(&server.url("/audio.flac"));
-        assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+        assert_eq!(
+            engine.handle().submit(PlaybackCommand::Play),
+            Admission::Accepted
+        );
         engine.await_state(PlaybackState::Playing);
         engine.play_for(Duration::from_millis(100));
 
         assert_eq!(
-            engine.handle().submit_seek(Duration::from_secs(2)),
+            engine
+                .handle()
+                .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
             Admission::Accepted
         );
         let rejection = engine.await_event(|e| matches!(e, PlaybackEvent::SeekRejected { .. }));
@@ -292,7 +307,10 @@ fn a_range_less_server_plays_but_cannot_seek_or_resume() {
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
-    assert_eq!(engine1.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine1.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine1.await_state(PlaybackState::Playing);
     engine1.play_for(Duration::from_secs(2));
     let mut rig1 = RemoteRig {
@@ -342,7 +360,10 @@ fn a_range_less_server_plays_but_cannot_seek_or_resume() {
         clock: clock2,
     };
     rig2.pump();
-    assert_eq!(rig2.engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        rig2.engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     rig2.engine.await_state(PlaybackState::Playing);
     rig2.engine.play_for(Duration::from_millis(300));
     rig2.pump();
@@ -510,7 +531,10 @@ fn occupancy_stays_bounded_and_starvation_silence_does_not_advance_position() {
          {settled} > {bound} (of a {body_len}-byte body)"
     );
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     // `settled` bytes of uncompressed PCM is itself several seconds of
     // audio (how many varies run to run with whatever the kernel's own
@@ -553,7 +577,10 @@ fn occupancy_stays_bounded_and_starvation_silence_does_not_advance_position() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
     let mut engine = TestEngine::start_idle();
     engine.load_remote_with_limits(&server.url("/audio.flac"), Limits::default());
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     assert!(

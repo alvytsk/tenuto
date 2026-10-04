@@ -255,7 +255,7 @@ fn run(situation: Situation, cancel: Cancel) {
     let started = Instant::now();
     let ended = match cancel {
         Cancel::Pause => {
-            engine.handle().submit_pause();
+            engine.handle().submit(PlaybackCommand::Pause);
             engine.await_event(is(PlaybackState::Paused));
             Instant::now()
         }

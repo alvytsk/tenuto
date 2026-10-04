@@ -139,10 +139,12 @@ fn a_reopen_keeps_a_seek_the_session_already_proved() {
         |event: &PlaybackEvent| matches!(event, PlaybackEvent::CapabilitiesChanged { .. });
     let announced = engine.count_events(capabilities);
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     assert_eq!(
@@ -178,16 +180,25 @@ fn a_failed_resume_keeps_the_stored_target_for_the_next_play() {
     // Space's range request is the next one, refused. The second Space lands.
     let server = server(&[(PLAYING + OPEN + 1, Script::serving(Vec::new()).status(503))]);
     let mut engine = start(&server, quick());
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
     let target = Duration::from_secs(2);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     engine.await_event(stored);
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_event(failed);
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(
         landed.actual.abs_diff(target) < Duration::from_millis(1),
@@ -203,10 +214,12 @@ fn a_failed_resume_keeps_the_stored_target_for_the_next_play() {
 fn seek_by_while_stopped_accumulates_on_the_stored_target() {
     let server = server(&[]);
     let mut engine = start(&server, quick());
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     engine.await_event(stored);
@@ -422,6 +435,13 @@ fn an_episode_played_from_zero_recovers() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.play_until_event(state(PlaybackState::Playing));
     assert_eq!(engine.count_events(failed), 0);
+    // The reseek that landed is the proof (§6): the session is Native now,
+    // as if the episode had been resumed by a seek.
+    let proven = |event: &PlaybackEvent| {
+        matches!(event, PlaybackEvent::CapabilitiesChanged { capabilities, .. }
+            if capabilities.seek == SeekSupport::Native)
+    };
+    assert_eq!(engine.count_events(proven), 1);
     engine.finish();
     server.shutdown();
 }
@@ -524,7 +544,10 @@ fn past_the_budget_it_fails_and_space_tries_exactly_once() {
         "the drop never entered one outage"
     );
     let before = server.requests().len();
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Failed);
     assert_eq!(server.requests().len(), before + 1, "Space is one attempt");
     engine.finish();
@@ -585,7 +608,10 @@ fn a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(server.requests().len(), RESUMED);
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     assert_eq!(stored_target(engine.await_event(stored)), target);
     // Exact, so it also proves no attempt has run yet.
     assert_eq!(
@@ -617,7 +643,10 @@ fn seek_by_presses_during_recovery_accumulate() {
     let server = dropped();
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
-    assert_eq!(engine.handle().submit_seek(RESUME), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(RESUME)),
+        Admission::Accepted
+    );
     engine.await_event(stored);
     let mut targets = Vec::new();
     for _ in 0..4 {
@@ -653,7 +682,10 @@ fn a_failed_attempt_keeps_the_stored_target_for_the_next() {
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     engine.await_event(stored);
     engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
@@ -703,7 +735,10 @@ fn a_seek_after_a_restart_supersedes_it() {
     engine.send(PlaybackCommand::Restart);
     engine.await_event(stored);
     let target = Duration::from_secs(1);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     assert_eq!(stored_target(engine.await_event(stored)), target);
     engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
@@ -725,10 +760,13 @@ fn a_restart_stored_during_recovery_survives_stop_and_space() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     engine.await_event(stored);
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
     assert_eq!(server.requests().len(), RESUMED);
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     assert_eq!(engine.await_restart_established(), Duration::ZERO);
     engine.await_event(state(PlaybackState::Playing));
     assert_eq!(server.requests().len(), RESUMED + OPEN);
@@ -751,18 +789,27 @@ fn a_priming_failure_on_space_fails_honestly_and_keeps_the_target() {
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     engine.await_event(stored);
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_event(failed);
     assert_eq!(engine.count_events(state(PlaybackState::Playing)), 0);
     assert_eq!(engine.count_events(seek_completed), 0);
     assert_eq!(server.requests().len(), reseek);
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
     engine.await_event(state(PlaybackState::Playing));
@@ -779,7 +826,9 @@ fn a_seek_near_the_end_during_recovery_plays_out_and_ends() {
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_millis(3800)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_millis(3800))),
         Admission::Accepted
     );
     engine.await_event(stored);
@@ -815,10 +864,16 @@ fn pausing_during_recovery_keeps_the_target_and_space_resumes_at_it() {
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     engine.await_event(stored);
 
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_event(state(PlaybackState::Paused));
     assert!(
         !engine.handle().source_interrupt().is_frozen(),
@@ -826,7 +881,10 @@ fn pausing_during_recovery_keeps_the_target_and_space_resumes_at_it() {
     );
     assert_eq!(server.requests().len(), RESUMED);
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
     engine.await_event(state(PlaybackState::Playing));
@@ -843,11 +901,16 @@ fn a_seek_in_a_recovery_pause_is_stored_offline_and_space_lands_at_it() {
     let server = dropped();
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_event(state(PlaybackState::Paused));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(10)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(10))),
         Admission::Accepted
     );
     assert_eq!(
@@ -856,7 +919,10 @@ fn a_seek_in_a_recovery_pause_is_stored_offline_and_space_lands_at_it() {
         "clamped to the duration cached when the connection was lost"
     );
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     assert_eq!(stored_target(engine.await_event(stored)), target);
     assert_eq!(
         server.requests().len(),
@@ -864,7 +930,10 @@ fn a_seek_in_a_recovery_pause_is_stored_offline_and_space_lands_at_it() {
         "a seek in a recovery pause touched the network"
     );
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
     engine.await_event(state(PlaybackState::Playing));
@@ -881,12 +950,18 @@ fn stopping_during_recovery_keeps_the_target_and_space_resumes_at_it() {
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     engine.await_event(stored);
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
     assert_eq!(server.requests().len(), RESUMED);
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
     assert_eq!(server.requests().len(), ATTEMPT + OPEN);
@@ -903,10 +978,16 @@ fn a_restart_stored_during_recovery_survives_pause_and_space() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     engine.await_event(stored);
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_event(state(PlaybackState::Paused));
     assert_eq!(server.requests().len(), RESUMED);
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     assert_eq!(engine.await_restart_established(), Duration::ZERO);
     assert_eq!(server.requests().len(), RESUMED + OPEN);
     engine.finish();
@@ -925,7 +1006,10 @@ fn pause_cancels_a_blocked_attempt(stalled: usize, fault: Script) {
         "the attempt never reached its stall"
     );
     assert_eq!(server.requests().len(), stalled);
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_event(state(PlaybackState::Paused));
     assert!(
         !engine.handle().source_interrupt().is_frozen(),
@@ -939,7 +1023,10 @@ fn pause_cancels_a_blocked_attempt(stalled: usize, fault: Script) {
         "Paused was announced twice"
     );
     server.release();
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_event(state(PlaybackState::Playing));
     assert_eq!(server.requests().len(), stalled + OPEN + 1);
     engine.finish();
@@ -985,7 +1072,10 @@ fn a_seek_cancels_a_blocked_attempt_and_the_next_runs_at_once() {
     assert!(server.wait_until_stalled(PATIENCE));
     assert_eq!(server.requests().len(), ATTEMPT);
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     assert_eq!(stored_target(engine.await_event(stored)), target);
     engine.await_event(state(PlaybackState::Playing));
     let landed = engine.await_seek_completed(PATIENCE);
@@ -1010,11 +1100,14 @@ fn stop_cancels_a_blocked_priming_read_and_space_resumes() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert!(server.wait_until_stalled(PATIENCE));
     assert_eq!(server.requests().len(), reseek);
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_event(state(PlaybackState::Stopped));
     assert_eq!(engine.count_events(failed), 0);
     server.release();
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_event(state(PlaybackState::Playing));
     assert_eq!(server.requests().len(), reseek + OPEN + 1);
     engine.finish();
@@ -1059,7 +1152,10 @@ fn a_pause_raced_by_a_dropped_connection_lands_paused_not_reconnecting() {
     engine.let_time_pass_while_unresponsive(Duration::from_millis(1500));
     assert!(server.wait_until_stalled(PATIENCE));
     await_blocked_read(&mut engine);
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     // The hook announces this from inside the blocked read.
     engine.await_event(state(PlaybackState::Paused));
     server.release();
@@ -1071,18 +1167,26 @@ fn a_pause_raced_by_a_dropped_connection_lands_paused_not_reconnecting() {
     // Seeks are stored only offline, so the stored clamp also proves the
     // drop landed in a recovery-pause, at the duration it cached (Decision 6).
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(10)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(10))),
         Admission::Accepted
     );
     assert_eq!(stored_target(engine.await_event(stored)), DURATION);
     let target = Duration::from_millis(2500);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
     assert_eq!(stored_target(engine.await_event(stored)), target);
     assert_eq!(server.requests().len(), RESUMED);
     assert_eq!(engine.count_events(state(PlaybackState::Reconnecting)), 0);
     assert!(!engine.handle().source_interrupt().is_frozen());
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
     engine.await_event(state(PlaybackState::Playing));
@@ -1104,7 +1208,9 @@ fn a_new_load_during_recovery_drops_the_outage_and_the_target() {
     let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_millis(2500)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_millis(2500))),
         Admission::Accepted
     );
     engine.await_event(stored);
@@ -1133,7 +1239,7 @@ fn shutdown_during_a_blocked_attempt_joins_promptly() {
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert!(server.wait_until_stalled(PATIENCE));
     assert_eq!(server.requests().len(), ATTEMPT);
-    engine.handle().submit_shutdown();
+    engine.handle().submit(PlaybackCommand::Shutdown);
     assert!(
         engine.join_within(Duration::from_secs(5)),
         "shutdown waited on a blocked attempt"
@@ -1181,9 +1287,9 @@ fn a_forward_seek_does_not_end_the_outage() {
     let landed = engine.position();
     // Further than stable_after: position growth would call this stable.
     assert_eq!(
-        engine
-            .handle()
-            .submit_seek(landed + Duration::from_millis(1200)),
+        engine.handle().submit(PlaybackCommand::SeekTo(
+            landed + Duration::from_millis(1200)
+        )),
         Admission::Accepted
     );
     engine.await_seek_completed(PATIENCE);
@@ -1212,7 +1318,10 @@ fn a_backward_seek_does_not_stop_heard_playback_ending_the_outage() {
     let mut engine = start(&server, policy);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.play_until_event(state(PlaybackState::Playing));
-    assert_eq!(engine.handle().submit_seek(RESUME), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(RESUME)),
+        Admission::Accepted
+    );
     engine.await_seek_completed(PATIENCE);
     // A fresh outage: the budget did not carry over.
     engine.play_until_event(state(PlaybackState::Reconnecting));
@@ -1277,7 +1386,6 @@ fn arrow_bursts_during_recovery_accumulate_across_progress() {
         let mirror = engine.handle().progress().position;
         router.route(
             &engine.handle(),
-            true,
             mirror,
             None,
             now,
