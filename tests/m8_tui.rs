@@ -4,6 +4,8 @@
 //! the Minimal tier's row of its own, and what a hostile name renders as —
 //! plus the height the help overlay has to stay inside.
 
+mod support;
+
 #[path = "support/runtime.rs"]
 mod runtime;
 #[path = "support/views.rs"]

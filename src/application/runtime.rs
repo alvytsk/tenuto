@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use url::Url;
 
@@ -644,7 +644,7 @@ impl PlayerRuntime {
         if self.seeking_allowed()
             && let Some(engine) = &self.engine
         {
-            self.router.flush(engine, Instant::now());
+            self.router.flush(engine, self.clock.sample().monotonic);
         }
 
         let Some(engine) = &self.engine else {
@@ -824,16 +824,13 @@ impl PlayerRuntime {
     }
 
     fn route(&mut self, command: PlaybackCommand) {
+        let now = self.clock.sample().monotonic;
         let (Some(engine), Some(mirror)) = (&self.engine, &mut self.mirror) else {
             return;
         };
-        let optimistic = self.router.route(
-            engine,
-            mirror.position,
-            mirror.duration,
-            Instant::now(),
-            command,
-        );
+        let optimistic = self
+            .router
+            .route(engine, mirror.position, mirror.duration, now, command);
         // A prediction until the seek lands, so it reaches only the display.
         if let Some(position) = optimistic {
             mirror.position = position;
@@ -1527,6 +1524,7 @@ mod tests {
     use crate::media::id::AbsolutePath;
     use crate::persistence::writer::StateSink;
     use crate::playback::output::null_output::NullOutput;
+    use std::time::Instant;
 
     const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
 

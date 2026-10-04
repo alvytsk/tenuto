@@ -60,7 +60,7 @@ const CHANNELS: u16 = 2;
 const RATE: u32 = 48_000;
 /// 2 ms at 48 kHz: one period, and the granularity of the virtual clock.
 const BUFFER_FRAMES: u32 = 96;
-const PERIOD: Duration = Duration::from_millis(2);
+pub const PERIOD: Duration = Duration::from_millis(2);
 /// Deliberately generous, so that "the ring is empty" and "the last frame has
 /// been heard" are far apart in time and the end-of-track rule is observable.
 const LATENCY: Duration = Duration::from_millis(100);
@@ -175,6 +175,9 @@ struct HarnessOutput {
     /// already failed (M5 §6). `Arc`-shared rather than plain, so a test can
     /// keep reading it after this harness has moved into the engine thread.
     negotiations: Arc<AtomicUsize>,
+    /// A [`VirtualDevice`]'s driver, held so its thread outlives every
+    /// engine teardown that still needs a transition answered.
+    driver: Option<Arc<Driver>>,
 }
 
 impl HarnessOutput {
@@ -182,6 +185,7 @@ impl HarnessOutput {
         Self {
             device,
             negotiations: Arc::new(AtomicUsize::new(0)),
+            driver: None,
         }
     }
 }
@@ -251,6 +255,55 @@ impl Driver {
         if !running && device.link.is_some() {
             device.output.pump_in_place();
         }
+    }
+}
+
+/// One virtual device for a whole application rather than for one engine
+/// (the runtime rig, M9.5). Every output it hands out opens the same
+/// `TestOutput`, so an engine the runtime respawns meets the same clock. Its
+/// own thread answers transitions the way a frozen `TestEngine` driver does;
+/// time passes only through [`advance`](Self::advance). The thread ends once
+/// the last clone and the last output are gone.
+#[derive(Clone)]
+pub struct VirtualDevice(Arc<Driver>);
+
+impl VirtualDevice {
+    pub fn new() -> Self {
+        let driver = Arc::new(Driver {
+            device: Arc::new(Mutex::new(Device {
+                output: TestOutput::new(CHANNELS, RATE, BUFFER_FRAMES, LATENCY),
+                link: None,
+            })),
+            mode: AtomicU8::new(FROZEN),
+            deaf_to_discard: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            network: None,
+            network_runs: AtomicBool::new(false),
+        });
+        let weak = Arc::downgrade(&driver);
+        std::thread::Builder::new()
+            .name("rig-device".into())
+            .spawn(move || {
+                while let Some(driver) = weak.upgrade() {
+                    driver.step();
+                    drop(driver);
+                    std::thread::sleep(DRIVER_NAP);
+                }
+            })
+            .unwrap_or_else(|error| panic!("the rig's device thread must start: {error}"));
+        Self(driver)
+    }
+
+    pub fn output(&self) -> Box<dyn AudioOutput> {
+        Box::new(HarnessOutput {
+            driver: Some(Arc::clone(&self.0)),
+            ..HarnessOutput::new(Arc::clone(&self.0.device))
+        })
+    }
+
+    /// Play `span` of virtual time, in whole periods.
+    pub fn advance(&self, span: Duration) {
+        lock(&self.0.device).output.advance(span);
     }
 }
 

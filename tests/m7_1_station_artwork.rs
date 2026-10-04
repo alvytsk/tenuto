@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use runtime::enqueue;
 use support::server::{Script, TestServer};
-use tenuto::application::runtime::{AppCommand, EnqueueItem, LibraryStores, PlayerRuntime};
+use tenuto::application::runtime::{AppCommand, EnqueueItem, LibraryStores};
 use tenuto::artwork::worker::{CoverSource, default_loader};
 use tenuto::clock::SystemClock;
 use tenuto::feed::cache::CacheStore;
@@ -79,29 +79,28 @@ fn png_bytes() -> Vec<u8> {
 
 /// Polls `active_cover` until it is `Some`, the same pattern
 /// `tests/m5_artwork.rs`'s remote-embedded-cover test uses.
-fn wait_for_cover(runtime: &mut PlayerRuntime) -> CoverSource {
+fn wait_for_cover(rig: &mut runtime::Rig) -> CoverSource {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        runtime.pump();
-        if let Some((_, source)) = runtime.active_cover() {
+        runtime::step(rig);
+        if let Some((_, source)) = rig.runtime.active_cover() {
             return source;
         }
         assert!(
             Instant::now() < deadline,
             "no cover source: {:?}",
-            runtime.view()
+            rig.runtime.view()
         );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 /// Polls `active_cover` until it is `CoverSource::Remote` whose URL path is
 /// exactly `path`.
-fn wait_for_remote_logo_path(runtime: &mut PlayerRuntime, path: &str) -> CoverSource {
+fn wait_for_remote_logo_path(rig: &mut runtime::Rig, path: &str) -> CoverSource {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        runtime.pump();
-        if let Some((_, source)) = runtime.active_cover() {
+        runtime::step(rig);
+        if let Some((_, source)) = rig.runtime.active_cover() {
             let matched = matches!(&source, CoverSource::Remote { url, .. } if url.path() == path);
             if matched {
                 return source;
@@ -110,9 +109,8 @@ fn wait_for_remote_logo_path(runtime: &mut PlayerRuntime, path: &str) -> CoverSo
         assert!(
             Instant::now() < deadline,
             "logo path {path} never appeared: {:?}",
-            runtime.view()
+            rig.runtime.view()
         );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -158,11 +156,7 @@ fn listing_enqueueing_and_restoring_a_station_request_no_logo() {
     );
 
     // 2. enqueue the station
-    let mut rig = runtime::rig_with_parts(
-        PersistedState::default(),
-        Some(stores(root.path())),
-        runtime::null_engine(),
-    );
+    let mut rig = runtime::rig_with_library(PersistedState::default(), stores(root.path()));
     enqueue(
         &mut rig.runtime,
         vec![EnqueueItem::from_input(&station_server.url("/radio"))],
@@ -181,11 +175,7 @@ fn listing_enqueueing_and_restoring_a_station_request_no_logo() {
     // 3. drop the runtime and rebuild it (a process restart)
     let restored_state = rig.runtime.session().state().clone();
     let _ = rig.runtime.shutdown();
-    let mut rig2 = runtime::rig_with_parts(
-        restored_state,
-        Some(stores(root.path())),
-        runtime::null_engine(),
-    );
+    let mut rig2 = runtime::rig_with_library(restored_state, stores(root.path()));
     rig2.runtime.pump();
     assert!(
         rig2.runtime.active_cover().is_none(),
@@ -215,11 +205,7 @@ fn playing_a_station_requests_its_logo_exactly_once() {
     let st = store(root.path());
     add(&http, &st, &station_server.url("/radio")).unwrap_or_else(|error| panic!("{error}"));
 
-    let mut rig = runtime::rig_with_parts(
-        PersistedState::default(),
-        Some(stores(root.path())),
-        runtime::null_engine(),
-    );
+    let mut rig = runtime::rig_with_library(PersistedState::default(), stores(root.path()));
     enqueue(
         &mut rig.runtime,
         vec![EnqueueItem::from_input(&station_server.url("/radio"))],
@@ -227,7 +213,7 @@ fn playing_a_station_requests_its_logo_exactly_once() {
     let station = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
 
-    let source = wait_for_remote_logo_path(&mut rig.runtime, "/logo.svg");
+    let source = wait_for_remote_logo_path(&mut rig, "/logo.svg");
 
     // `active_cover` alone never touches the network; only pushing the
     // source through the loader (what `Artwork::poll` does in the TUI) does.
@@ -256,11 +242,7 @@ fn a_remote_url_no_station_claims_still_uses_its_embedded_cover() {
     ));
 
     let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-    let mut rig = runtime::rig_with_parts(
-        PersistedState::default(),
-        Some(stores(root.path())),
-        runtime::null_engine(),
-    );
+    let mut rig = runtime::rig_with_library(PersistedState::default(), stores(root.path()));
     enqueue(
         &mut rig.runtime,
         vec![EnqueueItem::from_input(&server.url("/a.flac"))],
@@ -268,7 +250,7 @@ fn a_remote_url_no_station_claims_still_uses_its_embedded_cover() {
     let remote = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(remote));
 
-    let source = wait_for_cover(&mut rig.runtime);
+    let source = wait_for_cover(&mut rig);
     assert!(
         matches!(source, CoverSource::Embedded(_)),
         "no station claims this URL, so its own embedded cover must win"
@@ -306,11 +288,7 @@ fn a_station_with_no_logo_falls_back_to_the_embedded_cover() {
     };
     assert_eq!(identity.logo, None, "the fixture sends no icy-logo");
 
-    let mut rig = runtime::rig_with_parts(
-        PersistedState::default(),
-        Some(stores(root.path())),
-        runtime::null_engine(),
-    );
+    let mut rig = runtime::rig_with_library(PersistedState::default(), stores(root.path()));
     enqueue(
         &mut rig.runtime,
         vec![EnqueueItem::from_input(&server.url("/radio"))],
@@ -318,7 +296,7 @@ fn a_station_with_no_logo_falls_back_to_the_embedded_cover() {
     let station = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
 
-    let source = wait_for_cover(&mut rig.runtime);
+    let source = wait_for_cover(&mut rig);
     assert!(
         matches!(source, CoverSource::Embedded(_)),
         "a station with no logo must fall back to the embedded cover"
@@ -365,11 +343,7 @@ fn a_re_probed_logo_replaces_the_old_one_on_the_next_load() {
         panic!("expected Verified, got {outcome:?}");
     };
 
-    let mut rig = runtime::rig_with_parts(
-        PersistedState::default(),
-        Some(stores(root.path())),
-        runtime::null_engine(),
-    );
+    let mut rig = runtime::rig_with_library(PersistedState::default(), stores(root.path()));
     enqueue(
         &mut rig.runtime,
         vec![EnqueueItem::from_input(&station_server.url("/radio"))],
@@ -377,12 +351,12 @@ fn a_re_probed_logo_replaces_the_old_one_on_the_next_load() {
     let station = runtime::row_ids(&rig.runtime)[0];
     rig.runtime.handle(AppCommand::PlayEntry(station));
 
-    let first_source = wait_for_remote_logo_path(&mut rig.runtime, "/logo-a.svg");
+    let first_source = wait_for_remote_logo_path(&mut rig, "/logo-a.svg");
 
     reprobe(&http, &st, &slug).unwrap_or_else(|error| panic!("reprobe: {error}"));
 
     rig.runtime.handle(AppCommand::PlayEntry(station));
-    let second_source = wait_for_remote_logo_path(&mut rig.runtime, "/logo-b.svg");
+    let second_source = wait_for_remote_logo_path(&mut rig, "/logo-b.svg");
 
     assert!(
         second_source != first_source,

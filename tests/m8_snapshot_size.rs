@@ -14,6 +14,8 @@
 //! sits on whatever real filesystem the crate itself is built on — the same
 //! kind of disk `$XDG_STATE_HOME/state.json` lives on, unlike `/tmp`.
 
+mod support;
+
 #[path = "support/runtime.rs"]
 mod runtime;
 

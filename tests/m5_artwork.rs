@@ -265,7 +265,7 @@ fn a_remote_streams_embedded_front_cover_becomes_the_active_cover_source() {
     rig.runtime.handle(AppCommand::PlayEntry(remote));
     let deadline = Instant::now() + Duration::from_secs(10);
     let source = loop {
-        rig.runtime.pump();
+        runtime::step(&mut rig);
         if let Some((_, source)) = rig.runtime.active_cover() {
             break source;
         }
@@ -274,7 +274,6 @@ fn a_remote_streams_embedded_front_cover_becomes_the_active_cover_source() {
             "no cover source: {:?}",
             rig.runtime.view()
         );
-        std::thread::sleep(Duration::from_millis(10));
     };
     assert!(matches!(source, CoverSource::Embedded(_)));
     // The media did not change, but the cover became available: the cheap

@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every path that moves the decoder (resume, seek, restore, restart, device
   rebuild, reconnect) lands through one operation. A reconnect that lands
   now also proves the episode seekable, as any landed seek does.
+- The runtime test rig runs on one virtual clock: its engine plays into a
+  stepped virtual device, and the runtime, its state writer and the network
+  budgets read one fake clock that `pump_until`, `pump_for` and `step`
+  advance together. The runtime reads its seek-burst timing from its own
+  clock instead of the system's.
 
 ## [0.2.0] - 2026-09-23
 
