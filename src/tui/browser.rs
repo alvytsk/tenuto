@@ -149,11 +149,15 @@ impl BrowserState {
         self.synced = Some((Arc::clone(rows), self.cwd.clone()));
         self.queued = rows.iter().map(|row| (row.media.clone(), row.id)).collect();
         self.queued_dirs.clear();
+        // Queued media carries its canonical path; `cwd` is the path as
+        // navigated, which a symlink (or macOS's `/var` -> `/private/var`)
+        // can spell differently. Resolved once per sync, not per frame.
+        let cwd = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
         for row in rows.iter() {
             let MediaId::LocalFile(path) = &row.media else {
                 continue;
             };
-            let Ok(below) = path.as_path().strip_prefix(&self.cwd) else {
+            let Ok(below) = path.as_path().strip_prefix(&cwd) else {
                 continue;
             };
             let mut parts = below.components();

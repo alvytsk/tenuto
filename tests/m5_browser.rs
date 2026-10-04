@@ -1603,6 +1603,25 @@ fn a_directory_holding_a_queued_file_draws_the_tick() {
     assert!(state.ticked(1));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_reached_through_a_symlink_still_draws_the_tick() {
+    // Queued media is identified by its canonical path, but the browser's
+    // `cwd` is the path as navigated: a symlink, or macOS's `/var` ->
+    // `/private/var` temp dir. The tick must not depend on which.
+    let (_dir, root) = sample_dir();
+    let link_parent = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let link = link_parent.path().join("music");
+    std::os::unix::fs::symlink(&root, &link).unwrap_or_else(|error| panic!("symlink: {error}"));
+    let mut state = listed(&link);
+    let deep = listed(&link.join("z")).entries[0]
+        .media
+        .clone()
+        .unwrap_or_else(|| panic!("audio has an identity"));
+    state.sync_queue(&Arc::new(vec![queue_row(views::ids()[0], deep)]));
+    assert!(state.ticked(0), "z/ holds a queued file");
+}
+
 #[test]
 fn the_same_rows_are_synced_again_once_the_directory_moves() {
     let (_dir, root) = sample_dir();
