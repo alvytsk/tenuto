@@ -58,7 +58,7 @@ use crate::http::document::{DocumentOutcome, DocumentRequest};
 use crate::http::error::{RemoteFailure, redact_url};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
-use crate::http::source::{HttpMediaSource, OpeningDeadline, StationIdentity};
+use crate::http::source::{HttpMediaSource, StationIdentity};
 use crate::lifecycle::lock::{LockError, ProfileLock};
 use crate::media::id::{FeedId, MediaId, NormalizedUrl};
 use crate::media::source::SourceLocation;
@@ -1067,18 +1067,14 @@ async fn probe_station(
 ) -> Result<StationIdentity, RemoteFailure> {
     let limits = Limits::default();
     let interrupt = SourceInterrupt::new(limits.buffer_bytes);
-    let deadline = OpeningDeadline::starting_now(&interrupt, &limits);
-    let (source, opening) = HttpMediaSource::open(
+    let identity = HttpMediaSource::open_and_probe(
         Arc::clone(http),
         url.clone(),
         interrupt,
         Arc::new(InertHook),
         limits,
-        deadline,
+        |source| source.station_identity().cloned(),
     )?;
-    opening.finish_opening();
-    let identity = source.station_identity().cloned();
-    drop(source);
     // A source that opened but is not live classified as something other
     // than `Accepted::Live`, so it is not a station (§3 R1).
     identity.ok_or(RemoteFailure::UnsupportedLiveMedia)

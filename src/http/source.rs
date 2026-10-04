@@ -28,28 +28,27 @@ use crate::media::capabilities::{DemuxerSeek, SourceEvidence};
 /// every few seconds, so no read ever times out on its own and opening runs
 /// forever unless something is watching the whole of it.
 #[derive(Clone, Copy, Debug)]
-pub struct OpeningDeadline(pub Instant);
+struct OpeningDeadline(Instant);
 
 impl OpeningDeadline {
     /// `limits.open` from now on the interrupt's clock.
-    pub fn starting_now(interrupt: &SourceInterrupt, limits: &Limits) -> Self {
+    fn starting_now(interrupt: &SourceInterrupt, limits: &Limits) -> Self {
         Self(interrupt.now() + limits.open)
     }
 
     /// `None` once elapsed.
-    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+    fn remaining(&self, now: Instant) -> Option<Duration> {
         self.0.checked_duration_since(now)
     }
 }
 
 /// The two bounds that apply while opening and must be lifted afterwards.
 ///
-/// Shared, because `prepare` (Task 7) boxes the source into a
-/// `MediaSourceStream` and then has no way back to it — this is cloned before
-/// boxing so the caps can still be cleared through the clone once opening (the
-/// format probe included) is over.
+/// Shared, because a probe boxes the source into a `MediaSourceStream` and
+/// then has no way back to it: `open_and_probe` keeps this clone so the caps
+/// can still be cleared once opening (the format probe included) is over.
 #[derive(Debug)]
-pub struct OpeningLimits {
+struct OpeningLimits {
     /// `u64::MAX` means uncapped. An `Option<u64>` behind a `Mutex` would work
     /// too, but a single atomic needs no lock on the hot read path.
     probe_cap: AtomicU64,
@@ -67,9 +66,8 @@ impl OpeningLimits {
         }
     }
 
-    pub fn set_probe_cap(&self, cap: Option<u64>) {
-        self.probe_cap
-            .store(cap.unwrap_or(u64::MAX), Ordering::Release);
+    fn set_probe_cap(&self, cap: u64) {
+        self.probe_cap.store(cap, Ordering::Release);
     }
 
     fn probe_cap(&self) -> Option<u64> {
@@ -89,7 +87,7 @@ impl OpeningLimits {
     /// check is unconditional on `is_opening()`, and `consumed` only ever
     /// grows, so a cap left in place after opening fails every ordinary
     /// track whose total exceeds it, partway through playback.
-    pub fn finish_opening(&self) {
+    fn finish_opening(&self) {
         self.probe_cap.store(u64::MAX, Ordering::Release);
         self.opening.store(false, Ordering::Release);
     }
@@ -226,15 +224,34 @@ pub struct HttpMediaSource {
 }
 
 impl HttpMediaSource {
+    /// Open at byte zero and run `probe` over the source while opening
+    /// lasts — the one opening protocol (M9.5). Every wait, the header wait
+    /// and each read `probe` takes, is clamped to `limits.open` from now on
+    /// the interrupt's clock, so a server that trickles bytes inside
+    /// `limits.stall` still cannot keep opening running (Ruling 3); reads are
+    /// capped at `limits.probe_bytes`. Both bounds lift when `probe` returns,
+    /// whatever it returned, so a source it hands back reads under
+    /// `limits.stall` alone (§8).
+    pub fn open_and_probe<T>(
+        service: Arc<HttpService>,
+        origin: Url,
+        interrupt: Arc<SourceInterrupt>,
+        hook: Arc<dyn WaitHook>,
+        limits: Limits,
+        probe: impl FnOnce(Self) -> T,
+    ) -> Result<T, RemoteFailure> {
+        let deadline = OpeningDeadline::starting_now(&interrupt, &limits);
+        let (source, opening) = Self::open(service, origin, interrupt, hook, limits, deadline)?;
+        opening.set_probe_cap(limits.probe_bytes);
+        let probed = probe(source);
+        opening.finish_opening();
+        Ok(probed)
+    }
+
     /// Open at byte zero. Performs the opening range GET and classifies
     /// access. The accepted response *is* the initial stream (§6): no second
     /// request.
-    ///
-    /// Returns the [`OpeningLimits`] handle alongside the source rather than
-    /// exposing `set_probe_cap` on the source itself, because `prepare` boxes
-    /// the source into a `MediaSourceStream` and loses any other way back to
-    /// it once probing starts.
-    pub fn open(
+    fn open(
         service: Arc<HttpService>,
         origin: Url,
         interrupt: Arc<SourceInterrupt>,

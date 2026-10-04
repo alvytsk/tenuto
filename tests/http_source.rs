@@ -10,7 +10,7 @@ use tenuto::http::channel::{SourceInterrupt, WaitHook};
 use tenuto::http::error::RemoteFailure;
 use tenuto::http::limits::Limits;
 use tenuto::http::service::HttpService;
-use tenuto::http::source::{HttpMediaSource, OpeningDeadline, is_retired, remote_cause};
+use tenuto::http::source::{HttpMediaSource, is_retired, remote_cause};
 use url::Url;
 
 struct NoHook;
@@ -34,32 +34,28 @@ fn body() -> Vec<u8> {
     (0..8192u32).map(|i| (i % 251) as u8).collect()
 }
 
-/// A deadline far enough out that no test here brushes against it — Task 6's
-/// opening-deadline enforcement is exercised by `prepare`'s own tests
-/// (Task 7); this file only needs `open` to accept the parameter.
-fn generous_deadline() -> OpeningDeadline {
-    OpeningDeadline(Instant::now() + Duration::from_secs(60))
-}
-
+/// Open with nothing to probe: opening is over as soon as this returns, so
+/// every wait below is bounded by `limits.stall` alone. The opening deadline
+/// is exercised by `prepare`'s own tests.
 fn open(server: &TestServer, interrupt: Arc<SourceInterrupt>) -> HttpMediaSource {
-    match HttpMediaSource::open(
+    match HttpMediaSource::open_and_probe(
         service(),
         url(&server.url("/audio")),
         interrupt,
         Arc::new(NoHook),
         Limits::default(),
-        generous_deadline(),
+        |source| source,
     ) {
-        Ok((source, opening_limits)) => {
-            // Opening is over as far as these tests are concerned: nothing
-            // here exercises the probe cap or the opening deadline on
-            // ordinary reads, and leaving `opening` set would clamp every
-            // wait below to the (generous, but still finite) deadline above
-            // instead of `limits.stall`.
-            opening_limits.finish_opening();
-            source
-        }
+        Ok(source) => source,
         Err(error) => panic!("opening must succeed: {error}"),
+    }
+}
+
+/// Default limits with a 4096-byte probe cap.
+fn capped() -> Limits {
+    Limits {
+        probe_bytes: 4096,
+        ..Limits::default()
     }
 }
 
@@ -336,26 +332,21 @@ fn a_live_source_is_flagged_as_live_evidence() {
 
 #[test]
 fn the_probe_cap_stops_a_runaway_scan() {
-    // Ruling 1: `set_probe_cap` is called through the `OpeningLimits` handle
-    // `open` hands back, not on the source itself.
+    // Ruling 1: the cap holds for every read the probe takes.
     let server = TestServer::start(Script::serving(vec![0u8; 1 << 20]));
     let interrupt = SourceInterrupt::new(Limits::default().buffer_bytes);
-    let (mut source, opening_limits) = match HttpMediaSource::open(
+    let scanned = HttpMediaSource::open_and_probe(
         service(),
         url(&server.url("/audio")),
         interrupt,
         Arc::new(NoHook),
-        Limits::default(),
-        generous_deadline(),
-    ) {
-        Ok(opened) => opened,
+        capped(),
+        |mut source| source.read_to_end(&mut Vec::new()),
+    );
+    let error = match scanned {
+        Ok(Err(error)) => error,
+        Ok(Ok(n)) => panic!("the cap was ignored; read {n} bytes"),
         Err(error) => panic!("opening must succeed: {error}"),
-    };
-    opening_limits.set_probe_cap(Some(4096));
-    let mut sink = Vec::new();
-    let error = match source.read_to_end(&mut sink) {
-        Err(error) => error,
-        Ok(n) => panic!("the cap was ignored; read {n} bytes"),
     };
     assert!(
         matches!(
@@ -369,29 +360,27 @@ fn the_probe_cap_stops_a_runaway_scan() {
 
 #[test]
 fn finishing_opening_lifts_the_probe_cap_for_ordinary_playback() {
-    // Fix round 1, IMPORTANT 1: `finish_opening` must clear the cap itself,
+    // Fix round 1, IMPORTANT 1: finishing opening must clear the cap itself,
     // not just the `opening` flag — `Read::read`'s probe-cap check is
     // unconditional on `is_opening()`, and `consumed` only ever grows, so a
     // cap left in place after opening fails every ordinary track whose total
     // exceeds it, partway through playback. A body bigger than the cap read
-    // to completion, successfully, after `finish_opening()`, is the
+    // to completion, successfully, once `open_and_probe` has returned, is the
     // regression test for that.
     let body = vec![0u8; 1 << 20];
     let server = TestServer::start(Script::serving(body.clone()));
     let interrupt = SourceInterrupt::new(Limits::default().buffer_bytes);
-    let (mut source, opening_limits) = match HttpMediaSource::open(
+    let mut source = match HttpMediaSource::open_and_probe(
         service(),
         url(&server.url("/audio")),
         interrupt,
         Arc::new(NoHook),
-        Limits::default(),
-        generous_deadline(),
+        capped(),
+        |source| source,
     ) {
-        Ok(opened) => opened,
+        Ok(source) => source,
         Err(error) => panic!("opening must succeed: {error}"),
     };
-    opening_limits.set_probe_cap(Some(4096));
-    opening_limits.finish_opening();
 
     let mut sink = Vec::new();
     match source.read_to_end(&mut sink) {

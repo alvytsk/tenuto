@@ -485,20 +485,15 @@ fn open_source(server: &TestServer) -> tenuto::http::source::HttpMediaSource {
         Ok(service) => service,
         Err(error) => panic!("the HTTP service must start: {error}"),
     };
-    let deadline =
-        tenuto::http::source::OpeningDeadline(std::time::Instant::now() + Duration::from_secs(60));
-    match tenuto::http::source::HttpMediaSource::open(
+    match tenuto::http::source::HttpMediaSource::open_and_probe(
         service,
         url(&server.url("/audio")),
         SourceInterrupt::new(Limits::default().buffer_bytes),
         Arc::new(NoOpHook),
         Limits::default(),
-        deadline,
+        |source| source,
     ) {
-        Ok((source, opening_limits)) => {
-            opening_limits.finish_opening();
-            source
-        }
+        Ok(source) => source,
         Err(error) => panic!("opening must succeed: {error}"),
     }
 }

@@ -19,7 +19,7 @@ use crate::http::channel::{SourceInterrupt, WaitHook};
 use crate::http::error::{RemoteFailure, redact_url};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
-use crate::http::source::{HttpMediaSource, OpeningDeadline, remote_cause};
+use crate::http::source::{HttpMediaSource, remote_cause};
 use crate::media::capabilities::{Continuity, MediaCapabilities};
 use crate::media::id::AbsolutePath;
 use crate::media::source::SourceLocation;
@@ -94,57 +94,45 @@ fn open_http(url: &Url, context: &PrepareContext) -> Result<DecodedSource, Playb
             reason: "no HTTP service in this session",
         })?;
 
-    // One absolute instant every wait taken while opening — the header wait,
-    // and every read the probe below performs — is clamped against, so a
-    // server that trickles data can never keep opening running past
-    // `limits.open` even though every individual read stays inside
-    // `limits.stall` (Ruling 3).
-    let opening = OpeningDeadline::starting_now(&context.interrupt, &context.limits);
-    let (source, opening_limits) = HttpMediaSource::open(
-        Arc::clone(service),
-        url.clone(),
-        Arc::clone(&context.interrupt),
-        Arc::clone(&context.hook),
-        context.limits,
-        opening,
-    )?;
-    // Set through the handle, not the source: `from_media_source` boxes the
-    // source below, and the handle is the only way back to it once probing
-    // starts (Ruling 2).
-    opening_limits.set_probe_cap(Some(context.limits.probe_bytes));
-
-    // Evidence and the station name are read off the source before it is
-    // boxed and consumed by the probe — there is no way back to it
-    // afterwards.
-    let evidence = source.evidence();
-    let station = source
-        .station_identity()
-        .and_then(|identity| identity.name.clone());
     let mut hint = Hint::new();
     if let Some(extension) = extension_from_url(url) {
         hint.with_extension(&extension);
     }
     let label = PathBuf::from(redact_url(url.as_str()));
-
-    // Symphonia's own format probe does not preserve read errors on every
-    // path: `Probe::next` scans byte-by-byte for a marker with `while let
-    // Ok(byte) = mss.read_byte()`, and a failing read there simply ends the
-    // loop and is reported as a generic "no suitable format reader found",
-    // with no wrapped cause at all — verified against symphonia-core 0.6.1.
-    // Latching the failure at the read itself, before Symphonia gets a
-    // chance to lose it, is the only place this project can reliably recover
-    // *why* a remote probe failed.
-    let latch = Arc::new(FailureLatch::default());
-    let latching = LatchingSource {
-        inner: source,
-        latch: Arc::clone(&latch),
-    };
-    let result = DecodedSource::from_media_source(Box::new(latching), hint, label, evidence);
-    // Both the probe cap and the opening deadline bound *opening*, not
-    // playback, so they come off here regardless of outcome: once this
-    // returns, ordinary reads are bounded only by `limits.stall` (§8).
-    opening_limits.finish_opening();
-    let mut decoded = result.map_err(|error| promote_latched(error, &latch))?;
+    let probed = HttpMediaSource::open_and_probe(
+        Arc::clone(service),
+        url.clone(),
+        Arc::clone(&context.interrupt),
+        Arc::clone(&context.hook),
+        context.limits,
+        |source| {
+            // Evidence and the station name are read off the source before
+            // it is boxed and consumed by the probe — there is no way back
+            // to it afterwards.
+            let evidence = source.evidence();
+            let station = source
+                .station_identity()
+                .and_then(|identity| identity.name.clone());
+            // Symphonia's own format probe does not preserve read errors on
+            // every path: `Probe::next` scans byte-by-byte for a marker with
+            // `while let Ok(byte) = mss.read_byte()`, and a failing read there
+            // simply ends the loop and is reported as a generic "no suitable
+            // format reader found", with no wrapped cause at all — verified
+            // against symphonia-core 0.6.1. Latching the failure at the read
+            // itself, before Symphonia gets a chance to lose it, is the only
+            // place this project can reliably recover *why* a remote probe
+            // failed.
+            let latch = Arc::new(FailureLatch::default());
+            let latching = LatchingSource {
+                inner: source,
+                latch: Arc::clone(&latch),
+            };
+            DecodedSource::from_media_source(Box::new(latching), hint, label, evidence)
+                .map(|decoded| (decoded, station))
+                .map_err(|error| promote_latched(error, &latch))
+        },
+    )?;
+    let (mut decoded, station) = probed?;
     if let Some(name) = station {
         decoded.set_fallback_title(name);
     }
