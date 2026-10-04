@@ -86,10 +86,29 @@ fn start(server: &TestServer, policy: ReconnectPolicy) -> TestEngine {
     start_with(server, policy, None)
 }
 
+/// [`quick`]'s backoff: one step of a held network clock makes the next
+/// attempt due.
+const BACKOFF: Duration = Duration::from_millis(20);
+
+/// [`start`] with [`quick`], on a held network clock (M9.5): no attempt runs
+/// and no budget expires until the test steps the clock or runs it, so a
+/// test acting inside a backoff has all the time it needs.
+fn start_held(server: &TestServer) -> TestEngine {
+    start_on(TestEngine::start_on_fake_clock(), server, quick(), None)
+}
+
 /// Load at [`RESUME`] and play: an open costs [`OPEN`] requests and the
 /// resume seek one more. `limits` replaces the harness's brisk ones.
 fn start_with(server: &TestServer, policy: ReconnectPolicy, limits: Option<Limits>) -> TestEngine {
-    let mut engine = TestEngine::start_idle();
+    start_on(TestEngine::start_idle(), server, policy, limits)
+}
+
+fn start_on(
+    mut engine: TestEngine,
+    server: &TestServer,
+    policy: ReconnectPolicy,
+    limits: Option<Limits>,
+) -> TestEngine {
     engine.handle().set_reconnect_policy(policy);
     let url = server.url("/episode.wav");
     match limits {
@@ -248,19 +267,6 @@ fn assert_resumed_where_heard(indices: &[u32]) -> u32 {
     resumed[resumed.len() - 1]
 }
 
-/// A backoff long enough that `play_until_event` has stopped the clock
-/// before the attempt's capture, and that a test's own round trips (a seek
-/// stored, a device silenced) finish inside it even on a loaded machine.
-/// The freeze is then answered at a fixed instant, so exactly
-/// [`UNHEARD_FRAMES`] are in flight; answered while the clock runs, it would
-/// advance one period first.
-fn frozen_attempts() -> ReconnectPolicy {
-    ReconnectPolicy {
-        backoff: [Duration::from_secs(1); 5],
-        ..quick()
-    }
-}
-
 /// The transport's own in-place resume of the playing connection: past one
 /// chunk, `http::service` re-requests the rest of a cut body itself.
 const RESUMED: usize = PLAYING + 1;
@@ -288,10 +294,14 @@ fn a_dropped_connection_resumes_with_no_frame_repeated_or_skipped() {
     // The clock stops at `Reconnecting`, so the attempt runs with audio
     // still queued: the capture must account for exactly what was heard and
     // discard exactly the rest.
+    // The attempt runs once the device clock has stopped, so its freeze is
+    // answered at a fixed instant and exactly [`UNHEARD_FRAMES`] are in
+    // flight; answered while the clock runs, it would advance a period first.
     let server = server(&[(PLAYING, cut()), (RESUMED, short())]);
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.clear_rendered();
     engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
     // The decoder reads a ring and more ahead of what is heard, so the
     // landing sits a few hundred milliseconds short of the cut. A second
@@ -429,9 +439,10 @@ fn a_failure_while_priming_is_the_attempts_not_the_sessions() {
         (RESUMED, short()),
         (reseek, episode().truncate_body_after(24 * 1024)),
     ]);
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.clear_rendered();
     engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
     let landed = engine.position();
     engine.play_for(landed + Duration::from_millis(300));
@@ -448,28 +459,38 @@ fn a_failure_while_priming_is_the_attempts_not_the_sessions() {
     server.shutdown();
 }
 
+/// Blocks until the attempt that made request `n` has failed: the request was
+/// made, and the worker has since retired the source to wait out a backoff.
+fn await_failed_attempt(server: &TestServer, engine: &TestEngine, n: usize) {
+    let deadline = Instant::now() + PATIENCE;
+    while server.requests().len() < n || !engine.handle().source_interrupt().is_retired() {
+        assert!(Instant::now() < deadline, "attempt {n} never failed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn a_priming_failure_counts_against_the_budget() {
     // As above, but every attempt's reseek response ends inside the priming
     // fill. Read as a cancellation, that would retry at once, forever; read
     // as final, it would fail after one attempt.
-    // Attempt 1 runs 20 ms after the drop and fails well inside the 2 s
-    // budget; attempt 2 waits 3 s, and its failure is past the budget. Each
-    // costs a reopen (OPEN) and a reseek (1).
+    // On a held network clock: attempt 1 runs one backoff after the drop and
+    // fails inside the 10 s budget; attempt 2 runs a minute later, and its
+    // failure gives up. Each costs a reopen (OPEN) and a reseek (1).
     let server = server_then(
         &[(PLAYING, cut()), (RESUMED, short())],
         episode().truncate_body_after(24 * 1024),
     );
-    let mut backoff = [Duration::from_secs(3); 5];
-    backoff[0] = Duration::from_millis(20);
-    let mut engine = start(
-        &server,
-        ReconnectPolicy {
-            backoff,
-            budget: Duration::from_secs(2),
-            ..quick()
-        },
-    );
+    let mut engine = start_held(&server);
+    let mut backoff = [Duration::from_secs(60); 5];
+    backoff[0] = BACKOFF;
+    engine
+        .handle()
+        .set_reconnect_policy(ReconnectPolicy { backoff, ..quick() });
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.advance_network(BACKOFF);
+    await_failed_attempt(&server, &engine, RESUMED + OPEN + 1);
+    engine.advance_network(Duration::from_secs(60));
     engine.play_until_terminal(PATIENCE);
     assert_eq!(engine.state(), PlaybackState::Failed);
     assert_eq!(engine.count_events(state(PlaybackState::Playing)), 0);
@@ -516,9 +537,10 @@ fn a_device_that_will_not_open_fails_the_attempt_at_once() {
     // reopens (OPEN) and reseeks (1) before it meets the dead device, and
     // nothing after it touches the network.
     let server = server(&[(PLAYING, cut()), (RESUMED, short())]);
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.silence_the_device();
+    engine.run_network();
     engine.await_state(PlaybackState::Failed);
     assert_eq!(
         engine.count_events(state(PlaybackState::Reconnecting)),
@@ -528,15 +550,6 @@ fn a_device_that_will_not_open_fails_the_attempt_at_once() {
     assert_eq!(server.requests().len(), ATTEMPT + OPEN);
     engine.finish();
     server.shutdown();
-}
-
-/// A backoff long enough that no attempt runs while a test acts.
-fn parked() -> ReconnectPolicy {
-    ReconnectPolicy {
-        backoff: [Duration::from_secs(30); 5],
-        budget: Duration::from_secs(60),
-        stable_after: Duration::from_secs(10),
-    }
 }
 
 /// Splits a render log after its first discontinuity: before and after.
@@ -567,7 +580,7 @@ fn a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it() {
     // reopens (ATTEMPT..ATTEMPT+OPEN-1) and reseeks to the target
     // (ATTEMPT+OPEN), which plays on.
     let server = dropped();
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.clear_rendered();
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(server.requests().len(), RESUMED);
@@ -581,6 +594,7 @@ fn a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it() {
         "a seek during recovery touched the network"
     );
 
+    engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
@@ -601,7 +615,7 @@ fn a_seek_during_recovery_is_stored_offline_and_the_landing_anchors_at_it() {
 fn seek_by_presses_during_recovery_accumulate() {
     // 1..=RESUMED: dropped(). Nothing after it: every press is stored.
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(engine.handle().submit_seek(RESUME), Admission::Accepted);
     engine.await_event(stored);
@@ -636,11 +650,12 @@ fn a_failed_attempt_keeps_the_stored_target_for_the_next() {
         (RESUMED, short()),
         (ATTEMPT, Script::serving(Vec::new()).status(503)),
     ]);
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
     engine.await_event(stored);
+    engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
@@ -659,10 +674,11 @@ fn a_restart_during_recovery_lands_at_zero_as_a_restart() {
         (RESUMED, short()),
         (ATTEMPT, Script::serving(Vec::new()).status(503)),
     ]);
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     assert_eq!(stored_target(engine.await_event(stored)), Duration::ZERO);
+    engine.run_network();
     // Ordered, not counted: a count would race the running backoff.
     let first = engine
         .await_event(|event| state(PlaybackState::Playing)(event) || restart_established(event));
@@ -682,13 +698,14 @@ fn a_seek_after_a_restart_supersedes_it() {
     // 1..=RESUMED: dropped(). The attempt reopens (ATTEMPT..) and reseeks
     // to the seek's target (ATTEMPT+OPEN).
     let server = dropped();
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     engine.await_event(stored);
     let target = Duration::from_secs(1);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
     assert_eq!(stored_target(engine.await_event(stored)), target);
+    engine.run_network();
     engine.await_event(state(PlaybackState::Playing));
     let landed = engine.await_seek_completed(PATIENCE);
     assert!(landed.actual.abs_diff(target) < Duration::from_millis(1));
@@ -704,7 +721,7 @@ fn a_restart_stored_during_recovery_survives_stop_and_space() {
     // nothing. Space reopens (ATTEMPT..ATTEMPT+OPEN-1) and lands at zero
     // with no reseek.
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     engine.await_event(stored);
@@ -731,7 +748,7 @@ fn a_priming_failure_on_space_fails_honestly_and_keeps_the_target() {
         (RESUMED, short()),
         (reseek, episode().truncate_body_after(24 * 1024)),
     ]);
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
@@ -759,13 +776,14 @@ fn a_seek_near_the_end_during_recovery_plays_out_and_ends() {
     // 1..=RESUMED: dropped(). The attempt reopens (ATTEMPT..) and reseeks
     // (ATTEMPT+OPEN) 200 ms short of the end, which plays out.
     let server = dropped();
-    let mut engine = start(&server, frozen_attempts());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(
         engine.handle().submit_seek(Duration::from_millis(3800)),
         Admission::Accepted
     );
     engine.await_event(stored);
+    engine.run_network();
     engine.play_until_terminal(PATIENCE);
     assert!(engine.saw_end_of_track(), "the episode did not end");
     assert_eq!(engine.count_events(failed), 0);
@@ -794,7 +812,7 @@ fn pausing_during_recovery_keeps_the_target_and_space_resumes_at_it() {
     // nothing. Space reopens (ATTEMPT..ATTEMPT+OPEN-1) and reseeks to the
     // target (ATTEMPT+OPEN).
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
@@ -823,7 +841,7 @@ fn a_seek_in_a_recovery_pause_is_stored_offline_and_space_lands_at_it() {
     // transport, so both seeks are stored with no request. Space reopens
     // (ATTEMPT..ATTEMPT+OPEN-1) and reseeks to the target (ATTEMPT+OPEN).
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
     engine.await_event(state(PlaybackState::Paused));
@@ -860,7 +878,7 @@ fn stopping_during_recovery_keeps_the_target_and_space_resumes_at_it() {
     // 1..=RESUMED: dropped(). The seek and the stop cost nothing. Space
     // reopens (ATTEMPT..ATTEMPT+OPEN-1) and reseeks (ATTEMPT+OPEN).
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let target = Duration::from_millis(2500);
     assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
@@ -881,7 +899,7 @@ fn a_restart_stored_during_recovery_survives_pause_and_space() {
     // 1..=RESUMED: dropped(). The restart and the pause cost nothing. Space
     // reopens (ATTEMPT..ATTEMPT+OPEN-1) and lands at zero with no reseek.
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.send(PlaybackCommand::Restart);
     engine.await_event(stored);
@@ -953,22 +971,17 @@ fn a_seek_cancels_a_blocked_attempt_and_the_next_runs_at_once() {
     // 1..=RESUMED: dropped(). The first attempt's probe (ATTEMPT) never gets
     // its headers. The seek retires it and is stored; the next attempt
     // reopens (ATTEMPT+1..ATTEMPT+OPEN) and reseeks to the target
-    // (ATTEMPT+OPEN+1). Every backoff after the first is 30 s, past the
-    // harness's patience: a cancellation that spent one would never land.
+    // (ATTEMPT+OPEN+1). The network clock is held once the first attempt
+    // is due, so a cancellation that spent a backoff would never land, and
+    // no header deadline can end the blocked probe instead of the seek.
     let server = server(&[
         (PLAYING, cut()),
         (RESUMED, short()),
         (ATTEMPT, episode().stall_headers()),
     ]);
-    let mut backoff = [Duration::from_secs(30); 5];
-    backoff[0] = Duration::from_millis(20);
-    let policy = ReconnectPolicy {
-        backoff,
-        budget: Duration::from_secs(60),
-        ..quick()
-    };
-    let mut engine = start_with(&server, policy, Some(patient()));
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.advance_network(BACKOFF);
     assert!(server.wait_until_stalled(PATIENCE));
     assert_eq!(server.requests().len(), ATTEMPT);
     let target = Duration::from_millis(2500);
@@ -1088,7 +1101,7 @@ fn a_new_load_during_recovery_drops_the_outage_and_the_target() {
     // load opens (ATTEMPT..ATTEMPT+OPEN-1) and resume-seeks (ATTEMPT+OPEN),
     // which plays.
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     assert_eq!(
         engine.handle().submit_seek(Duration::from_millis(2500)),
@@ -1253,7 +1266,7 @@ fn a_pause_inside_the_stability_window_ends_the_outage() {
 #[test]
 fn arrow_bursts_during_recovery_accumulate_across_progress() {
     let server = dropped();
-    let mut engine = start(&server, parked());
+    let mut engine = start_held(&server);
     engine.play_until_event(state(PlaybackState::Reconnecting));
     let mut router = KeyRouter::new();
     // Past the router's 250 ms quiet window.

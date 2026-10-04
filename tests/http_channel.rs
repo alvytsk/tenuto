@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use tenuto::clock::{Clock, FakeClock};
 use tenuto::http::channel::{
     ByteChannel, HeaderOutcome, Outcome, ReadOutcome, SourceInterrupt, WaitHook,
 };
@@ -679,4 +680,41 @@ fn a_targeted_retirement_of_the_live_generation_wakes_a_blocked_read() {
         !interrupt.retire_generation(live),
         "an already-retired generation is not retired twice"
     );
+}
+
+/// Steps a fake network clock past the stall budget on its third slice.
+struct StepsTheClock {
+    clock: Arc<FakeClock>,
+    slices: AtomicU32,
+}
+
+impl WaitHook for StepsTheClock {
+    fn service(&self) {
+        if self.slices.fetch_add(1, Ordering::Relaxed) == 2 {
+            self.clock.advance_monotonic(STALL);
+        }
+    }
+}
+
+#[test]
+fn the_stall_budget_is_charged_on_the_network_clock() {
+    // M9.5: real slices pass while the fake clock holds, and charge nothing;
+    // the step charges the whole budget at once.
+    let clock = Arc::new(FakeClock::new());
+    let interrupt = SourceInterrupt::with_clock(CAPACITY, Arc::clone(&clock) as Arc<dyn Clock>);
+    let channel = ByteChannel::new(Arc::clone(&interrupt));
+    let hook = StepsTheClock {
+        clock,
+        slices: AtomicU32::new(0),
+    };
+    let started = Instant::now();
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        channel.read(&mut buffer, &hook, STALL),
+        ReadOutcome::Failed(RemoteFailure::Timeout {
+            phase: tenuto::http::error::Phase::Stall
+        })
+    );
+    assert_eq!(hook.slices.load(Ordering::Relaxed), 3);
+    assert!(started.elapsed() < STALL);
 }

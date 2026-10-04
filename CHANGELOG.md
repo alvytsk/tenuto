@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shuffle, deletion and the recovery of a damaged `state.json`. The compiler
   now keeps every change to a playlist inside it. Behavior and `state.json`
   are unchanged.
+- Every playback network budget (stall, headers, seek and opening deadlines,
+  reconnect backoff and budget) reads one injectable clock. Reconnect tests
+  hold or step it instead of racing real time.
 
 ## [0.2.0] - 2026-09-23
 
