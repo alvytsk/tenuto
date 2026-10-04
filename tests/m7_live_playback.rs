@@ -74,7 +74,9 @@ fn seeks_and_restart_are_rejected_and_the_stream_is_untouched() {
     engine.play_for(Duration::from_millis(300));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(9)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(9))),
         Admission::Accepted
     );
     engine.await_event(|event| matches!(event, PlaybackEvent::SeekRejected { .. }));

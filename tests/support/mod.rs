@@ -634,14 +634,14 @@ impl TestEngine {
         }
     }
 
-    /// The handle, for the submission methods (`submit_pause`, `submit_seek`
+    /// The handle, for the submission methods (`submit` and its out-of-band rules
     /// …). A thin `Deref<Target = EngineHandle>` wrapper around a lock guard,
     /// not a bare `&EngineHandle`: the handle lives behind the same `Mutex`
     /// `drop_event_receiver` and shutdown already share (a `TestEngine` bound
     /// without `mut`, as `a_disconnected_event_receiver_terminates_the_worker`
     /// does, still has to be able to call `drop_event_receiver`), so nothing
     /// here can hand back a bare reference that outlives the guard reading
-    /// it. `engine.handle().submit_pause()` reads exactly as if it had.
+    /// it. `engine.handle().submit(PlaybackCommand::Pause)` reads exactly as if it had.
     pub fn handle(&self) -> HandleRef<'_> {
         HandleRef(lock(&self.handle))
     }
@@ -685,7 +685,7 @@ impl TestEngine {
 
     pub fn interrupt_stop(&mut self) {
         if let Some(handle) = lock(&self.handle).as_ref() {
-            handle.interrupt_stop();
+            handle.submit(PlaybackCommand::Stop);
         }
     }
 
@@ -798,7 +798,7 @@ impl TestEngine {
     /// out. `Drop` then finds the handle already taken and skips its own join.
     pub fn shutdown_report(&mut self) -> Option<ShutdownReport> {
         let handle = lock(&self.handle).take()?;
-        handle.interrupt_shutdown();
+        handle.submit(PlaybackCommand::Shutdown);
         Some(handle.join())
     }
 
@@ -1331,7 +1331,7 @@ impl Drop for TestEngine {
         // answer the handshakes its teardown performs.
         let handle = lock(&self.handle).take();
         if let Some(handle) = handle {
-            handle.interrupt_shutdown();
+            handle.submit(PlaybackCommand::Shutdown);
             let deadline = Instant::now() + Duration::from_secs(5);
             while !handle.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(1));
@@ -1428,7 +1428,7 @@ pub fn failed_load_position(
     }
     let progress = handle.progress();
     let state = PlaybackState::Failed;
-    handle.interrupt_shutdown();
+    handle.submit(PlaybackCommand::Shutdown);
     handle.join();
     (state, progress.position)
 }
@@ -1477,7 +1477,7 @@ pub fn failed_device_session(name: &str, channels: u16, start_at: Duration) -> S
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    handle.interrupt_shutdown();
+    handle.submit(PlaybackCommand::Shutdown);
     let mut report = handle.join();
     events.extend(std::mem::take(&mut report.events));
     report.events = events;
@@ -1553,7 +1553,7 @@ pub fn failed_device_session_with_play_loaded(
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    handle.interrupt_shutdown();
+    handle.submit(PlaybackCommand::Shutdown);
     let mut report = handle.join();
     events.extend(std::mem::take(&mut report.events));
 

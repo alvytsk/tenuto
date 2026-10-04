@@ -41,7 +41,10 @@ fn remote_playback_reaches_the_test_output_before_the_body_completes() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(200));
 
@@ -62,12 +65,17 @@ fn a_forward_seek_installs_the_media_position_and_requests_that_byte() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     let landed = engine.await_seek_completed(Duration::from_secs(10));
@@ -105,13 +113,16 @@ fn stop_closes_the_fetch_and_play_reopens_at_the_preserved_position() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(200));
     let preserved = engine.progress().position;
 
     let before = server.requests().len();
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
     assert_eq!(
         engine.progress().position,
@@ -119,7 +130,10 @@ fn stop_closes_the_fetch_and_play_reopens_at_the_preserved_position() {
         "stop must not reset the preserved position"
     );
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     assert!(
         engine.progress().position >= preserved,
@@ -143,7 +157,10 @@ fn a_range_less_server_plays_sequentially_and_refuses_every_seek() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").without_ranges());
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
@@ -152,7 +169,9 @@ fn a_range_less_server_plays_sequentially_and_refuses_every_seek() {
     // doomed attempt eventually failed - see IMPORTANT 3's fix.
     let requests_before_seek = server.requests().len();
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     let rejection = engine.await_event(|e| matches!(e, PlaybackEvent::SeekRejected { .. }));
@@ -178,7 +197,9 @@ fn a_range_less_server_plays_sequentially_and_refuses_every_seek() {
 
     // "Every seek", not just the first.
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     let second_rejection = engine.await_event(|e| matches!(e, PlaybackEvent::SeekRejected { .. }));
@@ -204,11 +225,13 @@ fn an_unsupported_stopped_seek_emits_no_seek_target_stored() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").without_ranges());
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     let rejection = engine.await_event(|e| matches!(e, PlaybackEvent::SeekRejected { .. }));
@@ -233,7 +256,10 @@ fn a_seek_retired_by_a_stop_reports_cancelled_and_commits_no_target() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     let before = engine.progress().position;
@@ -247,7 +273,9 @@ fn a_seek_retired_by_a_stop_reports_cancelled_and_commits_no_target() {
     let stalling = TestServer::start_on(port, Script::from_fixture("sine-5s.flac").stall_headers());
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     assert!(
@@ -255,7 +283,7 @@ fn a_seek_retired_by_a_stop_reports_cancelled_and_commits_no_target() {
         "the seek's request never reached the server"
     );
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
 
     let cancelled = engine.await_event(|e| matches!(e, PlaybackEvent::SeekCancelled { .. }));
@@ -283,7 +311,10 @@ fn pause_during_a_stalled_read_freezes_output_and_resume_continues() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     assert!(
@@ -293,7 +324,10 @@ fn pause_during_a_stalled_read_freezes_output_and_resume_continues() {
 
     // The read is pending inside the decoder. Pause must reach it without
     // returning a destructive error to the demuxer.
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Paused);
     // The frames already handed to the device still play out after the
     // park, so let that settle before taking the reading that must not
@@ -309,7 +343,10 @@ fn pause_during_a_stalled_read_freezes_output_and_resume_continues() {
     );
 
     assert!(server.release());
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     // `play_for`'s argument is an absolute target position, not a relative
     // step - `frozen` is already past 100ms from the play span before the
@@ -334,7 +371,10 @@ fn quit_while_paused_wakes_every_source_wait() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     assert!(
@@ -342,7 +382,10 @@ fn quit_while_paused_wakes_every_source_wait() {
         "the read never blocked"
     );
 
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Paused);
 
     engine.finish();
@@ -358,7 +401,10 @@ fn a_truncated_tail_cannot_become_end_of_track() {
         TestServer::start(Script::from_fixture("sine-5s.flac").truncate_body_after(16 << 10));
     let mut engine = TestEngine::start_without_recovery();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.play_until_terminal(Duration::from_secs(10));
 
     assert_eq!(
@@ -392,11 +438,14 @@ fn a_capability_change_carries_the_current_session_rev() {
     engine.load_remote(&server.url("/audio.flac"));
     let rev_at_load = engine.progress().session_rev;
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
     let rev_after_stop = engine.progress().session_rev;
     assert_ne!(
@@ -409,7 +458,9 @@ fn a_capability_change_carries_the_current_session_rev() {
     // trial that promotes it - the `CapabilitiesChanged` this produces must
     // carry `rev_after_stop`, never the stale `rev_at_load`.
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     let event = engine.await_event(|e| matches!(e, PlaybackEvent::CapabilitiesChanged { .. }));
@@ -442,15 +493,20 @@ fn a_seek_after_a_stop_reopens_rather_than_reporting_nothing_is_loaded() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     let event = engine.await_event(|e| {
@@ -482,7 +538,10 @@ fn a_seek_after_a_retired_seek_reopens_and_lands() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
     let port = server.port();
@@ -490,14 +549,16 @@ fn a_seek_after_a_retired_seek_reopens_and_lands() {
 
     let stalling = TestServer::start_on(port, Script::from_fixture("sine-5s.flac").stall_headers());
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     assert!(
         wait_for_request(&stalling, Duration::from_secs(5)),
         "the seek's request never reached the server"
     );
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
     let _ = engine.await_event(|e| matches!(e, PlaybackEvent::SeekCancelled { .. }));
     stalling.shutdown();
@@ -507,7 +568,9 @@ fn a_seek_after_a_retired_seek_reopens_and_lands() {
     let healed = TestServer::start_on(port, Script::from_fixture("sine-5s.flac"));
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(2)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(2))),
         Admission::Accepted
     );
     let stored = engine.await_event(|e| matches!(e, PlaybackEvent::SeekTargetStored { .. }));
@@ -516,7 +579,10 @@ fn a_seek_after_a_retired_seek_reopens_and_lands() {
     };
     assert_eq!(target, Duration::from_secs(2));
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     let landed = engine.await_seek_completed(Duration::from_secs(10));
     assert!(
@@ -554,7 +620,10 @@ fn corrupt_audio_over_a_complete_body_fails_and_never_ends() {
 
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.play_until_terminal(Duration::from_secs(10));
 
     assert_eq!(
@@ -580,7 +649,10 @@ fn play_after_a_remote_failure_reopens_once_at_the_preserved_position() {
         TestServer::start(Script::from_fixture("sine-5s.flac").truncate_body_after(16 << 10));
     let mut engine = TestEngine::start_without_recovery();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(40));
     // Drive the clock further, tolerating a mid-way failure: `play_for`
@@ -601,7 +673,10 @@ fn play_after_a_remote_failure_reopens_once_at_the_preserved_position() {
 
     // A healthy server for the retry, at the same URL.
     let healed = TestServer::start_on(port, Script::from_fixture("sine-5s.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     assert!(
         engine.progress().position >= heard,
@@ -623,7 +698,10 @@ fn play_after_a_remote_failure_on_an_unseekable_source_fails_honestly() {
     );
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(40));
     // See the sibling test's comment: `let_time_pass` drives the clock
@@ -643,7 +721,10 @@ fn play_after_a_remote_failure_on_an_unseekable_source_fails_honestly() {
     // opened is caught even though the very first `Load` already made one
     // request of its own.
     let requests_before_retry = server.requests().len();
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Stopped);
     assert_eq!(
         engine.progress().position,
@@ -681,7 +762,10 @@ fn a_second_explicit_play_after_a_still_broken_server_fails_again_rather_than_si
         TestServer::start(Script::from_fixture("sine-5s.flac").truncate_body_after(16 << 10));
     let mut engine = TestEngine::start_without_recovery();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(40));
     engine.play_until_terminal(Duration::from_secs(10));
@@ -698,7 +782,10 @@ fn a_second_explicit_play_after_a_still_broken_server_fails_again_rather_than_si
 
     // Same server, same URL, still truncated at the same relative point -
     // the retry must discover that failure for itself.
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_until_terminal(Duration::from_secs(10));
     let failed = engine.await_event(|e| matches!(e, PlaybackEvent::Failed { .. }));
@@ -734,10 +821,16 @@ fn a_seek_taken_while_paused_completes_rather_than_hanging() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(200));
-    assert_eq!(engine.handle().submit_pause(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Paused);
     // Clear the inbox so only events from here on are visible below - the
     // legitimate `Playing` from the play span before this pause would
@@ -745,7 +838,9 @@ fn a_seek_taken_while_paused_completes_rather_than_hanging() {
     while engine.try_event().is_some() {}
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     let landed = engine.await_seek_completed(Duration::from_secs(10));
@@ -794,13 +889,16 @@ fn a_stop_during_a_play_after_stop_reopen_leaves_the_session_stopped_not_failed(
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
     // The first stop, ordinary and uncontested - the reopen this test is
     // actually about is the *next* one, triggered by the `Play` below.
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
 
     let port = server.port();
@@ -810,13 +908,16 @@ fn a_stop_during_a_play_after_stop_reopen_leaves_the_session_stopped_not_failed(
     // header wait was actually entered before the second stop interrupts it.
     let stalling = TestServer::start_on(port, Script::from_fixture("sine-5s.flac").stall_headers());
 
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     assert!(
         wait_for_request(&stalling, Duration::from_secs(5)),
         "the reopen's request never reached the server"
     );
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
 
     // Not `await_state`: `restore()` never left `Stopped` in the first place
     // while blocked in the reopen (it only sets `Loading` on the *other*
@@ -870,11 +971,14 @@ fn a_seek_cancelled_while_reopening_from_stopped_reports_cancelled_not_rejected(
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
 
     let port = server.port();
@@ -882,7 +986,9 @@ fn a_seek_cancelled_while_reopening_from_stopped_reports_cancelled_not_rejected(
     let stalling = TestServer::start_on(port, Script::from_fixture("sine-5s.flac").stall_headers());
 
     assert_eq!(
-        engine.handle().submit_seek(Duration::from_secs(3)),
+        engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(3))),
         Admission::Accepted
     );
     assert!(
@@ -890,7 +996,7 @@ fn a_seek_cancelled_while_reopening_from_stopped_reports_cancelled_not_rejected(
         "the stopped seek's reopen never reached the server"
     );
 
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
 
     let cancelled = engine.await_event(|e| {
         matches!(
@@ -975,7 +1081,10 @@ fn a_short_forward_seek_on_a_no_index_mp3_lands_quickly_without_rescanning() {
     );
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.mp3"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     // Close to the end of this 5.04s fixture, so a short forward step from
     // here is unambiguously "a little further", not "still near the start".
@@ -988,7 +1097,10 @@ fn a_short_forward_seek_on_a_no_index_mp3_lands_quickly_without_rescanning() {
 
     let requests_before_seek = server.requests().len();
     let target = before + Duration::from_millis(300);
-    assert_eq!(engine.handle().submit_seek(target), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::SeekTo(target)),
+        Admission::Accepted
+    );
 
     // Prove the seek's own request actually reached the server (the
     // project's own rule for any wait a test is about to reason about),
@@ -1106,10 +1218,13 @@ fn a_seek_submitters_late_retirement_does_not_cancel_the_seek_it_enqueued() {
     let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
     let mut engine = TestEngine::start_idle();
     engine.load_remote(&server.url("/audio.flac"));
-    assert_eq!(engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine.await_state(PlaybackState::Playing);
     engine.play_for(Duration::from_millis(100));
-    engine.handle().submit_stop();
+    engine.handle().submit(PlaybackCommand::Stop);
     engine.await_state(PlaybackState::Stopped);
 
     let interrupt = engine.handle().source_interrupt();

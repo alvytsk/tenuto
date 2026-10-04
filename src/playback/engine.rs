@@ -188,6 +188,8 @@ pub(crate) struct SourceTraits {
     /// A finite recovery is in progress (M10 §7): `submit_pause` must retire
     /// the attempt's read, not freeze it, as for a station.
     pub recovering: AtomicBool,
+    /// `Playing` or `Reconnecting`: the states a `TogglePause` pauses.
+    pub pausable: AtomicBool,
 }
 
 pub struct EngineHandle {
@@ -200,8 +202,7 @@ pub struct EngineHandle {
     /// The one `SourceInterrupt` this worker's whole life uses, shared with
     /// every `HttpMediaSource` it ever opens (Carried Finding 2's "construct
     /// a real one and replace the placeholder" - there is only ever one, so
-    /// there is nothing to swap). `submit_seek`/`submit_pause`/`submit_play`/
-    /// `submit_stop`/`submit_shutdown` act on it directly, out of band from
+    /// there is nothing to swap). `submit` acts on it directly, out of band from
     /// the command queue, so a blocked read is reachable without waiting for
     /// the worker to drain its backlog.
     source_interrupt: Arc<SourceInterrupt>,
@@ -352,6 +353,11 @@ impl EngineHandle {
         self.spectrum.clone()
     }
 
+    /// The raw queue, with none of [`Self::submit`]'s out-of-band rules: a
+    /// command sent here reaches the worker only when it next looks. A test
+    /// seam for driving the worker's dispatch alone; production code goes
+    /// through `submit` (`tests/m9_4_submission_door.rs` checks it).
+    #[doc(hidden)]
     pub fn commands(&self) -> &Sender<PlaybackCommand> {
         &self.commands
     }
@@ -361,7 +367,9 @@ impl EngineHandle {
     }
 
     /// The wake channel: a device backend pings it so a fault interrupts a
-    /// blocked wait rather than waiting out the tick.
+    /// blocked wait rather than waiting out the tick. A test seam, like
+    /// [`Self::commands`].
+    #[doc(hidden)]
     pub fn wake(&self) -> &Sender<()> {
         &self.wake
     }
@@ -384,7 +392,7 @@ impl EngineHandle {
     /// so a saturated event channel cannot delay it. Also retires the source
     /// interrupt: a stop must reach a worker blocked inside a remote read,
     /// not only one waiting on the command channel or the tick.
-    pub fn interrupt_stop(&self) {
+    fn interrupt_stop(&self) {
         // §11: cancellation, logged at the point the application actually
         // decided on one - not inside `SourceInterrupt::retire` itself, which
         // also runs on every ordinary remote-failure exit path and would
@@ -399,7 +407,7 @@ impl EngineHandle {
     /// source interrupt is what keeps a dropped `EngineHandle` from leaving
     /// the worker thread blocked forever inside a remote read nobody will
     /// ever answer.
-    pub fn interrupt_shutdown(&self) {
+    fn interrupt_shutdown(&self) {
         // §11: cancellation - see `interrupt_stop`'s comment for why this is
         // logged here rather than inside `retire` itself.
         tracing::debug!("shutdown requested; retiring the in-flight source read");
@@ -416,28 +424,62 @@ impl EngineHandle {
         }
     }
 
-    /// Every submission that must be able to reach a worker blocked in a
-    /// source read. §8: queue admission and waking belong together, so a
-    /// caller cannot queue a command and forget to wake anything.
+    /// The one door (M9.4): every command, with whatever out-of-band rule it
+    /// needs to reach a worker blocked in a source read. §8: queue admission
+    /// and waking belong together, so no caller can queue a command and
+    /// forget to wake, retire, freeze or thaw anything.
+    ///
+    /// `Stop` and `Shutdown` never queue: they travel on the interrupt word,
+    /// so a saturated queue or a running refinement cannot delay them, and
+    /// they are always `Accepted`. `TogglePause` is resolved here, against
+    /// the worker's own published state, because only the direction chosen
+    /// knows whether to freeze or thaw.
     pub fn submit(&self, command: PlaybackCommand) -> Admission {
-        // A load tears the current source down whatever it is, so its blocked
-        // read or open is woken now rather than waited out (M7 §6.1). Aimed at
-        // the generation observed *before* the send, like `submit_seek`.
-        let replaced = matches!(command, PlaybackCommand::Load { .. })
-            .then(|| self.source_interrupt.generation());
-        let admission = self.try_send(command);
-        if admission == Admission::Accepted {
-            if let Some(generation) = replaced {
-                self.source_interrupt.retire_generation(generation);
+        match command {
+            PlaybackCommand::Stop => {
+                self.interrupt_stop();
+                Admission::Accepted
             }
-            let _ = self.wake.try_send(());
+            PlaybackCommand::Shutdown => {
+                self.interrupt_shutdown();
+                Admission::Accepted
+            }
+            PlaybackCommand::TogglePause => {
+                if self.traits.pausable.load(Ordering::Acquire) {
+                    self.submit_pause()
+                } else {
+                    self.submit_play()
+                }
+            }
+            PlaybackCommand::Pause => self.submit_pause(),
+            PlaybackCommand::Play => self.submit_play(),
+            PlaybackCommand::SeekTo(_) | PlaybackCommand::SeekBy(_) => self.submit_seek(command),
+            PlaybackCommand::Load { .. } => {
+                // A load tears the current source down whatever it is, so its
+                // blocked read or open is woken now rather than waited out
+                // (M7 §6.1). Aimed at the generation observed *before* the
+                // send, like a seek.
+                let generation = self.source_interrupt.generation();
+                let admission = self.try_send(command);
+                if admission == Admission::Accepted {
+                    self.source_interrupt.retire_generation(generation);
+                    let _ = self.wake.try_send(());
+                }
+                admission
+            }
+            other => {
+                let admission = self.try_send(other);
+                if admission == Admission::Accepted {
+                    let _ = self.wake.try_send(());
+                }
+                admission
+            }
         }
-        admission
     }
 
-    /// `SeekTo(target)`, published to the source interrupt only after the
-    /// queue accepts it (§8): a seek refused admission must not retire a
-    /// fetch it never got to replace.
+    /// A seek, published to the source interrupt only after the queue
+    /// accepts it (§8): a seek refused admission must not retire a fetch it
+    /// never got to replace.
     ///
     /// The retirement is aimed at the generation that was live *before* the
     /// send, never at whatever is current afterwards. Between the send and
@@ -450,9 +492,9 @@ impl EngineHandle {
     /// the worker is no longer blocked in anything this had to wake, so the
     /// aimed retirement doing nothing is the correct outcome, not a missed
     /// one.
-    pub fn submit_seek(&self, target: Duration) -> Admission {
+    fn submit_seek(&self, command: PlaybackCommand) -> Admission {
         let generation = self.source_interrupt.generation();
-        let admission = self.try_send(PlaybackCommand::SeekTo(target));
+        let admission = self.try_send(command);
         if admission != Admission::Accepted {
             return admission;
         }
@@ -473,11 +515,11 @@ impl EngineHandle {
     /// A station is closed rather than frozen (M7 §6.2): freezing suspends
     /// the stall timer, so a stalled live read that is frozen never wakes at
     /// all. Aimed at the generation observed *before* the send, exactly like
-    /// `submit_seek` — a superseded generation means the worker is no longer
+    /// a seek — a superseded generation means the worker is no longer
     /// blocked in anything this had to wake. A finite recovery is retired too
     /// (M10 §7): a frozen reopen or priming read would also never wake, and a
     /// parked half-built transport would announce `Paused` mid-attempt.
-    pub fn submit_pause(&self) -> Admission {
+    fn submit_pause(&self) -> Admission {
         let generation = self.source_interrupt.generation();
         let admission = self.try_send(PlaybackCommand::Pause);
         if admission == Admission::Accepted {
@@ -494,24 +536,13 @@ impl EngineHandle {
     }
 
     /// `Play`, plus the level's release.
-    pub fn submit_play(&self) -> Admission {
+    fn submit_play(&self) -> Admission {
         let admission = self.try_send(PlaybackCommand::Play);
         if admission == Admission::Accepted {
             self.source_interrupt.thaw();
             let _ = self.wake.try_send(());
         }
         admission
-    }
-
-    /// Out-of-band, like `interrupt_stop`: nothing queues, because a stop is
-    /// never refused.
-    pub fn submit_stop(&self) {
-        self.interrupt_stop();
-    }
-
-    /// Out-of-band, like `interrupt_shutdown`.
-    pub fn submit_shutdown(&self) {
-        self.interrupt_shutdown();
     }
 
     /// The interrupt every source this session opens shares, for a caller
@@ -1273,6 +1304,10 @@ impl Worker {
             return;
         }
         self.state = state;
+        self.traits.pausable.store(
+            matches!(state, PlaybackState::Playing | PlaybackState::Reconnecting),
+            Ordering::Release,
+        );
         let session_rev = self.session_rev;
         // Only a `Loading` announcement carries a token: it is the one state
         // change a load itself causes, so `play()`'s remote-reopen `Loading`

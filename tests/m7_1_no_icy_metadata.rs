@@ -162,9 +162,9 @@ fn a_pause_then_play_rejoin_never_asks_for_metadata() {
     let mut engine = start(&server);
     engine.play_for(Duration::from_millis(500));
 
-    engine.handle().submit_pause();
+    engine.handle().submit(PlaybackCommand::Pause);
     engine.await_event(paused);
-    engine.handle().submit_play();
+    engine.handle().submit(PlaybackCommand::Play);
     engine.await_event(playing);
     assert_eq!(server.requests().len(), 2, "Play opens a fresh request");
     assert_never_asked_for_metadata(&server, "a pause/play rejoin");

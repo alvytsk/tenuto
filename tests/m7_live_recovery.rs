@@ -72,7 +72,7 @@ fn pause_closes_the_connection_and_play_rejoins_with_listening_time_kept() {
     let mut engine = start(&server);
     engine.play_for(Duration::from_millis(500));
 
-    engine.handle().submit_pause();
+    engine.handle().submit(PlaybackCommand::Pause);
     engine.await_event(paused);
     let at_pause = engine.handle().progress().position;
     let written = server.bytes_written();
@@ -82,7 +82,7 @@ fn pause_closes_the_connection_and_play_rejoins_with_listening_time_kept() {
         "the server kept streaming into a paused client: the connection was not closed"
     );
 
-    engine.handle().submit_play();
+    engine.handle().submit(PlaybackCommand::Play);
     engine.await_event(playing);
     assert_eq!(server.requests().len(), 2, "Play opens a fresh request");
     let resumed = engine.handle().progress().position;
@@ -132,7 +132,7 @@ fn pause_wakes_a_stalled_live_read_and_thaw_announces_nothing() {
     );
 
     let started = Instant::now();
-    engine.handle().submit_pause();
+    engine.handle().submit(PlaybackCommand::Pause);
     engine.await_event(paused);
     assert!(
         started.elapsed() < Duration::from_millis(500),
@@ -170,11 +170,11 @@ fn a_stop_during_a_fresh_opens_priming_is_a_cancellation_not_a_lost_stream() {
     engine.await_event(playing);
     engine.play_for(Duration::from_millis(300));
 
-    engine.handle().submit_pause();
+    engine.handle().submit(PlaybackCommand::Pause);
     engine.await_event(paused);
     let kept = engine.handle().progress().position;
 
-    engine.handle().submit_play();
+    engine.handle().submit(PlaybackCommand::Play);
     assert!(
         server.wait_until_stalled(Duration::from_secs(2)),
         "the second connection never stopped feeding"
@@ -270,7 +270,7 @@ fn a_station_url_that_turns_finite_fails_every_play_path_without_leaking_finite_
         let mut engine = start(&server);
         engine.play_for(Duration::from_millis(300));
         let kept = if path == "pause" {
-            engine.handle().submit_pause();
+            engine.handle().submit(PlaybackCommand::Pause);
             engine.await_event(paused);
             engine.handle().progress().position
         } else {
@@ -287,7 +287,7 @@ fn a_station_url_that_turns_finite_fails_every_play_path_without_leaking_finite_
             engine.handle().progress().position
         };
 
-        engine.handle().submit_play();
+        engine.handle().submit(PlaybackCommand::Play);
         let failed = engine.await_event(|event| matches!(event, PlaybackEvent::Failed { .. }));
         let PlaybackEvent::Failed { cause, .. } = failed else {
             unreachable!()

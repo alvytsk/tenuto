@@ -184,7 +184,10 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
-    assert_eq!(engine1.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine1.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine1.await_state(PlaybackState::Playing);
     engine1.play_for(Duration::from_secs(2));
     let mut rig1 = Rig {
@@ -240,12 +243,17 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
         StartDisposition::Resumed => {}
         other => panic!("expected Resumed, got {other:?}"),
     }
-    assert_eq!(rig2.engine.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        rig2.engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     rig2.engine.await_state(PlaybackState::Playing);
     rig2.engine.play_for(Duration::from_millis(100));
     let seek_target = loaded2.position + Duration::from_secs(120);
     assert_eq!(
-        rig2.engine.handle().submit_seek(seek_target),
+        rig2.engine
+            .handle()
+            .submit(PlaybackCommand::SeekTo(seek_target)),
         Admission::Accepted
     );
     let landed = rig2.engine.await_seek_completed(Duration::from_secs(10));
@@ -383,11 +391,16 @@ fn a_relaunch_resumes_an_estimate_only_entry_and_reports_no_established_fallback
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
-    assert_eq!(engine1.handle().submit_play(), Admission::Accepted);
+    assert_eq!(
+        engine1.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
     engine1.await_state(PlaybackState::Playing);
     engine1.play_for(Duration::from_millis(100));
     assert_eq!(
-        engine1.handle().submit_seek(Duration::from_secs(150)),
+        engine1
+            .handle()
+            .submit(PlaybackCommand::SeekTo(Duration::from_secs(150))),
         Admission::Accepted
     );
     let landed = engine1.await_seek_completed(Duration::from_secs(10));

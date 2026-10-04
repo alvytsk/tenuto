@@ -26,7 +26,7 @@ use crate::media::id::MediaId;
 use crate::media::source::SourceLocation;
 use crate::persistence::store::{LoadReason, QueueBackup, StateStore};
 use crate::persistence::writer::{DisabledSink, ShutdownOutcome, StateSink, WriterHandle};
-use crate::playback::command::{LoadRequestId, PlaybackCommand, ResumeIntent};
+use crate::playback::command::{Admission, LoadRequestId, PlaybackCommand, ResumeIntent};
 use crate::playback::engine::EngineHandle;
 use crate::playback::error::PlaybackError;
 use crate::playback::event::{PlaybackEvent, Progress};
@@ -205,12 +205,9 @@ fn run_resolved_locked(
         .register_load(LoadTarget::Legacy, &media)
         .map_err(|error| PlaybackError::Failed(format!("cannot register the load: {error:?}")))?;
     for command in resume_commands(media, location, resume, volume, request) {
-        if matches!(command, PlaybackCommand::Load { .. }) {
-            if engine.commands().send(command).is_err() {
-                session.retract_load(request);
-            }
-        } else {
-            engine.commands().send(command).ok();
+        let is_load = matches!(command, PlaybackCommand::Load { .. });
+        if engine.submit(command) != Admission::Accepted && is_load {
+            session.retract_load(request);
         }
     }
 
@@ -424,10 +421,6 @@ fn handle_keys(
             Some(command) => {
                 let optimistic = router.route(
                     engine,
-                    matches!(
-                        mirror.state,
-                        PlaybackState::Playing | PlaybackState::Reconnecting
-                    ),
                     mirror.position,
                     mirror.duration,
                     Instant::now(),

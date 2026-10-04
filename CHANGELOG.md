@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Every playback network budget (stall, headers, seek and opening deadlines,
   reconnect backoff and budget) reads one injectable clock. Reconnect tests
   hold or step it instead of racing real time.
+- Every command reaches the playback engine through one `submit`, which
+  applies the command's out-of-band rule itself. A seek submitted the plain
+  way no longer skips waking a read blocked on the network.
 
 ## [0.2.0] - 2026-09-23
 
