@@ -2287,10 +2287,14 @@ impl Worker {
     /// While `fresh_open` is priming, the source has not been adopted yet, so
     /// its death is that attempt's failure and the caller decides what it
     /// means. Otherwise the established session has lost its station.
+    ///
+    /// The attempt's source is left for `abandon_attempt` to drop, as on the
+    /// finite path: dropping it here retires the shared interrupt, which
+    /// `fresh_open` reads as a cancellation and the loop retries at once,
+    /// with no backoff and no budget.
     fn source_ended(&mut self, failure: RemoteFailure) {
         if self.attempting {
             self.attempt_failure = Some(failure.into());
-            self.source = None;
             return;
         }
         if retryable(&failure, Continuity::Indefinite) {
