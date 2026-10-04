@@ -499,8 +499,6 @@ No parsed item, cached feed, document request or validator record is ever logged
 
 An uncontained panic restores the terminal and fd 2 before the previous hook runs, so the diagnostic reaches the primary screen. Two environment variables are test switches only: `TENUTO_AUDIO_OUTPUT=null` selects the paced null output, and `TENUTO_TEST_HOOK` triggers one fixed-stage panic or probe. Subprocess suites run on Linux only, with every XDG variable set per child.
 
-One recorded inaccuracy: `main.rs` labels every error log line `playback failed`, including feed commands.
-
 ## 11. Deployment
 
 There is one deployable: a `tenuto` binary per platform. On Linux it links glibc and ALSA dynamically: the x86_64 release binary needs glibc 2.34 or newer (the current release's figure; each release's exact requirements are in its `build-info.txt`) and the shared libraries `ld-linux-x86-64.so.2`, `libasound.so.2`, `libc.so.6`, `libgcc_s.so.1` and `libm.so.6`, as reported by `scripts/release/check-elf.sh`. HTTPS also needs the system CA bundle (`ca-certificates`). No installer, no service, no configuration file is required.

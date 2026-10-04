@@ -99,7 +99,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
   - the operation deadline (`engine.rs:3644`);
   - reconnect outage timing (`engine.rs:2155, 2211`).
 
-  Every recorded CI flake so far (#13, #15, #16, #18) came from these two time sources interacting. `tests/m7_reconnect.rs:340, 379` sleeps on wall time. The open protocol (`OpeningDeadline` → `set_probe_cap` → `finish_opening`) is replayed in `playback/prepare.rs` and `library.rs`.
+  CI flakes #15, #16 and #18 came from these two time sources interacting. (#13 was a send-then-retire generation race, fixed in e51bae3; a clock would not have helped.) `tests/m7_reconnect.rs:340, 379` sleeps on wall time. The open protocol (`OpeningDeadline` → `set_probe_cap` → `finish_opening`) is replayed in `playback/prepare.rs` and `library.rs`.
 - Direction: fold the deadline, probe cap and failure latch into one open-and-probe operation. Inject the existing `clock::Clock` into the HTTP source and into reconnect scheduling. `SystemClock` and `FakeClock` already exist as its two adapters. Risk: `ByteChannel`'s waits must wake when a fake clock advances.
 
 **Runtime rig on the virtual clock.**
