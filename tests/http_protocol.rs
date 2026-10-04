@@ -316,7 +316,7 @@ fn no_broken_transfer_can_become_a_completed_track() {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
 
     let scenario = |name: &str, server: TestServer| {
-        let mut rig = RemoteRig::new(dir.path(), TestEngine::start_idle());
+        let mut rig = RemoteRig::new(dir.path(), TestEngine::start_without_recovery());
         let url = server.url("/audio.flac");
         let request = rig
             .session
@@ -410,7 +410,7 @@ fn no_broken_transfer_can_become_a_completed_track() {
     // separately from `scenario` because it needs to prove the stall was
     // actually entered before the deadline fires.
     let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(48 << 10));
-    let mut rig = RemoteRig::new(dir.path(), TestEngine::start_idle());
+    let mut rig = RemoteRig::new(dir.path(), TestEngine::start_without_recovery());
     let stalled_url = server.url("/audio.flac");
     let stalled_request = rig
         .session

@@ -22,7 +22,7 @@ use crate::http::error::{Operation, RemoteFailure, redact_url};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{is_retired, remote_cause};
-use crate::media::capabilities::{Continuity, MediaCapabilities, ResumeCapability, SeekSupport};
+use crate::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 use crate::media::source::SourceLocation;
@@ -2305,13 +2305,19 @@ impl Worker {
     }
 
     /// M10 §3: the failure a finite read error recovers from, or `None` when
-    /// it takes today's path. Only a playing, remote session whose resume
-    /// capability is `Supported` recovers, and only from a failure the retry
+    /// it takes today's path. Only a playing, remote, finite session on a
+    /// range-capable server recovers, and only from a failure the retry
     /// table calls retryable for finite media.
+    ///
+    /// `Unknown` seek support qualifies: the server already takes ranges and
+    /// only the demuxer is untried, which is every episode played from zero
+    /// without a seek. The attempt's reseek is that trial; a demuxer that
+    /// refuses it fails the session, as it would have without recovery.
     fn recoverable(&self, error: &PlaybackError) -> Option<RemoteFailure> {
         let eligible = self.state == PlaybackState::Playing
             && self.source_is_remote()
-            && self.capabilities.resume_capability() == ResumeCapability::Supported;
+            && self.capabilities.continuity == Continuity::Finite
+            && self.capabilities.seek != SeekSupport::Unsupported;
         if !eligible {
             return None;
         }

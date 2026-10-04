@@ -312,6 +312,19 @@ fn a_dropped_connection_resumes_with_no_frame_repeated_or_skipped() {
 }
 
 #[test]
+fn a_connection_that_goes_silent_mid_body_reconnects() {
+    // A network switch (a VPN coming up) leaves the playing socket open but
+    // dead: no bytes, no close. The stall budget, not a cut, ends it.
+    let server = server(&[(PLAYING, episode().stall_body_after(64 * 1024))]);
+    let mut engine = start(&server, quick());
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.play_until_event(state(PlaybackState::Playing));
+    assert_eq!(engine.count_events(failed), 0);
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
 fn a_truncated_reopen_or_reseek_is_retried_inside_the_same_outage() {
     // 1..=RESUMED: start(), the cut and the short re-request.
     // `first`: the first attempt's reopen ends 20 bytes into its probe,
@@ -386,19 +399,19 @@ fn a_range_less_server_still_fails() {
 }
 
 #[test]
-fn an_episode_never_proved_seekable_still_fails() {
-    // Ranged, but loaded at zero: nothing ever demonstrated a seek, so the
-    // resume capability is Undetermined (§3). With no resume seek, the
-    // open's last request (OPEN) is the playing one; OPEN+1 is the
-    // transport's re-request, which ends short.
+fn an_episode_played_from_zero_recovers() {
+    // Ranged, but loaded at zero: no seek has proved the demuxer, so seek
+    // support is Unknown. The server takes ranges, so the attempt's reseek is
+    // the trial. With no resume seek, the open's last request (OPEN) is the
+    // playing one; OPEN+1 is the transport's re-request, which ends short.
     let server = server(&[(OPEN, cut()), (OPEN + 1, short())]);
     let mut engine = TestEngine::start_idle();
     engine.handle().set_reconnect_policy(quick());
     engine.load_remote(&server.url("/episode.wav"));
     engine.send(PlaybackCommand::Play);
-    engine.play_until_terminal(PATIENCE);
-    assert_eq!(engine.state(), PlaybackState::Failed);
-    assert_eq!(engine.count_events(state(PlaybackState::Reconnecting)), 0);
+    engine.play_until_event(state(PlaybackState::Reconnecting));
+    engine.play_until_event(state(PlaybackState::Playing));
+    assert_eq!(engine.count_events(failed), 0);
     engine.finish();
     server.shutdown();
 }
