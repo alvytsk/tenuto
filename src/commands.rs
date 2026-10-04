@@ -6,7 +6,8 @@
 //! those values into the columns §6.1 specifies and into the `Err` that
 //! §6.4's "a partial failure cannot exit successfully" requires. The split
 //! is what lets M5 reuse the library with a different presentation, and what
-//! keeps `block_on` out of every layer but this one.
+//! keeps `block_on` out of `library`. `wait_http` is shared with the browse
+//! worker; the artwork worker blocks on its own (architecture §5).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -157,7 +158,7 @@ pub(crate) fn platform_state_store() -> Result<StateStore, FeedError> {
     ))
 }
 
-/// The one synchronous bridge (§6.6). Every network command enters the
+/// The shared synchronous bridge (§6.6). Every network command enters the
 /// runtime here and nowhere else, and the browse worker's mutations
 /// ([`crate::application::browse`]) use it too: `library.rs` stays free of
 /// `block_on`, and `run_resolved`'s decoder path never enters a runtime at

@@ -2,7 +2,7 @@
 
 Tenuto is a keyboard-first terminal audio player for local files, finite remote audio over HTTP, live HTTP radio, and podcast episodes from RSS or Atom feeds. It ships as one Rust binary, `tenuto`, with a plain `play` command and a full-screen `tui` player.
 
-This document describes the system as built through milestone 8. It uses the C4 model: context, containers, components, one runtime sequence, and deployment. The design decisions behind each part live in the specs under [`superpowers/specs/`](superpowers/specs/). The acceptance records live in [`m3-acceptance.md`](m3-acceptance.md), [`m5-acceptance.md`](m5-acceptance.md), [`m6-acceptance.md`](m6-acceptance.md), [`m7-acceptance.md`](m7-acceptance.md), [`m7.1-acceptance.md`](m7.1-acceptance.md) and [`m8-acceptance.md`](m8-acceptance.md). Known debt lives in [`m1-known-debt.md`](m1-known-debt.md).
+This document describes the system as built through M10 (finite reconnect), including M9.1 (`PlaylistSet`). It uses the C4 model: context, containers, components, one runtime sequence, and deployment. The design decisions behind each part live in the specs under [`superpowers/specs/`](superpowers/specs/). The acceptance records live in [`m3-acceptance.md`](m3-acceptance.md), [`m5-acceptance.md`](m5-acceptance.md), [`m6-acceptance.md`](m6-acceptance.md), [`m7-acceptance.md`](m7-acceptance.md), [`m7.1-acceptance.md`](m7.1-acceptance.md), [`m8-acceptance.md`](m8-acceptance.md), [`m9.1-acceptance.md`](m9.1-acceptance.md) and [`m10-acceptance.md`](m10-acceptance.md). Known debt lives in [`m1-known-debt.md`](m1-known-debt.md).
 
 ## 1. Scope and invariants
 
@@ -72,6 +72,7 @@ flowchart TB
         lock[("state.lock<br/>player profile lock")]
         subs[("subscriptions.json<br/>$XDG_DATA_HOME/tenuto<br/>durable user data")]
         slock[("subscriptions.lock<br/>subscription writer lock")]
+        stations[("stations.json<br/>$XDG_DATA_HOME/tenuto<br/>saved radio stations")]
         cache[("feeds/&lt;feed-id&gt;.json<br/>$XDG_CACHE_HOME/tenuto<br/>refetchable episodes")]
         logs[("logs/tenuto-tui-*.log<br/>$XDG_STATE_HOME/tenuto<br/>one per tui run, five kept")]
     end
@@ -82,6 +83,7 @@ flowchart TB
     bin --> lock
     bin --> subs
     bin --> slock
+    bin --> stations
     bin --> cache
     bin --> logs
     bin --> device
@@ -94,6 +96,7 @@ flowchart TB
 | `state.lock` | Player | Never written or unlinked | Locked by `tui` and `play` |
 | `subscriptions.json` | Feed layer | Durable user data | `subscribe`, `unsubscribe`, `refresh`, from the CLI or the browser |
 | `subscriptions.lock` | Feed layer | Never written or unlinked | Locked by every subscription mutation |
+| `stations.json` | Station layer | Durable user data | The browser's Radio tab: add, remove, re-probe. Only `tui` writes it, so `state.lock` serializes writers and it has no lock of its own |
 | `feeds/<feed-id>.json` | Feed layer | Disposable, refetchable | `subscribe` and `refresh` |
 | `logs/` | TUI | Disposable | The fd-2 redirect under `tui` |
 
@@ -108,7 +111,7 @@ flowchart TB
     subgraph entry["Entry"]
         main["main.rs, cli.rs<br/>clap parsing, exit codes"]
         app["app.rs<br/>dispatch, the play key loop"]
-        commands["commands.rs<br/>feed command output and exit status,<br/>the one block_on"]
+        commands["commands.rs<br/>feed command output and exit status,<br/>wait_http, the synchronous bridge"]
     end
 
     subgraph front["Front end"]
@@ -119,8 +122,9 @@ flowchart TB
         runtime["application/runtime.rs<br/>PlayerRuntime: owns engine, Session,<br/>writer, HttpService, workers"]
         session["session.rs<br/>checkpoint policy, load correlation,<br/>sole owner of PersistedState"]
         queue["playlist/ (PlaylistSet, Playlist, Queue), resume.rs<br/>the playlist rules, resume decision"]
-        library["library.rs<br/>list, resolve, subscribe,<br/>refresh, unsubscribe"]
-        workers["application/browse, enrich<br/>artwork/worker<br/>background workers"]
+        library["library.rs<br/>list, resolve, subscribe,<br/>refresh, unsubscribe, stations"]
+        workers["application/browse, enrich<br/>background workers"]
+        artwork["artwork/<br/>cover resolve and decode,<br/>tenuto-artwork worker"]
     end
 
     subgraph engine["Playback engine"]
@@ -132,6 +136,7 @@ flowchart TB
         http["http/<br/>HttpService, ByteChannel,<br/>HttpMediaSource, document fetch"]
         feed["feed/<br/>parse, bind, cache"]
         subscr["subscription/<br/>FeedId, slug, store"]
+        station["station/<br/>saved stations, store"]
     end
 
     subgraph base["Foundation"]
@@ -152,6 +157,8 @@ flowchart TB
     runtime --> eng
     runtime --> http
     runtime --> workers
+    runtime --> artwork
+    runtime --> station
     runtime --> persist
     workers --> library
     workers --> http
@@ -159,6 +166,11 @@ flowchart TB
     session --> persist
     library --> feed
     library --> subscr
+    library --> station
+    station --> subscr
+    station --> http
+    artwork --> http
+    artwork --> media
     library --> http
     eng --> pipe
     eng --> queue
@@ -175,18 +187,26 @@ flowchart TB
 |---|---|---|
 | `cli`, `main` | Parse arguments. Map outcomes to exit codes. Print the final error. | Contain policy |
 | `app` | Resolve a `play` argument into `(MediaId, SourceLocation)`. Run the legacy key loop. Dispatch `tui`. | Decode or persist directly |
-| `commands` | Format feed command columns. Decide feed command exit status. Enter the Tokio runtime in one function, `wait_http`. | Decide what to fetch or commit |
-| `library` | The application seam for feeds: `list_feeds`, `list_episodes`, `resolve_episode`, `subscribe`, `unsubscribe`, `refresh`, `refresh_all`. Async where the network is involved. | Print, `block_on`, open a device or a terminal |
+| `commands` | Format feed command columns. Decide feed command exit status. Own `wait_http`, the synchronous bridge into the Tokio runtime that feed commands and the browse worker share. | Decide what to fetch or commit |
+| `library` | The application seam for feeds and stations: `list_feeds`, `list_episodes`, `resolve_episode`, `subscribe`, `unsubscribe`, `refresh`, `refresh_all`, and since M7.1 `list_stations`, `add_station`, `remove_station`, `reprobe_station`. Async where the network is involved. | Print, `block_on`, open a device or a terminal |
 | `application::runtime` | One owner for the engine, `Session`, the writer, the `HttpService` and the workers. Driven by `AppCommand` values. Pumped once per front-end iteration. | Read a key or draw a frame |
 | `session` | Decide what to checkpoint and when. Allocate and track `LoadRequestId` tokens. Build every state snapshot. | Perform I/O or own a thread |
 | `playlist` (`PlaylistSet`, `Playlist`, `Queue`), `resume` | `PlaylistSet` owns every playlist rule: global entry and playlist IDs, the entry cap, cursors, `playing`, shuffle and its pin, the successor on delete, and recovery of stored playlists. `resume` is the resume decision from a position and a completion flag. | Import persistence. Hand out mutable access to a queue, playlist or entry |
 | `playback` | The decode worker, the CPAL stream's whole lifecycle, position accounting, the command and event protocol, the spectrum tap and worker. | Depend on persistence or block on Tokio |
 | `http` | Produce encoded bytes and the evidence that classifies them. One fetch task per source generation. One capped whole-document fetch per call. | Own a decoder, a resampler or a stream |
 | `feed`, `subscription` | Parse a document, bind items to `MediaId::PodcastEpisode`, store the cache and the subscription list. | Touch playback state |
+| `station` | Store the saved-station list, `stations.json`, with the subscription store's read, recovery and quarantine policy. Shares slug rules with `subscription`. | Fetch on its own; probing is `library`'s, on a user action |
+| `artwork` | Resolve the active entry's cover (an embedded tag picture, a local file or a remote URL) and decode it within the caps on the `tenuto-artwork` worker. Rasterize SVG station logos. Hold the built-in default covers. | Encode for the terminal or place the image; that is `tui`'s |
 | `persistence` | Read, classify and atomically replace `state.json`. Coalesce writes on one thread. | Merge snapshots |
 | `lifecycle` | Profile lock, signal listener, panic containment, fd-2 redirect, terminal cleanup, input thread, test hooks. | Contain business logic |
 | `media` | Validating identities, capabilities, metadata, tag and VBR-header reading. | Perform network I/O |
 | `tui` | Startup, event loop, teardown, layout tiers, drawing, the browser and its feed management, artwork placement, spectrum bars. | Mutate `PersistedState` except through `Session`; decode, read directories or probe tags inline |
+
+**Known layering exceptions.** The code has edges the diagram leaves out. Each is debt, not design, and the M9 roadmap (§12) names the fix:
+
+- The entry layer is imported from below. `commands::displayable` is used by `application` (runtime, view, browse), `tui/render/browser.rs` and `lifecycle::panic`. `tui/mod.rs` takes its stores from `commands::platform_*_store`, and `application::browse` calls `commands::wait_http` (M9.3).
+- `media` reaches up into `playback`. `media::tags` calls `playback::decode`'s probing functions, and `media::tags` and `media::vbr_header` return `playback::error::PlaybackError`. `media`, `playlist` and `persistence` also import value types from `playback`: `provenance`, `checkpoint` and `volume`.
+- `tui` opens `StateStore`, the writer and `Session` itself at startup, and `app.rs` does the same for `play` (M9.2).
 
 **The playlist model (M8).** A `Playlist` wraps today's `Queue` with an identity, a name and an optional shuffle; a `PlaylistSet` holds the `Vec<Playlist>` in place of the old single queue. Entry IDs and playlist IDs are each their own global, monotonic counter held by `PlaylistSet` (M9.1), never by a `Queue` or a `Playlist` itself, so an entry ID is unique across every playlist, not just within one. `PersistedState` holds the set privately and forwards every mutation to it; it applies the set's effect on the persisted current media when the playing playlist is deleted. The set remembers which playlist is `playing` and each playlist's cursor; `PersistedState` keeps the persisted `current_media` beside it. A cursor is adopted, not merely selected, and ownership survives moving between playlists (§9.1). The *viewed* playlist — which tab the front end is looking at — is transient runtime state kept by `application::runtime`, never written to disk.
 
@@ -211,6 +231,14 @@ Each thread has strict ownership. The names below are the OS thread names.
 | Browse worker | `tenuto-browse` | One request at a time: a directory level, the subscription list, one feed's cached episodes, and since M6 the subscribe, refresh and unsubscribe mutations through `library` | Recurse into a library or touch `Session` |
 
 The Tokio runtime exists only when the source is an HTTP URL. A local-file session runs with no Tokio runtime at all.
+
+Three contexts block on the Tokio runtime, and no others do:
+
+- the main thread of a feed command, through `commands::wait_http`;
+- `tenuto-browse`, through the same helper, for the browser's subscription and station mutations;
+- `tenuto-artwork`, which fetches a remote cover with its own `block_on`.
+
+The decode thread never blocks on the runtime: `HttpMediaSource` waits on `ByteChannel`, not on a future. Neither does the main thread under `tui` or `play`.
 
 Only artwork and metadata jobs are contained. `lifecycle::panic::run_contained` sets a thread-local flag around a `catch_unwind`. The panic hook sees the flag, writes one sanitized line to the session log, and the job reports an ordinary failure. Every other panic is fatal. The spectrum worker belongs to the engine and has no containment on purpose.
 
@@ -602,7 +630,7 @@ the script tests without a container.
 - **Known limitations.** Non-UTF-8 paths. Estimated position where the device reports no latency. Seek support that stays `Unknown` until probed. Symphonia reads an embedded picture in full while probing, before the 10 MiB artwork cap applies. Shoutcast v1 (`ICY 200 OK`) and streams without ICY headers are not playable (`docs/m1-known-debt.md`).
 - **Live radio, next.** ICY now-playing titles (M7.2) are the planned follow-up: a pure demultiplexer ahead of Symphonia, a generation-keyed latest-value slot, and a droppable `StreamMetadata` event. Not implemented; recorded in the M7 spec §12 so the seams are in the right place.
 - **Finite recovery does not revalidate across a reopen (M10).** A reopen probes fresh at byte zero without the previous response's validator, so an episode replaced on the server during an outage resumes at the same time offset in the new file. Stop → Play has the same limit.
-- **Architecture deepening, next (M9).** The nearest structural work is recorded layer by layer in [`superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md`](superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md). It covers one owner for the playlist rules, one versioned-file module under the three JSON stores, one display mirror for both front ends, one submission door and one landing operation in the engine, and network deadlines on `Clock`. Not implemented; none of it revisits the decisions above.
+- **Architecture deepening (M9).** The nearest structural work is recorded layer by layer in [`superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md`](superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md). M9.1's first item has shipped (#31): `PlaylistSet` owns the playlist rules (§4). Still open: M9.1's versioned-file module under the three JSON stores and moving resume intent into `resume.rs`; one display mirror for both front ends (M9.2); feed operations below `commands` and `play` over the runtime (M9.3); one submission door and one landing operation in the engine (M9.4); and network deadlines on `Clock` (M9.5). None of it revisits the decisions above.
 - **Radio tab and stations.json (M7.1).** A saved-station list, `stations.json`, mirrors `subscriptions.json` in atomicity and quarantine behavior. A probe opens the real source through `HttpMediaSource::open` rather than a bespoke header-only request, so a station's verified identity can never disagree with what playback itself would classify. A station's logo is fetched and decoded (SVG via `resvg` 0.48, `default-features = false`, both `image_href_resolver` halves closed) only on add or re-probe, never mid-playback — the one exception to the rule that stored identity is never authority over a live open.
 
 The reference acceptance scenario is the Radio-T flow: subscribe, list, play an episode, seek, stop, play again and resume, quit, start again and resume from the last checkpoint. The automated suites cover it against a local test server with no public-network dependency. The manual terminal checks for M5, M6, M7 and M7.1 are recorded as pending in their acceptance documents.
