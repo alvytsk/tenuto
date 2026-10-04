@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
+use crate::clock::{Clock, SystemClock};
+
 use super::error::{Phase, RemoteFailure};
 use super::response::FetchAccepted;
 
@@ -95,8 +97,14 @@ struct State {
 
 /// The out-of-band wake shared by the application, the worker, every source
 /// wait and the fetch task.
-#[derive(Debug)]
+///
+/// Also the network's clock (M9.5): every budget a wait or the fetch task
+/// charges - stall, headers, the operation deadline, the opening deadline -
+/// reads time from `clock`, so a test can hold the network still or step it
+/// past a budget instead of racing wall time. Waits still slice on real time;
+/// each slice re-reads the clock, so an advanced fake clock is seen within one.
 pub struct SourceInterrupt {
+    clock: Arc<dyn Clock>,
     state: Mutex<State>,
     reader_wake: Condvar,
     producer_wake: Notify,
@@ -115,9 +123,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
+impl std::fmt::Debug for SourceInterrupt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceInterrupt")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SourceInterrupt {
     pub fn new(capacity: usize) -> Arc<Self> {
+        Self::with_clock(capacity, Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(capacity: usize, clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
+            clock,
             state: Mutex::new(State {
                 bytes: VecDeque::with_capacity(capacity.min(1 << 16)),
                 capacity: capacity.max(1),
@@ -249,6 +270,20 @@ impl SourceInterrupt {
         lock(&self.state).operation_deadline = deadline;
     }
 
+    /// The network clock's monotonic hand.
+    pub fn now(&self) -> Instant {
+        self.clock.sample().monotonic
+    }
+
+    /// Resolves once `span` has passed on the network clock. Polls it every
+    /// `SLICE`, so a fake clock stepped past the span is seen within one.
+    pub async fn sleep(&self, span: Duration) {
+        let until = self.now() + span;
+        while self.now() < until {
+            tokio::time::sleep(SLICE).await;
+        }
+    }
+
     pub fn is_retired(&self) -> bool {
         lock(&self.state).retired
     }
@@ -312,7 +347,7 @@ impl SourceInterrupt {
         service: &dyn WaitHook,
         deadline: Duration,
     ) -> Result<FetchAccepted, HeaderOutcome> {
-        let start = Instant::now();
+        let start = self.now();
         let mut state = lock(&self.state);
         loop {
             if state.retired || state.generation != generation {
@@ -325,7 +360,7 @@ impl SourceInterrupt {
             // active demand: a freeze cannot arrive before the source that
             // would be frozen exists, so there is no paused interval to
             // exclude here.
-            if start.elapsed() >= deadline {
+            if self.now().duration_since(start) >= deadline {
                 return Err(HeaderOutcome::Failed(RemoteFailure::Timeout {
                     phase: Phase::Headers,
                 }));
@@ -374,7 +409,7 @@ impl ByteChannel {
 
     /// Wait for bytes, an ending or a retirement.
     ///
-    /// `stall` is a budget of *active demand*, not a wall-clock deadline: only
+    /// `stall` is a budget of *active demand*, not a fixed deadline: only
     /// slices spent unfrozen are charged against it, and any delivery resets
     /// it. A fixed `Instant::now() + stall` computed once — which is what this
     /// first did — expires during a long pause and fails the very next read
@@ -387,6 +422,9 @@ impl ByteChannel {
             return ReadOutcome::Bytes(0);
         }
         let mut demanded = Duration::ZERO;
+        // Charged from here to each pass's end, so time spent in the hook
+        // counts too: a fake clock stepped there must not be lost.
+        let mut last = self.0.now();
         let mut state = lock(&self.0.state);
         // Captured at entry, and re-tested on every pass. A read blocked
         // across a `retire()` + `begin()` pair would otherwise wake into the
@@ -440,22 +478,16 @@ impl ByteChannel {
             // seek's wait it would let a paused, stalled seek hang forever —
             // bounded on paper, wedged in fact.
             if let Some(deadline) = state.operation_deadline
-                && Instant::now() >= deadline
+                && self.0.now() >= deadline
             {
                 return ReadOutcome::Failed(RemoteFailure::Timeout { phase: Phase::Seek });
             }
             let frozen_before = state.frozen;
-            let slice_start = Instant::now();
             let (guard, _) = match self.0.reader_wake.wait_timeout(state, SLICE) {
                 Ok(pair) => pair,
                 Err(poisoned) => poisoned.into_inner(),
             };
             state = guard;
-            // Only unfrozen time is demand. A slice that began frozen is not
-            // charged, whatever the flag says by the time it ends.
-            if !frozen_before {
-                demanded += slice_start.elapsed();
-            }
             // Outside the predicate but inside the loop: the hook runs on every
             // slice, which is what keeps position and checkpoints current while
             // the network is quiet (§8), what services a freeze (Task 9), and
@@ -467,6 +499,13 @@ impl ByteChannel {
             // interrupt; holding both here would close that cycle.
             drop(state);
             service.service();
+            // Only unfrozen time is demand. A slice that began frozen is not
+            // charged, whatever the flag says by the time it ends.
+            let now = self.0.now();
+            if !frozen_before {
+                demanded += now.duration_since(last);
+            }
+            last = now;
             state = lock(&self.0.state);
         }
     }

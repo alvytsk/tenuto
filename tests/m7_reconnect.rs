@@ -49,7 +49,16 @@ fn start(server: &TestServer) -> TestEngine {
 /// *fresh* connection, which would cost every request count below an extra
 /// connection before the test began.
 fn start_with(server: &TestServer, policy: ReconnectPolicy) -> TestEngine {
-    let mut engine = TestEngine::start_idle();
+    start_on(TestEngine::start_idle(), server, policy)
+}
+
+/// [`start_with`] on a held network clock (M9.5): no backoff or budget moves
+/// until the test steps the clock or runs it.
+fn start_held(server: &TestServer, policy: ReconnectPolicy) -> TestEngine {
+    start_on(TestEngine::start_on_fake_clock(), server, policy)
+}
+
+fn start_on(mut engine: TestEngine, server: &TestServer, policy: ReconnectPolicy) -> TestEngine {
     engine.handle().set_reconnect_policy(policy);
     let request = engine.next_request();
     engine.load_remote_as(
@@ -354,20 +363,21 @@ fn sustained_playback_ends_the_outage_so_a_later_drop_gets_a_fresh_budget() {
             .then(station().truncate_body_after(CUT))
             .then(station()),
     );
-    let mut engine = start_with(
+    let mut engine = start_held(
         &server,
         ReconnectPolicy {
             stable_after: Duration::from_millis(500),
             ..quick()
         },
     );
+    engine.run_network();
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.play_until_event(state(PlaybackState::Playing));
     let rejoined = engine.handle().progress().position;
     // Half a second of *played* audio ends the outage...
     engine.play_for(rejoined + Duration::from_millis(700));
-    // ...so wall time well past the 600 ms budget no longer matters.
-    std::thread::sleep(Duration::from_millis(700));
+    // ...so network time well past the 600 ms budget no longer matters.
+    engine.advance_network(Duration::from_millis(700));
     engine.play_until_event(state(PlaybackState::Reconnecting));
     engine.play_until_event(state(PlaybackState::Playing));
     assert_eq!(
@@ -389,14 +399,13 @@ fn a_failure_during_an_outage_leaves_no_budget_behind_for_the_next_one() {
             .then(station().truncate_body_after(8 * 1024))
             .then(station()),
     );
-    // A backoff long enough that the engine is still sitting in `Reconnecting`
-    // when the device fault lands, rather than already back on connection 2.
-    let patient = ReconnectPolicy {
-        backoff: [Duration::from_secs(3); 5],
+    // Held, so the engine is still sitting in `Reconnecting` when the device
+    // fault lands, rather than already back on connection 2.
+    let policy = ReconnectPolicy {
         budget: Duration::from_millis(300),
-        stable_after: Duration::from_secs(10),
+        ..quick()
     };
-    let mut engine = start_with(&server, patient);
+    let mut engine = start_held(&server, policy);
     engine.play_until_event(state(PlaybackState::Reconnecting));
 
     // A fatal device fault: a failure that is none of the four paths which end
@@ -404,16 +413,10 @@ fn a_failure_during_an_outage_leaves_no_budget_behind_for_the_next_one() {
     engine.force_fatal_device_fault();
     engine.await_event(failed);
 
-    // Deliberate wall time, with the clock frozen, past the budget - so an
+    // Network time past the budget, with the device clock frozen - so an
     // outage carried over from before would already be spent.
-    std::thread::sleep(Duration::from_millis(400));
-
-    // Brisk again, so the reconnect the second drop deserves does not have to
-    // wait out the patient backoff above.
-    engine.handle().set_reconnect_policy(ReconnectPolicy {
-        backoff: [Duration::from_millis(20); 5],
-        ..patient
-    });
+    engine.advance_network(Duration::from_millis(400));
+    engine.run_network();
     // §9's one explicit reopen: connection 2, which then drops in its turn.
     engine.send(PlaybackCommand::Play);
     engine.await_event(state(PlaybackState::Playing));

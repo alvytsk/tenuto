@@ -31,6 +31,7 @@ Linux builds need `libasound2-dev`.
 
 - Integration suites in `tests/`, prefixed by milestone (`m5_*`, `m8_*`); shared harness in `tests/support/`.
 - Engine tests run on a virtual clock. Step it with `play_for`, `let_time_pass`, `play_until_terminal` — never a sleep or a fixed-duration advance; those have caused CI-only flakes.
+- Network budgets and reconnect backoff: `TestEngine::start_on_fake_clock` holds network time; step it with `advance_network`, let it follow real time with `run_network`. Prefer it to widening a real backoff.
 - Subprocess suites are Linux-only. The macOS CI leg is non-gating.
 - `TENUTO_TEST_HOOK` triggers fixed-stage panics/probes (`src/lifecycle/hooks.rs`).
 - Intentionally `#[ignore]`d: `device_smoke` (real device), `m8_snapshot_size` (manual measurement).

@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use url::Url;
 
+use tenuto::clock::{Clock, FakeClock, SystemClock};
 use tenuto::http::channel::{SourceInterrupt, WaitHook};
 use tenuto::http::limits::Limits;
 use tenuto::http::service::HttpService;
@@ -223,6 +224,10 @@ struct Driver {
     /// is the only condition under which a stale timeline can be misread.
     deaf_to_discard: AtomicBool,
     stop: AtomicBool,
+    /// The fake network clock, when there is one, and whether it follows
+    /// real time (`run_network`) or holds still until stepped.
+    network: Option<Arc<FakeClock>>,
+    network_runs: AtomicBool,
 }
 
 impl Driver {
@@ -368,28 +373,84 @@ impl TestEngine {
         engine
     }
 
+    /// [`start_idle`](Self::start_idle) on a held network clock (M9.5): no
+    /// stall, header or seek budget expires and no backoff elapses until the
+    /// test steps it ([`advance_network`](Self::advance_network)) or lets it
+    /// follow real time ([`run_network`](Self::run_network)). A test acting
+    /// inside a backoff then has all the time it needs, however loaded the
+    /// machine.
+    pub fn start_on_fake_clock() -> Self {
+        Self::bare_on(Some(Arc::new(FakeClock::new())))
+    }
+
+    /// Step the fake network clock. Waits and the worker loop re-read it
+    /// within one slice.
+    pub fn advance_network(&self, span: Duration) {
+        self.network().advance_monotonic(span);
+    }
+
+    /// From now on the network clock follows real time, as a real one would.
+    pub fn run_network(&self) {
+        self.network();
+        self.driver.network_runs.store(true, Ordering::Relaxed);
+    }
+
+    /// Hold the network clock where it is.
+    pub fn hold_network(&self) {
+        self.network();
+        self.driver.network_runs.store(false, Ordering::Relaxed);
+    }
+
+    fn network(&self) -> &FakeClock {
+        match &self.driver.network {
+            Some(clock) => clock,
+            None => panic!("the network clock is real; use start_on_fake_clock"),
+        }
+    }
+
     fn bare() -> Self {
+        Self::bare_on(None)
+    }
+
+    fn bare_on(network: Option<Arc<FakeClock>>) -> Self {
         let device = Arc::new(Mutex::new(Device {
             output: TestOutput::new(CHANNELS, RATE, BUFFER_FRAMES, LATENCY),
             link: None,
         }));
         let (fault_tx, fault_rx) = crossbeam_channel::bounded(16);
-        let handle =
-            EngineHandle::spawn_with(Box::new(HarnessOutput::new(Arc::clone(&device))), fault_rx);
+        let clock: Arc<dyn Clock> = match &network {
+            Some(fake) => Arc::clone(fake) as Arc<dyn Clock>,
+            None => Arc::new(SystemClock),
+        };
+        let handle = EngineHandle::spawn_on_clock(
+            Box::new(HarnessOutput::new(Arc::clone(&device))),
+            fault_rx,
+            clock,
+        );
         let driver = Arc::new(Driver {
             device: Arc::clone(&device),
             mode: AtomicU8::new(FROZEN),
             deaf_to_discard: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            network,
+            network_runs: AtomicBool::new(false),
         });
         let thread = {
             let driver = Arc::clone(&driver);
             std::thread::Builder::new()
                 .name("harness-device".into())
                 .spawn(move || {
+                    let mut last = Instant::now();
                     while !driver.stop.load(Ordering::Relaxed) {
                         driver.step();
                         std::thread::sleep(DRIVER_NAP);
+                        let elapsed = last.elapsed();
+                        last += elapsed;
+                        if let Some(clock) = &driver.network
+                            && driver.network_runs.load(Ordering::Relaxed)
+                        {
+                            clock.advance_monotonic(elapsed);
+                        }
                     }
                 })
                 .ok()

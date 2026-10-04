@@ -101,6 +101,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 
   CI flakes #15, #16 and #18 came from these two time sources interacting. (#13 was a send-then-retire generation race, fixed in e51bae3; a clock would not have helped.) `tests/m7_reconnect.rs:340, 379` sleeps on wall time. The open protocol (`OpeningDeadline` → `set_probe_cap` → `finish_opening`) is replayed in `playback/prepare.rs` and `library.rs`.
 - Direction: fold the deadline, probe cap and failure latch into one open-and-probe operation. Inject the existing `clock::Clock` into the HTTP source and into reconnect scheduling. `SystemClock` and `FakeClock` already exist as its two adapters. Risk: `ByteChannel`'s waits must wake when a fake clock advances.
+- Status: the clock is injected (`SourceInterrupt::with_clock`, `EngineHandle::spawn_on_clock`). Waits re-read it every 20 ms slice rather than being woken, and stall demand is charged across the whole pass so a step taken in the wait hook is not lost. `TestEngine::start_on_fake_clock` holds it; `m7_reconnect` and `m10_finite_reconnect` use it in place of wide real-time backoffs and sleeps. The open-and-probe fold is still open.
 
 **Runtime rig on the virtual clock.**
 - Problem: `tests/support/runtime.rs` builds the runtime over `NullOutput` with `SystemClock`, and `pump_until` and `pump_for` sleep 10 ms per pass.

@@ -44,7 +44,7 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use time::OffsetDateTime;
 use url::Url;
@@ -1067,13 +1067,14 @@ async fn probe_station(
 ) -> Result<StationIdentity, RemoteFailure> {
     let limits = Limits::default();
     let interrupt = SourceInterrupt::new(limits.buffer_bytes);
+    let deadline = OpeningDeadline::starting_now(&interrupt, &limits);
     let (source, opening) = HttpMediaSource::open(
         Arc::clone(http),
         url.clone(),
         interrupt,
         Arc::new(InertHook),
         limits,
-        OpeningDeadline(Instant::now() + limits.open),
+        deadline,
     )?;
     opening.finish_opening();
     let identity = source.station_identity().cloned();

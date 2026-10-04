@@ -10,7 +10,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSource;
@@ -100,7 +99,7 @@ fn open_http(url: &Url, context: &PrepareContext) -> Result<DecodedSource, Playb
     // server that trickles data can never keep opening running past
     // `limits.open` even though every individual read stays inside
     // `limits.stall` (Ruling 3).
-    let opening = OpeningDeadline(Instant::now() + context.limits.open);
+    let opening = OpeningDeadline::starting_now(&context.interrupt, &context.limits);
     let (source, opening_limits) = HttpMediaSource::open(
         Arc::clone(service),
         url.clone(),

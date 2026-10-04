@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvError, Sender, TrySendError, select};
 use url::Url;
 
+use crate::clock::{Clock, SystemClock};
 use crate::http::channel::{ByteChannel, ReadOutcome, SourceInterrupt, WaitHook};
 use crate::http::error::{Operation, RemoteFailure, redact_url};
 use crate::http::limits::Limits;
@@ -234,7 +235,13 @@ impl EngineHandle {
         let faults = output.faults();
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(64);
         output.set_wake(wake_tx.clone());
-        Self::assemble(Box::new(output), faults, wake_tx, wake_rx)
+        Self::assemble(
+            Box::new(output),
+            faults,
+            wake_tx,
+            wake_rx,
+            Arc::new(SystemClock),
+        )
     }
 
     /// Spawn over whichever output the environment calls for: the paced,
@@ -251,8 +258,19 @@ impl EngineHandle {
 
     /// Spawn a worker over any output, plus the fault stream it publishes to.
     pub fn spawn_with(output: Box<dyn AudioOutput>, faults: Receiver<OutputFault>) -> Self {
+        Self::spawn_on_clock(output, faults, Arc::new(SystemClock))
+    }
+
+    /// [`Self::spawn_with`], with the network clock every stall, header,
+    /// seek and opening budget and every reconnect backoff is measured on
+    /// (M9.5). A test passes a `FakeClock` and steps it past a budget.
+    pub fn spawn_on_clock(
+        output: Box<dyn AudioOutput>,
+        faults: Receiver<OutputFault>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(64);
-        Self::assemble(output, faults, wake_tx, wake_rx)
+        Self::assemble(output, faults, wake_tx, wake_rx, clock)
     }
 
     fn assemble(
@@ -260,6 +278,7 @@ impl EngineHandle {
         faults: Receiver<OutputFault>,
         wake_tx: Sender<()>,
         wake_rx: Receiver<()>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         let (commands_tx, commands_rx) = crossbeam_channel::bounded(COMMAND_CAPACITY);
         let (events_tx, events_rx) = crossbeam_channel::bounded(EVENT_CAPACITY);
@@ -279,7 +298,7 @@ impl EngineHandle {
         // `Arc`, so its buffer has to be sized for real fetch throughput from
         // the moment it exists, not the byte-at-a-time placeholder that used
         // to sit here only so `WaitService` had something to poll.
-        let source_interrupt = SourceInterrupt::new(Limits::default().buffer_bytes);
+        let source_interrupt = SourceInterrupt::with_clock(Limits::default().buffer_bytes, clock);
         let traits = Arc::new(SourceTraits::default());
         let http = Arc::new(Mutex::new(None));
         let reconnect_policy = Arc::new(Mutex::new(ReconnectPolicy::default()));
@@ -2349,7 +2368,7 @@ impl Worker {
     /// such failure and outlives every attempt until sustained playback ends
     /// it, the budget gives up, or the listener ends the request.
     fn enter_reconnecting(&mut self, failure: RemoteFailure) {
-        let now = Instant::now();
+        let now = self.source_interrupt.now();
         let policy = *lock(&self.reconnect_policy);
         let outage = self.outage.get_or_insert_with(|| Outage::begin(now));
         match outage.failed(now, &policy) {
@@ -2412,7 +2431,7 @@ impl Worker {
                 if !self
                     .outage
                     .as_ref()
-                    .is_some_and(|outage| outage.due(Instant::now()))
+                    .is_some_and(|outage| outage.due(self.source_interrupt.now()))
                 {
                     return;
                 }
@@ -3981,7 +4000,7 @@ fn seek_bounded(
     target: Duration,
     budget: Option<Duration>,
 ) -> Result<(SeekOutcome, PositionProvenance), PlaybackError> {
-    source_interrupt.set_operation_deadline(Some(Instant::now() + deadline));
+    source_interrupt.set_operation_deadline(Some(source_interrupt.now() + deadline));
     let outcome = source.seek_refined(target, budget, &mut || {
         stop_or_shutdown(local_interrupt.load(Ordering::Acquire))
     });

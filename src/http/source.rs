@@ -31,9 +31,14 @@ use crate::media::capabilities::{DemuxerSeek, SourceEvidence};
 pub struct OpeningDeadline(pub Instant);
 
 impl OpeningDeadline {
+    /// `limits.open` from now on the interrupt's clock.
+    pub fn starting_now(interrupt: &SourceInterrupt, limits: &Limits) -> Self {
+        Self(interrupt.now() + limits.open)
+    }
+
     /// `None` once elapsed.
-    pub fn remaining(&self) -> Option<Duration> {
-        self.0.checked_duration_since(Instant::now())
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.0.checked_duration_since(now)
     }
 }
 
@@ -155,6 +160,7 @@ fn wait_budget(
     opening_limits: &OpeningLimits,
     opening_deadline: OpeningDeadline,
     limits: &Limits,
+    now: Instant,
 ) -> Result<WaitBudget, RemoteFailure> {
     if !opening_limits.is_opening() {
         return Ok(WaitBudget {
@@ -162,7 +168,7 @@ fn wait_budget(
             bound: Bound::Stall,
         });
     }
-    match opening_deadline.remaining() {
+    match opening_deadline.remaining(now) {
         Some(remaining) if remaining < limits.stall => Ok(WaitBudget {
             budget: remaining,
             bound: Bound::Opening,
@@ -247,7 +253,7 @@ impl HttpMediaSource {
         };
         let header_wait = service.fetch(request, channel.clone(), generation);
 
-        let outcome = wait_budget(&opening_limits, opening, &limits)
+        let outcome = wait_budget(&opening_limits, opening, &limits, interrupt.now())
             .map_err(HeaderOutcome::Failed)
             .and_then(|budget| {
                 header_wait
@@ -423,7 +429,12 @@ impl HttpMediaSource {
     }
 
     fn wait_budget(&self) -> Result<WaitBudget, RemoteFailure> {
-        wait_budget(&self.opening_limits, self.opening_deadline, &self.limits)
+        wait_budget(
+            &self.opening_limits,
+            self.opening_deadline,
+            &self.limits,
+            self.interrupt.now(),
+        )
     }
 }
 

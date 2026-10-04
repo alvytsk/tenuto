@@ -10,7 +10,7 @@
 
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use reqwest::header::{ACCEPT_ENCODING, IF_RANGE, LOCATION, RANGE};
 use url::Url;
@@ -258,7 +258,7 @@ impl Fetch {
                     operation,
                     detail: transport_detail(error),
                 })?,
-                () = tokio::time::sleep(limits.headers) => {
+                () = interrupt.sleep(limits.headers) => {
                     return Err(RemoteFailure::Timeout { phase: Phase::Headers });
                 }
             };
@@ -396,6 +396,7 @@ async fn run_fetch(
         let next = {
             let mut chunk = pin!(response.chunk());
             let mut demanded = Duration::ZERO;
+            let mut last = interrupt.now();
             loop {
                 // Deliberately no `wait_while_frozen` here (fix round 1):
                 // delivery must not be gated on the freeze level. `ByteChannel::
@@ -407,7 +408,6 @@ async fn run_fetch(
                 // may never come (§9). Only the stall-timer's own charging
                 // (below) still checks the level.
                 let slice = TICK.min(limits.stall - demanded);
-                let started = Instant::now();
                 tokio::select! {
                     biased;
                     () = interrupt.cancelled(generation) => return,
@@ -415,9 +415,11 @@ async fn run_fetch(
                     () = tokio::time::sleep(slice) => {
                         // Only unfrozen time is charged. A freeze that lands
                         // inside the sleep is caught on the next slice.
+                        let now = interrupt.now();
                         if !interrupt.is_frozen() {
-                            demanded += started.elapsed();
+                            demanded += now.duration_since(last);
                         }
+                        last = now;
                         if demanded >= limits.stall {
                             channel.finish(generation, Outcome::Failed(
                                 RemoteFailure::Timeout { phase: Phase::Stall },
