@@ -1618,7 +1618,9 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use crate::media::id::AbsolutePath;
+    use crate::media::metadata::MediaMetadata;
     use crate::persistence::writer::StateSink;
+    use crate::playback::event::StartDisposition;
     use crate::playback::output::null_output::NullOutput;
     use std::time::Instant;
 
@@ -1763,5 +1765,106 @@ mod tests {
 
         let now = runtime().now_playing(&entry, &PersistedState::default());
         assert_eq!(now.title, "So What");
+    }
+
+    // ------------------------------------------------- the display mirror
+    //
+    // Moved from `app.rs` with M9.3: `tenuto play` now draws from this
+    // mirror, so its rules are pinned here.
+
+    fn mirror_after(position: Duration) -> Mirror {
+        let event = PlaybackEvent::Loaded {
+            session_rev: 3,
+            request: LoadRequestId::from_raw(1),
+            media: MediaId::LocalFile(AbsolutePath::new(PathBuf::from(FIVE)).expect("absolute")),
+            metadata: MediaMetadata {
+                duration: Some(Duration::from_secs(300)),
+                ..MediaMetadata::default()
+            },
+            capabilities: MediaCapabilities {
+                continuity: Continuity::Finite,
+                seek: SeekSupport::Native,
+            },
+            position,
+            disposition: StartDisposition::Resumed,
+        };
+        Mirror::loaded(&event).expect("a Loaded event")
+    }
+
+    fn progress_at(position: Duration) -> Progress {
+        Progress {
+            session_rev: 0,
+            media: None,
+            position,
+            quality: PositionQuality::Exact,
+            provenance: PositionProvenance::Established,
+            buffering: false,
+            load: None,
+        }
+    }
+
+    /// The listener sees the restored position the moment the track opens,
+    /// not after the first progress tick: `Loaded` is the only event that
+    /// carries it.
+    #[test]
+    fn a_resumed_position_is_shown_as_soon_as_the_track_opens() {
+        let mirror = mirror_after(Duration::from_secs(93));
+        assert_eq!(mirror.position, Duration::from_secs(93));
+        assert_eq!(mirror.quality, PositionQuality::Exact);
+        assert!(
+            !mirror.buffering,
+            "a fresh load starts with nothing buffering"
+        );
+    }
+
+    #[test]
+    fn capabilities_changed_updates_the_mirror_without_disturbing_position() {
+        let mut mirror = mirror_after(Duration::from_secs(42));
+        mirror.apply(&PlaybackEvent::CapabilitiesChanged {
+            session_rev: 7,
+            capabilities: MediaCapabilities {
+                continuity: Continuity::Finite,
+                seek: SeekSupport::Unsupported,
+            },
+        });
+        assert_eq!(mirror.session_rev, 7);
+        assert_eq!(mirror.capabilities.seek, SeekSupport::Unsupported);
+        assert_eq!(
+            mirror.position,
+            Duration::from_secs(42),
+            "unrelated to capability evidence"
+        );
+    }
+
+    #[test]
+    fn progress_arriving_during_a_burst_does_not_yank_the_display_back() {
+        // The worker has not been asked to move yet, so its progress reports
+        // where playback still is. Copying that over the optimistic target
+        // would undo the jump on the very next tick.
+        let mut mirror = mirror_after(Duration::from_secs(60));
+        mirror.provenance = PositionProvenance::Estimated;
+        mirror.apply_progress(&progress_at(Duration::from_secs(100)), true);
+        assert_eq!(mirror.position, Duration::from_secs(60));
+        assert_eq!(mirror.provenance, PositionProvenance::Estimated);
+    }
+
+    #[test]
+    fn buffering_still_reaches_the_display_during_a_burst() {
+        let mut mirror = mirror_after(Duration::ZERO);
+        let progress = Progress {
+            buffering: true,
+            ..progress_at(Duration::from_secs(100))
+        };
+        mirror.apply_progress(&progress, true);
+        assert!(mirror.buffering);
+    }
+
+    #[test]
+    fn the_landing_corrects_the_display_once_the_burst_closes() {
+        let mut mirror = mirror_after(Duration::from_secs(60));
+        mirror.provenance = PositionProvenance::Estimated;
+        mirror.apply_progress(&progress_at(Duration::from_secs(58)), false);
+        assert_eq!(mirror.position, Duration::from_secs(58));
+        assert_eq!(mirror.provenance, PositionProvenance::Established);
     }
 }
