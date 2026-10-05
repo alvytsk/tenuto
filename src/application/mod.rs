@@ -9,6 +9,7 @@
 pub mod browse;
 pub mod enrich;
 pub mod podcast;
+pub mod profile;
 pub mod runtime;
 pub mod seek;
 pub mod source;

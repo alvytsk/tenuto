@@ -135,21 +135,44 @@ fn decide_engine_with_empty_queue(input: TransportInput) -> TransportDecision {
     }
 }
 
+/// M7 §3.4: a rejected seek must be harmless, and the cheapest way is not
+/// to submit one; no `KeyRouter` burst opens either. Shared by the playlist
+/// and the detached tables.
+fn live_refuses(input: TransportInput, phase: PlaybackPhase, live: bool) -> bool {
+    live && matches!(
+        input,
+        TransportInput::Home | TransportInput::SeekBy(_) | TransportInput::SeekTo(_)
+    ) && !matches!(phase, PlaybackPhase::Unloaded | PlaybackPhase::LoadFailed)
+}
+
+/// The transport table for media played on its own (`tenuto play`, M9.3):
+/// there is no playlist to start, retry or navigate, so every key goes to the
+/// engine as itself. What the engine answers (a warning for Space after the
+/// end, say) is the engine's rule, not this table's.
+pub fn decide_detached(
+    input: TransportInput,
+    phase: PlaybackPhase,
+    live: bool,
+) -> TransportDecision {
+    if live_refuses(input, phase, live) {
+        return TransportDecision::Notice(LIVE_NO_SEEK);
+    }
+    match input {
+        TransportInput::Space => TransportDecision::TogglePause,
+        TransportInput::Play => TransportDecision::Play,
+        TransportInput::Home => TransportDecision::Restart,
+        TransportInput::SeekBy(step) => TransportDecision::SeekBy(step),
+        TransportInput::SeekTo(target) => TransportDecision::SeekTo(target),
+        TransportInput::Enter | TransportInput::Previous | TransportInput::Next => {
+            TransportDecision::Nothing
+        }
+    }
+}
+
 pub fn decide(input: TransportInput, situation: &TransportSituation<'_>) -> TransportDecision {
-    // M7 §3.4: a rejected seek must be harmless, and the cheapest way is not
-    // to submit one. No `KeyRouter` burst opens either. Before the
-    // empty-queue branch: what the engine holds is live whether or not the
-    // queue still lists it.
-    if situation.live
-        && matches!(
-            input,
-            TransportInput::Home | TransportInput::SeekBy(_) | TransportInput::SeekTo(_)
-        )
-        && !matches!(
-            situation.phase,
-            PlaybackPhase::Unloaded | PlaybackPhase::LoadFailed
-        )
-    {
+    // Before the empty-queue branch: what the engine holds is live whether or
+    // not the queue still lists it.
+    if live_refuses(input, situation.phase, situation.live) {
         return TransportDecision::Notice(LIVE_NO_SEEK);
     }
 
@@ -207,5 +230,59 @@ pub fn decide(input: TransportInput, situation: &TransportSituation<'_>) -> Tran
         (Playing | Reconnecting | Paused | Stopped, Home) => TransportDecision::Restart,
         (Playing | Reconnecting | Paused | Stopped, SeekBy(n)) => TransportDecision::SeekBy(n),
         (Playing | Reconnecting | Paused | Stopped, SeekTo(d)) => TransportDecision::SeekTo(d),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_detached_track_forwards_every_key_to_the_engine() {
+        use PlaybackPhase::{Ended, Loading, Paused, Playing, Reconnecting, Stopped};
+        for phase in [Loading, Playing, Paused, Stopped, Ended, Reconnecting] {
+            assert_eq!(
+                decide_detached(TransportInput::Space, phase, false),
+                TransportDecision::TogglePause
+            );
+            assert_eq!(
+                decide_detached(TransportInput::Play, phase, false),
+                TransportDecision::Play
+            );
+            assert_eq!(
+                decide_detached(TransportInput::Home, phase, false),
+                TransportDecision::Restart
+            );
+            assert_eq!(
+                decide_detached(TransportInput::SeekBy(-10), phase, false),
+                TransportDecision::SeekBy(-10)
+            );
+        }
+    }
+
+    #[test]
+    fn a_detached_track_has_no_playlist_to_navigate() {
+        for input in [
+            TransportInput::Previous,
+            TransportInput::Next,
+            TransportInput::Enter,
+        ] {
+            assert_eq!(
+                decide_detached(input, PlaybackPhase::Playing, false),
+                TransportDecision::Nothing
+            );
+        }
+    }
+
+    #[test]
+    fn a_detached_live_stream_is_not_seeked() {
+        assert_eq!(
+            decide_detached(TransportInput::SeekBy(10), PlaybackPhase::Playing, true),
+            TransportDecision::Notice(LIVE_NO_SEEK)
+        );
+        assert_eq!(
+            decide_detached(TransportInput::Space, PlaybackPhase::Playing, true),
+            TransportDecision::TogglePause
+        );
     }
 }

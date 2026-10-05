@@ -51,6 +51,7 @@ use ratatui_image::picker::{Picker, ProtocolType};
 
 use crate::application::browse::{BrowseRequest, BrowseResult, BrowseWorker, TreeCollected};
 use crate::application::enrich::default_probe;
+use crate::application::profile::{OpenedState, open_state};
 use crate::application::runtime::{
     AppCommand, CoverKey, FlushReport, LibraryStores, PlayerRuntime, RuntimeParts,
 };
@@ -69,9 +70,7 @@ use crate::lifecycle::signals::ShutdownSignals;
 use crate::lifecycle::terminal::KITTY_DELETE_ALL;
 use crate::media::id::MediaId;
 use crate::persistence::store::{LoadOutcome, QueueBackup, StateStore};
-use crate::persistence::writer::{DisabledSink, StateSink, WriterHandle};
 use crate::playback::engine::EngineHandle;
-use crate::session::Session;
 use crate::tui::browser::{BrowserEffect, BrowserState};
 use crate::tui::images::{CoverCache, failure_status, picker_for, query_terminal};
 use crate::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
@@ -259,21 +258,16 @@ fn start_runtime(
     clock: Arc<dyn Clock>,
     hook: TestHook,
 ) -> PlayerRuntime {
-    let LoadOutcome {
-        state,
-        writable,
+    let OpenedState {
+        session,
+        writer,
+        persisting,
         queue_repair,
-        ..
-    } = loaded;
-    let sink: Box<dyn StateSink> = if writable {
-        Box::new(store)
-    } else {
-        Box::new(DisabledSink)
-    };
+    } = open_state(store, loaded, &clock);
     let mut runtime = PlayerRuntime::new(RuntimeParts {
-        session: Session::new(state),
-        writer: WriterHandle::spawn(sink, Arc::clone(&clock)),
-        persisting: writable,
+        session,
+        writer,
+        persisting,
         clock,
         engine_factory: Box::new(EngineHandle::spawn_for_environment),
         library: library_stores(),
@@ -293,7 +287,7 @@ fn start_runtime(
                 repair.reset.fields_reset()
             ),
         }),
-        None if !writable => Some(STATE_NOT_SAVED.to_owned()),
+        None if !persisting => Some(STATE_NOT_SAVED.to_owned()),
         None => None,
     };
     if let Some(status) = status {
