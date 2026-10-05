@@ -1370,13 +1370,16 @@ impl Session {
     /// to make sure no edit can move `current_media` without deciding
     /// `completed` in the same breath.
     ///
-    /// The saved `current_media` is the playing playlist's cursor media: a
-    /// load clears a cursor that disagrees with it (`CursorMediaMismatch`).
-    /// A detached load belongs to no playlist, so it moves only this
-    /// session's current media and leaves the saved one to the cursor (M9.3).
+    /// While the playing playlist has a cursor, the saved `current_media`
+    /// is that cursor's media: a load clears a cursor that disagrees with it
+    /// (`CursorMediaMismatch`). A detached load belongs to no playlist, so
+    /// with a cursor standing it moves only this session's current media and
+    /// leaves the saved one to the cursor (M9.3); with none, it is saved as
+    /// any load's is.
     fn adopt_media(&mut self, media: MediaId, completed: bool, detached: bool) {
         self.current_media = Some(media.clone());
-        if !detached {
+        let cursor = self.state.playlists().playing_playlist().queue().active();
+        if !detached || cursor.is_none() {
             self.state.edit().set_current_media(media);
         }
         self.completed = completed;

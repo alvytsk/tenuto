@@ -189,3 +189,13 @@ fn a_detached_load_leaves_the_saved_current_media_to_the_cursor() {
         Some(ids[1])
     );
 }
+
+/// With no cursor there is nothing for the saved current media to disagree
+/// with, so a detached load records its media there as any load does.
+#[test]
+fn with_no_cursor_a_detached_load_is_the_saved_current_media() {
+    let clock = FakeClock::new();
+    let mut session = Session::new(PersistedState::default());
+    detached(&mut session, &clock, "elsewhere");
+    assert_eq!(session.state().current_media(), Some(&media("elsewhere")));
+}
