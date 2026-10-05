@@ -202,7 +202,7 @@ fn run_resolved_locked(
     // cannot happen — this is the only load this session has ever asked
     // for — so a session-ending error is the honest way to report it anyway.
     let request = session
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .map_err(|error| PlaybackError::Failed(format!("cannot register the load: {error:?}")))?;
     for command in resume_commands(media, location, resume, volume, request) {
         let is_load = matches!(command, PlaybackCommand::Load { .. });

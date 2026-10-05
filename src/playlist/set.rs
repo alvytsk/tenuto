@@ -321,15 +321,6 @@ impl PlaylistSet {
         Ok(())
     }
 
-    /// The `LoadTarget::Legacy` path: a load that belongs to no playlist
-    /// clears the playing playlist's cursor, as it did before M8.
-    pub fn clear_playing_cursor(&mut self) {
-        let index = self.playing_index();
-        if let Some(playlist) = self.playlists.get_mut(index) {
-            playlist.queue.clear_active();
-        }
-    }
-
     /// One entry's display: each present field that differs is written, an
     /// absent one is kept. Whether anything changed.
     pub fn update_display(

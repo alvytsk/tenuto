@@ -28,7 +28,7 @@ fn loaded(
     position: Duration,
 ) -> PlaybackEvent {
     let request = session
-        .register_load(LoadTarget::Legacy, &media(name))
+        .register_load(LoadTarget::Detached, &media(name))
         .unwrap_or_else(|error| panic!("room for a load: {error:?}"));
     PlaybackEvent::Loaded {
         session_rev,
@@ -60,7 +60,7 @@ fn state_changed(session_rev: u64, state: PlaybackState) -> PlaybackEvent {
 /// playback falls back to zero and `retained` is what protection must recover.
 fn loaded_unavailable(session: &mut Session, media: &MediaId, retained: Duration) -> PlaybackEvent {
     let request = session
-        .register_load(LoadTarget::Legacy, media)
+        .register_load(LoadTarget::Detached, media)
         .unwrap_or_else(|error| panic!("room for a load: {error:?}"));
     PlaybackEvent::Loaded {
         session_rev: 1,
@@ -80,7 +80,7 @@ fn loaded_unavailable(session: &mut Session, media: &MediaId, retained: Duration
 /// `loaded_unavailable`, at the same fixed revision.
 fn loaded_fresh(session: &mut Session, media: &MediaId) -> PlaybackEvent {
     let request = session
-        .register_load(LoadTarget::Legacy, media)
+        .register_load(LoadTarget::Detached, media)
         .unwrap_or_else(|error| panic!("room for a load: {error:?}"));
     PlaybackEvent::Loaded {
         session_rev: 1,
@@ -1394,7 +1394,7 @@ fn a_resumed_estimated_load_sets_up_no_fallback_protection() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
     let request = session
-        .register_load(LoadTarget::Legacy, &media("ep1"))
+        .register_load(LoadTarget::Detached, &media("ep1"))
         .expect("registered");
     let _ = session.observe(
         &PlaybackEvent::Loaded {

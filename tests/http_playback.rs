@@ -303,7 +303,7 @@ fn a_range_less_server_plays_but_cannot_seek_or_resume() {
     let server1 = TestServer::start_on(port, Script::from_fixture("sine-5s.flac"));
     let mut session1 = Session::new(PersistedState::default());
     let request1 = session1
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));

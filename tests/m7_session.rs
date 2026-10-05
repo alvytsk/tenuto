@@ -26,7 +26,7 @@ const LIVE: MediaCapabilities = MediaCapabilities {
 
 fn load(session: &mut Session, rev: u64, id: &MediaId, caps: MediaCapabilities) -> Progress {
     let request = session
-        .register_load(LoadTarget::Legacy, id)
+        .register_load(LoadTarget::Detached, id)
         .unwrap_or_else(|error| panic!("room: {error:?}"));
     let clock = FakeClock::new();
     session.observe(

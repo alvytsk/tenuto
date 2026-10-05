@@ -104,7 +104,7 @@ impl Rig {
         // `Loaded` it produces carries a token `session` recognizes (M5 §6)
         // — `TestEngine::start_at`'s own auto-generated token would not.
         let request = session
-            .register_load(LoadTarget::Legacy, &track_id())
+            .register_load(LoadTarget::Detached, &track_id())
             .unwrap_or_else(|error| panic!("registered: {error:?}"));
         let mut engine = TestEngine::start_idle();
         engine.load_with_resume_as(request, fixture_path(), ResumeIntent::StartAt(start_at));
@@ -473,7 +473,7 @@ fn relaunch_onto_a_refusing_device(dir: &std::path::Path) -> PersistedCheckpoint
     // token, so the `Loaded` it replays below is genuinely adopted, exactly
     // as it would be in production.
     let _ = session
-        .register_load(LoadTarget::Legacy, &track_id())
+        .register_load(LoadTarget::Detached, &track_id())
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
 
     let report = support::failed_device_session(TRACK, 6, Duration::ZERO);
@@ -623,7 +623,7 @@ fn loaded_fresh_for(
     position: Duration,
 ) -> PlaybackEvent {
     let request = session
-        .register_load(LoadTarget::Legacy, media)
+        .register_load(LoadTarget::Detached, media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     PlaybackEvent::Loaded {
         session_rev,

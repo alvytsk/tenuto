@@ -325,7 +325,7 @@ fn no_broken_transfer_can_become_a_completed_track() {
         let url = server.url("/audio.flac");
         let request = rig
             .session
-            .register_load(LoadTarget::Legacy, &media_for(&url))
+            .register_load(LoadTarget::Detached, &media_for(&url))
             .unwrap_or_else(|error| panic!("{name}: registered: {error:?}"));
         rig.engine
             .load_remote_as(request, &url, ResumeIntent::StartAt(Duration::ZERO));
@@ -422,7 +422,7 @@ fn no_broken_transfer_can_become_a_completed_track() {
     let stalled_url = server.url("/audio.flac");
     let stalled_request = rig
         .session
-        .register_load(LoadTarget::Legacy, &media_for(&stalled_url))
+        .register_load(LoadTarget::Detached, &media_for(&stalled_url))
         .unwrap_or_else(|error| panic!("stalled body: registered: {error:?}"));
     rig.engine.load_remote_as(
         stalled_request,

@@ -75,7 +75,7 @@ fn playback_persists_the_podcast_id_not_the_enclosure_url() -> Fallible {
     // carries a token this session recognizes (M5 §6).
     let mut session = Session::new(PersistedState::default());
     let request = session
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .map_err(|error| format!("cannot register the load: {error:?}"))?;
     engine.send(PlaybackCommand::Load {
         request,
