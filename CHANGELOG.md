@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `tenuto play` no longer loses your place in the player: it plays the file
+  or URL on its own and leaves your playlists, their cursors and the playing
+  playlist as they were. Its resume position and the volume are still
+  saved.
+- Pressing Stop twice no longer forgets a seek made while stopped: the
+  position shown and the next arrow press start from the target, and Play
+  resumes there.
 - A live station that keeps dropping right after it connects now waits
   between reconnects and gives up when the reconnect budget runs out, instead
   of reconnecting in a tight loop forever.
@@ -58,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it applies the opening deadline and the probe cap, runs the caller's probe,
   then lifts both. Playback and the station probe no longer repeat those
   steps by hand.
+- `tenuto play` runs on the same player runtime as the TUI, so both share one
+  view of playback, one transport and one way of opening `state.json`. Its
+  keys, status line and exit codes are unchanged.
 
 ## [0.2.0] - 2026-09-23
 

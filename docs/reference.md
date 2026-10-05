@@ -19,6 +19,8 @@ The rules the player and the feed commands follow, stated precisely. The [README
 
 `play` uses these keys: space pauses or resumes, the arrow keys seek, `s` stops, `p` plays, and `q` quits.
 
+`play` plays its file or URL on its own. It never adds a row to a playlist, moves a playlist's cursor or changes which playlist is playing, so the player opens where you left it. It saves its own resume position and the volume, as the player does.
+
 ## Playing over HTTP
 
 - A range-capable server can seek and resume. This includes MP3 files with no seek index, which is most podcasts.

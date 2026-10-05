@@ -176,13 +176,12 @@ fn home_while_a_detached_load_is_pending_restarts_it() {
     let mut rig = rig_with(saved);
     rig.runtime.play_detached(media, location);
     rig.runtime.handle(AppCommand::Restart);
-    pump_until(&mut rig, "playing", playing);
-    pump_for(&mut rig, Duration::from_millis(300));
-    let at = position(&rig.runtime.view());
-    assert!(
-        at < Duration::from_secs(2),
-        "resumed at {at:?} instead of restarting"
-    );
+    // `PlayLoaded` plays from the resumed position first; the queued restart
+    // lands once its reopen completes. Without the fix it never does, and
+    // this times out at the rig's patience.
+    pump_until(&mut rig, "restarted and playing", |view| {
+        playing(view) && position(view) < Duration::from_secs(2)
+    });
     let _ = rig.runtime.shutdown();
     server.shutdown();
 }
