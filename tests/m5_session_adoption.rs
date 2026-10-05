@@ -358,7 +358,9 @@ fn a_detached_adoption_keeps_the_active_entry_and_the_queue() {
         session.state().playlists().playing_playlist().queue().len(),
         2
     );
-    assert_eq!(session.state().current_media(), Some(&media("x")));
+    // The saved current media stays the cursor's: a load clears a cursor
+    // that disagrees with it.
+    assert_eq!(session.state().current_media(), Some(&media("a")));
 }
 
 #[test]
@@ -427,8 +429,8 @@ fn an_adoption_snapshot_contains_the_new_media_active_entry_and_metadata() {
     else {
         panic!("snapshot")
     };
-    assert_eq!(state.current_media(), Some(&media("x")));
-    // M9.3: the cursor stays on b.
+    // M9.3: the cursor stays on b, and the saved current media with it.
+    assert_eq!(state.current_media(), Some(&media("b")));
     assert_eq!(
         state.playlists().playing_playlist().queue().active(),
         Some(ids[1])

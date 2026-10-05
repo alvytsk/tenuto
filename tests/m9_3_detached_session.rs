@@ -153,3 +153,39 @@ fn a_detached_track_that_ends_sets_no_advance() {
     );
     assert!(session.take_advance().is_none());
 }
+
+/// The saved state ties the playing playlist's cursor to `current_media`:
+/// loading clears a cursor whose media is not the current one
+/// (`CursorMediaMismatch`). A detached load therefore leaves the saved
+/// current media to the cursor, and the state reloads with its place kept.
+#[test]
+fn a_detached_load_leaves_the_saved_current_media_to_the_cursor() {
+    use std::sync::Arc;
+    use tenuto::persistence::store::StateStore;
+
+    let clock = FakeClock::new();
+    let (mut session, ids) = with_b_active(&clock);
+    detached(&mut session, &clock, "elsewhere");
+    assert_eq!(session.state().current_media(), Some(&media("b")));
+
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let store = StateStore::new(dir.path().join("state.json"), Arc::new(FakeClock::new()));
+    store
+        .write(session.state())
+        .unwrap_or_else(|error| panic!("write: {error}"));
+    let reloaded = store.load();
+    assert!(
+        reloaded.queue_repair.is_none(),
+        "{:?}",
+        reloaded.queue_repair
+    );
+    assert_eq!(
+        reloaded
+            .state
+            .playlists()
+            .playing_playlist()
+            .queue()
+            .active(),
+        Some(ids[1])
+    );
+}

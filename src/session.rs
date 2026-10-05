@@ -1042,7 +1042,9 @@ impl Session {
             self.state.playlists().playing(),
             self.state.playlists().playing_playlist().queue().active(),
         );
-        let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
+        let detached = target == LoadTarget::Detached;
+        let switched_media =
+            self.on_loaded(media, position, disposition, capabilities, detached, now);
         match target {
             LoadTarget::Queue(id) => {
                 // Validated against its owner a moment ago in `observe`; the
@@ -1235,6 +1237,7 @@ impl Session {
         position: Duration,
         disposition: &StartDisposition,
         capabilities: &MediaCapabilities,
+        detached: bool,
         now: ClockSample,
     ) -> bool {
         let switching = self.current_media.as_ref() != Some(media);
@@ -1276,7 +1279,7 @@ impl Session {
         };
 
         let completed = self.state.completed_for(media);
-        self.adopt_media(media.clone(), completed);
+        self.adopt_media(media.clone(), completed, detached);
         self.last_sample = Some(Sample {
             session_rev: self.session_rev,
             media: media.clone(),
@@ -1366,9 +1369,16 @@ impl Session {
     /// the type system keeps two sibling fields in step, so this method exists
     /// to make sure no edit can move `current_media` without deciding
     /// `completed` in the same breath.
-    fn adopt_media(&mut self, media: MediaId, completed: bool) {
+    ///
+    /// The saved `current_media` is the playing playlist's cursor media: a
+    /// load clears a cursor that disagrees with it (`CursorMediaMismatch`).
+    /// A detached load belongs to no playlist, so it moves only this
+    /// session's current media and leaves the saved one to the cursor (M9.3).
+    fn adopt_media(&mut self, media: MediaId, completed: bool, detached: bool) {
         self.current_media = Some(media.clone());
-        self.state.edit().set_current_media(media);
+        if !detached {
+            self.state.edit().set_current_media(media);
+        }
         self.completed = completed;
     }
 

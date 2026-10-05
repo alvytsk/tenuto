@@ -13,6 +13,7 @@ use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
+use tenuto::queue::{DisplayMetadata, NewQueueEntry, QueueSource};
 use tenuto::session::{CAPTURE_INTERVAL, LoadTarget, Session};
 
 const FINITE: MediaCapabilities = MediaCapabilities {
@@ -24,9 +25,24 @@ const LIVE: MediaCapabilities = MediaCapabilities {
     seek: SeekSupport::Unsupported,
 };
 
+/// Queues `id` in the playing playlist and loads it there, the way the TUI
+/// plays a station: a playlist load, whose media becomes the saved current one.
 fn load(session: &mut Session, rev: u64, id: &MediaId, caps: MediaCapabilities) -> Progress {
+    let MediaId::LocalFile(path) = id else {
+        panic!("these tests load local files: {id:?}");
+    };
+    let entry = NewQueueEntry::new(
+        id.clone(),
+        QueueSource::LocalFile(path.clone()),
+        DisplayMetadata::default(),
+    )
+    .unwrap_or_else(|error| panic!("valid: {error}"));
+    let playing = session.state().playlists().playing();
+    let (ids, _) = session
+        .enqueue(playing, vec![entry])
+        .unwrap_or_else(|error| panic!("room: {error}"));
     let request = session
-        .register_load(LoadTarget::Detached, id)
+        .register_load(LoadTarget::Queue(ids[0]), id)
         .unwrap_or_else(|error| panic!("room: {error:?}"));
     let clock = FakeClock::new();
     session.observe(
