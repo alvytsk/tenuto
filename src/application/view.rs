@@ -94,6 +94,31 @@ pub struct NowPlaying {
     pub load: Option<LoadRequestId>,
 }
 
+impl NowPlaying {
+    /// Nothing loaded and nothing known: every field empty, for a caller to
+    /// fill in what it has.
+    pub fn unloaded() -> Self {
+        Self {
+            entry: None,
+            title: String::new(),
+            artist: None,
+            album: None,
+            year: None,
+            loaded: false,
+            state: PlaybackState::Idle,
+            position: Duration::ZERO,
+            duration: None,
+            estimated_position: false,
+            degraded: false,
+            buffering: false,
+            seek: None,
+            saved: None,
+            session_rev: 0,
+            load: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PersistenceStatus {
     Saving,
