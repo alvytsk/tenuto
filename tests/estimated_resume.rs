@@ -180,7 +180,7 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
     let (store1, clock1) = Rig::store_in(dir.path());
     let mut session1 = Session::new(PersistedState::default());
     let request1 = session1
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
@@ -221,7 +221,7 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
     let (store2, clock2) = Rig::store_in(dir.path());
     let mut session2 = Session::new(reload(dir.path()));
     let request2 = session2
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine2 = TestEngine::start_idle();
     engine2.load_remote_as(
@@ -292,7 +292,7 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
     let (store3, clock3) = Rig::store_in(dir.path());
     let mut session3 = Session::new(reload(dir.path()));
     let request3 = session3
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine3 = TestEngine::start_idle();
     engine3.load_remote_as(
@@ -387,7 +387,7 @@ fn a_relaunch_resumes_an_estimate_only_entry_and_reports_no_established_fallback
     let (store1, clock1) = Rig::store_in(dir.path());
     let mut session1 = Session::new(PersistedState::default());
     let request1 = session1
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
@@ -448,7 +448,7 @@ fn a_relaunch_resumes_an_estimate_only_entry_and_reports_no_established_fallback
     let (store2, clock2) = Rig::store_in(dir.path());
     let mut session2 = Session::new(reload(dir.path()));
     let request2 = session2
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine2 = TestEngine::start_idle();
     engine2.load_remote_as(
@@ -536,7 +536,7 @@ fn a_relaunch_refused_past_an_estimated_ceiling_leaves_the_stored_checkpoint_unt
     let (store2, clock2) = Rig::store_in(dir.path());
     let mut session = Session::new(reload(dir.path()));
     let request = session
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine = TestEngine::start_idle();
     let service = match HttpService::spawn(Limits::brisk()) {

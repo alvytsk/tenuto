@@ -333,17 +333,18 @@ fn the_last_entry_ends_the_queue_without_wrapping() {
 }
 
 #[test]
-fn a_legacy_adoption_clears_the_active_entry_and_keeps_the_queue() {
+fn a_detached_adoption_keeps_the_active_entry_and_the_queue() {
     let clock = FakeClock::new();
     let (mut session, ids) = queued(&["a", "b"]);
     let request = session
         .register_load(LoadTarget::Queue(ids[0]), &media("a"))
         .expect("registered");
     session.observe(&loaded(request, 1, "a"), clock.sample());
-    let legacy = session
-        .register_load(LoadTarget::Legacy, &media("x"))
+    let detached = session
+        .register_load(LoadTarget::Detached, &media("x"))
         .expect("registered");
-    session.observe(&loaded(legacy, 2, "x"), clock.sample());
+    session.observe(&loaded(detached, 2, "x"), clock.sample());
+    // M9.3: a detached load (`tenuto play`) leaves the cursor where it was.
     assert_eq!(
         session
             .state()
@@ -351,13 +352,15 @@ fn a_legacy_adoption_clears_the_active_entry_and_keeps_the_queue() {
             .playing_playlist()
             .queue()
             .active(),
-        None
+        Some(ids[0])
     );
     assert_eq!(
         session.state().playlists().playing_playlist().queue().len(),
         2
     );
-    assert_eq!(session.state().current_media(), Some(&media("x")));
+    // The saved current media stays the cursor's: a load clears a cursor
+    // that disagrees with it.
+    assert_eq!(session.state().current_media(), Some(&media("a")));
 }
 
 #[test]
@@ -419,15 +422,19 @@ fn an_adoption_snapshot_contains_the_new_media_active_entry_and_metadata() {
             .and_then(|e| e.display().title.as_deref()),
         Some("B title")
     );
-    let legacy = session
-        .register_load(LoadTarget::Legacy, &media("x"))
+    let detached = session
+        .register_load(LoadTarget::Detached, &media("x"))
         .expect("register");
-    let Action::Submit { state, .. } = session.observe(&loaded(legacy, 3, "x"), clock.sample())
+    let Action::Submit { state, .. } = session.observe(&loaded(detached, 3, "x"), clock.sample())
     else {
         panic!("snapshot")
     };
-    assert_eq!(state.current_media(), Some(&media("x")));
-    assert_eq!(state.playlists().playing_playlist().queue().active(), None);
+    // M9.3: the cursor stays on b, and the saved current media with it.
+    assert_eq!(state.current_media(), Some(&media("b")));
+    assert_eq!(
+        state.playlists().playing_playlist().queue().active(),
+        Some(ids[1])
+    );
 }
 
 #[test]

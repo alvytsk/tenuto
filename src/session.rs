@@ -75,13 +75,14 @@ pub enum Action {
     },
 }
 
-/// What a `Load` this session sent is for: a queue occurrence, or the
-/// caller's own load with nothing queued behind it (the pre-M5 shape every
-/// existing call site still uses).
+/// What a `Load` this session sent is for: a playlist occurrence, or media
+/// played on its own (`tenuto play`) that belongs to no playlist. A detached
+/// load adopts and checkpoints its media like any other, but never moves a
+/// cursor, never changes which playlist is playing, and never advances.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadTarget {
     Queue(QueueEntryId),
-    Legacy,
+    Detached,
 }
 
 /// Why `register_load` refused a token.
@@ -361,7 +362,7 @@ impl Session {
     }
 
     /// Drops a registration this session's caller never sent, or no longer
-    /// needs — a `Load` the command queue refused, or a superseded legacy
+    /// needs — a `Load` the command queue refused, or a superseded detached
     /// load. A no-op if `request` has already resolved or was never
     /// registered.
     pub fn retract_load(&mut self, request: LoadRequestId) {
@@ -408,7 +409,7 @@ impl Session {
                 .find_entry(id)
                 .is_some_and(|entry| entry.media() == media)
                 .then_some(pending.target),
-            LoadTarget::Legacy => Some(pending.target),
+            LoadTarget::Detached => Some(pending.target),
         }
     }
 
@@ -607,8 +608,8 @@ impl Session {
     /// Marks every pending load whose target satisfies `matches` as
     /// invalidated, so a `Loaded` that later arrives for it is never adopted
     /// (M5 §6). Shared by `remove_entry` (one queue id) and `vacate` (the
-    /// targeted playlist's entries) — `LoadTarget::Legacy` never matches
-    /// either caller's predicate, so a legacy load is never invalidated by a
+    /// targeted playlist's entries) — `LoadTarget::Detached` never matches
+    /// either caller's predicate, so a detached load is never invalidated by a
     /// queue mutation.
     fn invalidate_pending(&mut self, matches: impl Fn(LoadTarget) -> bool) {
         for pending in self.pending.values_mut() {
@@ -1041,7 +1042,9 @@ impl Session {
             self.state.playlists().playing(),
             self.state.playlists().playing_playlist().queue().active(),
         );
-        let switched_media = self.on_loaded(media, position, disposition, capabilities, now);
+        let detached = target == LoadTarget::Detached;
+        let switched_media =
+            self.on_loaded(media, position, disposition, capabilities, detached, now);
         match target {
             LoadTarget::Queue(id) => {
                 // Validated against its owner a moment ago in `observe`; the
@@ -1049,9 +1052,9 @@ impl Session {
                 let _ = self.state.edit().adopt(id);
                 self.absorb_load_metadata(id, metadata);
             }
-            // A legacy load belongs to no playlist: it clears the playing
-            // playlist's cursor, as it cleared the one queue's before M8.
-            LoadTarget::Legacy => self.state.edit().clear_playing_cursor(),
+            // A detached load belongs to no playlist, so it leaves every
+            // cursor and the playing playlist where they were (M9.3).
+            LoadTarget::Detached => {}
         }
         self.adopted = Some(AdoptedLoad { request, target });
         self.adopted_rev_floor = self.session_rev;
@@ -1234,6 +1237,7 @@ impl Session {
         position: Duration,
         disposition: &StartDisposition,
         capabilities: &MediaCapabilities,
+        detached: bool,
         now: ClockSample,
     ) -> bool {
         let switching = self.current_media.as_ref() != Some(media);
@@ -1275,7 +1279,7 @@ impl Session {
         };
 
         let completed = self.state.completed_for(media);
-        self.adopt_media(media.clone(), completed);
+        self.adopt_media(media.clone(), completed, detached);
         self.last_sample = Some(Sample {
             session_rev: self.session_rev,
             media: media.clone(),
@@ -1365,9 +1369,19 @@ impl Session {
     /// the type system keeps two sibling fields in step, so this method exists
     /// to make sure no edit can move `current_media` without deciding
     /// `completed` in the same breath.
-    fn adopt_media(&mut self, media: MediaId, completed: bool) {
+    ///
+    /// While the playing playlist has a cursor, the saved `current_media`
+    /// is that cursor's media: a load clears a cursor that disagrees with it
+    /// (`CursorMediaMismatch`). A detached load belongs to no playlist, so
+    /// with a cursor standing it moves only this session's current media and
+    /// leaves the saved one to the cursor (M9.3); with none, it is saved as
+    /// any load's is.
+    fn adopt_media(&mut self, media: MediaId, completed: bool, detached: bool) {
         self.current_media = Some(media.clone());
-        self.state.edit().set_current_media(media);
+        let cursor = self.state.playlists().playing_playlist().queue().active();
+        if !detached || cursor.is_none() {
+            self.state.edit().set_current_media(media);
+        }
         self.completed = completed;
     }
 

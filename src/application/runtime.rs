@@ -21,7 +21,7 @@ use crate::application::podcast::{
 use crate::application::seek::KeyRouter;
 use crate::application::source::{is_url_spelling, resolve_path, resolve_source};
 use crate::application::transport::{
-    PlaybackPhase, TransportDecision, TransportInput, TransportSituation, decide,
+    PlaybackPhase, TransportDecision, TransportInput, TransportSituation, decide, decide_detached,
 };
 use crate::application::view::{
     NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, playlist_tabs,
@@ -38,6 +38,7 @@ use crate::http::service::HttpService;
 use crate::library::EpisodeCandidate;
 use crate::lifecycle::hooks::TestHook;
 use crate::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
+use crate::media::display::{display_name, episode_name};
 use crate::media::id::MediaId;
 use crate::media::source::SourceLocation;
 use crate::media::tags::CoverBytes;
@@ -248,6 +249,8 @@ struct Mirror {
     media: MediaId,
     /// The loaded container's own front cover, if it carried one.
     front_cover: Option<Arc<CoverBytes>>,
+    /// The decoder's title; a detached podcast episode is named by it.
+    title: Option<String>,
     duration: Option<Duration>,
     duration_provenance: PositionProvenance,
     capabilities: MediaCapabilities,
@@ -277,6 +280,7 @@ impl Mirror {
             session_rev: *session_rev,
             media: media.clone(),
             front_cover: metadata.front_cover.clone(),
+            title: metadata.title.clone(),
             duration: metadata.duration,
             duration_provenance: metadata.duration_provenance,
             capabilities: *capabilities,
@@ -357,6 +361,10 @@ pub struct PlayerRuntime {
     selection_hint: Option<QueueEntryId>,
     /// The entry the latest load attempt was for; Space/p retry it.
     last_requested: Option<QueueEntryId>,
+    /// The media of the latest detached load (`tenuto play`, M9.3), while it
+    /// is what this runtime plays: transport keys then bypass the playlist
+    /// table and `NowPlaying` describes it rather than the active entry.
+    detached: Option<MediaId>,
     /// The token the latest attempt was admitted under. Cleared when an
     /// attempt starts, so an outcome of any earlier attempt — or a failure
     /// before admission, which has no token — cannot be mistaken for it.
@@ -409,6 +417,7 @@ impl PlayerRuntime {
             status: None,
             selection_hint: None,
             last_requested: None,
+            detached: None,
             last_attempt: None,
             load_failed: false,
             metadata: parts
@@ -458,12 +467,22 @@ impl PlayerRuntime {
         self.status = Some(message.into());
     }
 
+    /// The playing playlist's active entry, as what this runtime plays —
+    /// `None` while a detached load plays instead (M9.3), since the row the
+    /// cursor rests on is then not what is heard.
+    fn active_entry(&self) -> Option<&QueueEntry> {
+        if self.detached.is_some() {
+            return None;
+        }
+        let queue = self.session.state().playlists().playing_playlist().queue();
+        queue.get(queue.active()?)
+    }
+
     /// The directory holding the active queue entry, when that entry is a
     /// local file; `None` for a remote or podcast entry or no active entry.
     /// Read from the queue alone — nothing touches the filesystem.
     pub fn active_local_dir(&self) -> Option<PathBuf> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         match entry.source() {
             QueueSource::LocalFile(path) => path.as_path().parent().map(Path::to_path_buf),
             QueueSource::RemoteUrl(_) | QueueSource::Podcast { .. } => None,
@@ -482,8 +501,7 @@ impl PlayerRuntime {
     // on the cover source as well as the media, so the new art does show on
     // that next load (M7.1 §8.1), not merely "eventually".
     pub fn cover_key(&self) -> Option<CoverKey> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         Some(CoverKey {
             media: entry.media().clone(),
             load: self.mirror.as_ref().map(|mirror| mirror.load),
@@ -506,8 +524,7 @@ impl PlayerRuntime {
     /// are read straight from the store, which is authoritative for them.
     /// Both refresh on add or re-probe/feed refresh, never mid-playback.
     pub fn active_cover(&self) -> Option<(MediaId, CoverSource)> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         let embedded = || {
             let mirror = self
                 .mirror
@@ -550,8 +567,7 @@ impl PlayerRuntime {
     /// artwork of its own. `None` when nothing is active, which is the one
     /// case that still draws the plain placeholder.
     pub fn active_cover_kind(&self) -> Option<CoverKind> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         let station = self
             .library
             .as_ref()
@@ -575,9 +591,18 @@ impl PlayerRuntime {
             AppCommand::Previous => self.transport(TransportInput::Previous, None),
             AppCommand::Next => self.transport(TransportInput::Next, None),
             AppCommand::Stop => {
-                self.router.cancel();
                 if let Some(engine) = &self.engine {
-                    engine.submit(PlaybackCommand::Stop);
+                    // Through the router, not `cancel`: the worker keeps a
+                    // stored seek target across a stop, so the display and
+                    // the next arrow must too. Position and duration are read
+                    // only for `SeekBy`.
+                    let _ = self.router.route(
+                        engine,
+                        Duration::ZERO,
+                        None,
+                        self.clock.sample().monotonic,
+                        PlaybackCommand::Stop,
+                    );
                 }
             }
             AppCommand::AdjustVolume(delta) => self.adjust_volume(delta),
@@ -686,9 +711,12 @@ impl PlayerRuntime {
             tabs: playlist_tabs(state),
             viewed: self.viewed,
             active,
-            now_playing: active
-                .and_then(|id| queue.get(id))
-                .map(|entry| self.now_playing(entry, state)),
+            now_playing: match &self.detached {
+                Some(media) => Some(self.detached_now_playing(media)),
+                None => active
+                    .and_then(|id| queue.get(id))
+                    .map(|entry| self.now_playing(entry, state)),
+            },
             phase: self.phase(),
             volume: self.volume,
             status: self.status.as_deref().map(displayable),
@@ -805,13 +833,24 @@ impl PlayerRuntime {
     /// gate on flushing a burst, so one never lands in a loading track.
     fn seeking_allowed(&self) -> bool {
         matches!(
-            self.decide(TransportInput::SeekBy(0), None),
+            self.decision(TransportInput::SeekBy(0), None),
             TransportDecision::SeekBy(_)
         )
     }
 
+    /// The transport table in force: the detached one while a detached load
+    /// is what this runtime plays, otherwise the playlist one. The flush gate
+    /// above reads the same table, so a detached burst is never left open.
+    fn decision(&self, input: TransportInput, selected: Option<QueueEntryId>) -> TransportDecision {
+        if self.detached.is_some() {
+            decide_detached(input, self.phase(), self.indefinite())
+        } else {
+            self.decide(input, selected)
+        }
+    }
+
     fn transport(&mut self, input: TransportInput, selected: Option<QueueEntryId>) {
-        match self.decide(input, selected) {
+        match self.decision(input, selected) {
             TransportDecision::Load(id) => self.load_entry(id),
             TransportDecision::TogglePause => self.route(PlaybackCommand::TogglePause),
             TransportDecision::Play => self.route(PlaybackCommand::Play),
@@ -825,14 +864,21 @@ impl PlayerRuntime {
 
     fn route(&mut self, command: PlaybackCommand) {
         let now = self.clock.sample().monotonic;
-        let (Some(engine), Some(mirror)) = (&self.engine, &mut self.mirror) else {
+        let Some(engine) = &self.engine else {
             return;
         };
-        let optimistic = self
-            .router
-            .route(engine, mirror.position, mirror.duration, now, command);
+        let (position, duration) = match (&self.mirror, self.detached.is_some()) {
+            (Some(mirror), _) => (mirror.position, mirror.duration),
+            // Before `Loaded`, a detached key still queues behind the load,
+            // as `tenuto play`'s always did.
+            (None, true) => (Duration::ZERO, None),
+            (None, false) => return,
+        };
+        let optimistic = self.router.route(engine, position, duration, now, command);
         // A prediction until the seek lands, so it reaches only the display.
-        if let Some(position) = optimistic {
+        if let Some(position) = optimistic
+            && let Some(mirror) = &mut self.mirror
+        {
             mirror.position = position;
             mirror.provenance = PositionProvenance::Estimated;
         }
@@ -873,6 +919,7 @@ impl PlayerRuntime {
             return;
         };
         let (media, source) = (entry.media().clone(), entry.source().clone());
+        self.detached = None;
         self.last_requested = Some(id);
         self.last_attempt = None;
         // A new attempt supersedes whatever the previous one reported.
@@ -900,7 +947,49 @@ impl PlayerRuntime {
                 return;
             }
         };
+        self.submit_load(request, media, location, start);
+    }
 
+    /// Plays `media` from `location` on its own, belonging to no playlist
+    /// (`tenuto play`, M9.3). Its checkpoint and the volume are saved as for
+    /// any load; no cursor, no playing playlist and no row changes.
+    pub fn play_detached(&mut self, media: MediaId, location: SourceLocation) {
+        self.last_requested = None;
+        self.last_attempt = None;
+        self.status = None;
+        self.detached = Some(media.clone());
+        match self.session.register_load(LoadTarget::Detached, &media) {
+            Ok(request) => self.submit_load(request, media, location, |engine, request| {
+                engine.submit(PlaybackCommand::PlayLoaded { request })
+            }),
+            // A refusal is a failed load: nothing went in, so nothing else
+            // will ever end it.
+            Err(RegisterLoadError::Busy) => {
+                self.fail_before_admission(TOO_MANY_PENDING_LOADS.to_owned());
+            }
+            // A detached target names no entry, so neither can happen.
+            Err(error @ (RegisterLoadError::UnknownEntry | RegisterLoadError::MediaMismatch)) => {
+                self.fail_before_admission(format!("cannot play: {error:?}"));
+            }
+        }
+    }
+
+    /// How long a front end may block on input before the open seek burst
+    /// comes due, capped at `cap`.
+    pub fn poll_budget(&self, cap: Duration) -> Duration {
+        self.router.poll_budget(self.clock.sample().monotonic, cap)
+    }
+
+    /// Admits a registered load: engine, HTTP when remote, resume intent,
+    /// `Load`, then the token-scoped start. Shared by playlist and detached
+    /// loads.
+    fn submit_load(
+        &mut self,
+        request: LoadRequestId,
+        media: MediaId,
+        location: SourceLocation,
+        start: impl FnOnce(&EngineHandle, LoadRequestId) -> Admission,
+    ) {
         self.ensure_engine();
         if matches!(location, SourceLocation::Http(_))
             && let Err(error) = self.ensure_http()
@@ -1425,24 +1514,42 @@ impl PlayerRuntime {
 
     fn now_playing(&self, entry: &QueueEntry, state: &PersistedState) -> NowPlaying {
         let display = entry.display();
-        let unloaded = NowPlaying {
+        self.mirrored(NowPlaying {
             entry: Some(entry.id()),
             title: entry_plain_title(entry),
             artist: display.artist.as_deref().map(displayable),
             album: display.album.as_deref().map(displayable),
             year: display.year.as_deref().map(displayable),
-            loaded: false,
-            state: PlaybackState::Idle,
-            position: Duration::ZERO,
             duration: display.duration,
-            estimated_position: false,
-            degraded: false,
-            buffering: false,
-            seek: None,
             saved: saved_history(state.entry_for(entry.media())),
-            session_rev: 0,
-            load: None,
+            ..NowPlaying::unloaded()
+        })
+    }
+
+    /// What a detached load (`tenuto play`) shows: its own media, named the
+    /// way `play` always named it, never the active entry's.
+    fn detached_now_playing(&self, media: &MediaId) -> NowPlaying {
+        let mirror = self.mirror.as_ref().filter(|mirror| &mirror.media == media);
+        let title = match media {
+            MediaId::PodcastEpisode { .. } => {
+                episode_name(mirror.and_then(|mirror| mirror.title.as_deref()))
+            }
+            other => display_name(other),
         };
+        let unloaded = NowPlaying {
+            title: displayable(&title),
+            saved: saved_history(self.session.state().entry_for(media)),
+            ..NowPlaying::unloaded()
+        };
+        if mirror.is_some() {
+            self.mirrored(unloaded)
+        } else {
+            unloaded
+        }
+    }
+
+    /// `unloaded` overlaid with the adopted playback, when there is one.
+    fn mirrored(&self, unloaded: NowPlaying) -> NowPlaying {
         let Some(mirror) = &self.mirror else {
             return unloaded;
         };
@@ -1461,7 +1568,7 @@ impl PlayerRuntime {
                         value,
                         source: DurationSource::Decoded(mirror.duration_provenance),
                     })
-                    .or(display.duration)
+                    .or(unloaded.duration)
             },
             estimated_position: mirror.provenance == PositionProvenance::Estimated,
             degraded: mirror.quality == PositionQuality::Degraded,
@@ -1522,7 +1629,9 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use crate::media::id::AbsolutePath;
+    use crate::media::metadata::MediaMetadata;
     use crate::persistence::writer::StateSink;
+    use crate::playback::event::StartDisposition;
     use crate::playback::output::null_output::NullOutput;
     use std::time::Instant;
 
@@ -1667,5 +1776,123 @@ mod tests {
 
         let now = runtime().now_playing(&entry, &PersistedState::default());
         assert_eq!(now.title, "So What");
+    }
+
+    // ------------------------------------------------- the display mirror
+    //
+    // Moved from `app.rs` with M9.3: `tenuto play` now draws from this
+    // mirror, so its rules are pinned here.
+
+    fn mirror_after(position: Duration) -> Mirror {
+        let event = PlaybackEvent::Loaded {
+            session_rev: 3,
+            request: LoadRequestId::from_raw(1),
+            media: MediaId::LocalFile(AbsolutePath::new(PathBuf::from(FIVE)).expect("absolute")),
+            metadata: MediaMetadata {
+                duration: Some(Duration::from_secs(300)),
+                ..MediaMetadata::default()
+            },
+            capabilities: MediaCapabilities {
+                continuity: Continuity::Finite,
+                seek: SeekSupport::Native,
+            },
+            position,
+            disposition: StartDisposition::Resumed,
+        };
+        Mirror::loaded(&event).expect("a Loaded event")
+    }
+
+    fn progress_at(position: Duration) -> Progress {
+        Progress {
+            session_rev: 0,
+            media: None,
+            position,
+            quality: PositionQuality::Exact,
+            provenance: PositionProvenance::Established,
+            buffering: false,
+            load: None,
+        }
+    }
+
+    /// The listener sees the restored position the moment the track opens,
+    /// not after the first progress tick: `Loaded` is the only event that
+    /// carries it.
+    #[test]
+    fn a_resumed_position_is_shown_as_soon_as_the_track_opens() {
+        let mirror = mirror_after(Duration::from_secs(93));
+        assert_eq!(mirror.position, Duration::from_secs(93));
+        assert_eq!(mirror.quality, PositionQuality::Exact);
+        assert!(
+            !mirror.buffering,
+            "a fresh load starts with nothing buffering"
+        );
+    }
+
+    #[test]
+    fn capabilities_changed_updates_the_mirror_without_disturbing_position() {
+        let mut mirror = mirror_after(Duration::from_secs(42));
+        mirror.apply(&PlaybackEvent::CapabilitiesChanged {
+            session_rev: 7,
+            capabilities: MediaCapabilities {
+                continuity: Continuity::Finite,
+                seek: SeekSupport::Unsupported,
+            },
+        });
+        assert_eq!(mirror.session_rev, 7);
+        assert_eq!(mirror.capabilities.seek, SeekSupport::Unsupported);
+        assert_eq!(
+            mirror.position,
+            Duration::from_secs(42),
+            "unrelated to capability evidence"
+        );
+    }
+
+    #[test]
+    fn progress_arriving_during_a_burst_does_not_yank_the_display_back() {
+        // The worker has not been asked to move yet, so its progress reports
+        // where playback still is. Copying that over the optimistic target
+        // would undo the jump on the very next tick.
+        let mut mirror = mirror_after(Duration::from_secs(60));
+        mirror.provenance = PositionProvenance::Estimated;
+        mirror.apply_progress(&progress_at(Duration::from_secs(100)), true);
+        assert_eq!(mirror.position, Duration::from_secs(60));
+        assert_eq!(mirror.provenance, PositionProvenance::Estimated);
+    }
+
+    #[test]
+    fn buffering_still_reaches_the_display_during_a_burst() {
+        let mut mirror = mirror_after(Duration::ZERO);
+        let progress = Progress {
+            buffering: true,
+            ..progress_at(Duration::from_secs(100))
+        };
+        mirror.apply_progress(&progress, true);
+        assert!(mirror.buffering);
+    }
+
+    #[test]
+    fn the_landing_corrects_the_display_once_the_burst_closes() {
+        let mut mirror = mirror_after(Duration::from_secs(60));
+        mirror.provenance = PositionProvenance::Estimated;
+        mirror.apply_progress(&progress_at(Duration::from_secs(58)), false);
+        assert_eq!(mirror.position, Duration::from_secs(58));
+        assert_eq!(mirror.provenance, PositionProvenance::Established);
+    }
+
+    /// A detached play the session refuses is a failed load, so `play`
+    /// reports it and ends rather than waiting on a load that never went in.
+    #[test]
+    fn a_refused_detached_play_is_a_failed_load() {
+        let mut runtime = runtime();
+        let media = MediaId::LocalFile(AbsolutePath::new(PathBuf::from(FIVE)).expect("absolute"));
+        for _ in 0..crate::session::MAX_PENDING_LOADS {
+            runtime
+                .session
+                .register_load(LoadTarget::Detached, &media)
+                .expect("room");
+        }
+        runtime.play_detached(media, SourceLocation::LocalPath(PathBuf::from(FIVE)));
+        assert!(runtime.load_failed);
+        assert_eq!(runtime.status.as_deref(), Some(TOO_MANY_PENDING_LOADS));
     }
 }

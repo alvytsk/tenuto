@@ -45,6 +45,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 - Defect: `app.rs`'s `SeekCompleted`, `EndOfTrack` and `RestartEstablished` arms ignore provenance.
 - Defect: `tenuto play` loads through `LoadTarget::Legacy`, which clears the playing playlist's cursor (`session.rs:1144`).
 - Direction: one mirror module and one "open profile state" function in `application`, used by both front ends.
+- Status: shipped through M9.3 (`docs/m9.3-acceptance.md`). With `play` over the runtime there is one mirror (`application/runtime.rs`) and one opener (`application::profile::open_state`). `LoadTarget::Legacy` became `Detached`: it keeps the playing playlist's cursor, and while a cursor stands it leaves the saved `current_media` to it, which the codec's `CursorMediaMismatch` rule requires. The provenance defect went with `app.rs`'s mirror.
 
 **Enricher owns tag policy.**
 - Problem: `MetadataWorkers` is shallow, and the runtime holds the policy: `request_enrichment` :1298, `apply_enrichment` :1328, the re-offer in `vacate` :1245. The #29 fix had to keep `RESULT_CAPACITY` in step with `MAX_ENRICHMENT_PER_PUMP` across two files. Tests reach this only through the wall-clock runtime rig.
@@ -70,6 +71,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 
 **`play` over `PlayerRuntime`.** Worth exploring after the M9.2 mirror work.
 - Direction: `tenuto play` becomes a one-entry front end over the runtime, and `LoadTarget::Legacy` retires.
+- Status: shipped. `PlayerRuntime::play_detached` plays media outside every playlist; while detached, transport keys and the seek flush gate use `decide_detached`, keys reach the engine before `Loaded`, and `NowPlaying` describes the detached media. `play` drives `handle`/`pump`/`view`/`shutdown` with its keys, status row and exit codes unchanged. Stop now keeps a stored seek target in both front ends.
 
 ## 6. M9.4 — Playback engine
 

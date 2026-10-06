@@ -304,10 +304,6 @@ impl PersistedState {
         self.playlists.adopt(entry)
     }
 
-    pub(crate) fn clear_playing_cursor(&mut self) {
-        self.playlists.clear_playing_cursor();
-    }
-
     pub(crate) fn update_display(
         &mut self,
         entry: QueueEntryId,

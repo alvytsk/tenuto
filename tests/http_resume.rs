@@ -162,7 +162,7 @@ fn a_second_session_resumes_from_the_flushed_checkpoint() {
     let server1 = TestServer::start_on(port, Script::from_fixture("sine-5s.flac"));
     let mut session1 = Session::new(PersistedState::default());
     let request1 = session1
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
@@ -198,7 +198,7 @@ fn a_second_session_resumes_from_the_flushed_checkpoint() {
     let (store2, clock2) = RemoteRig::store_in(dir.path());
     let mut session2 = Session::new(reload(dir.path()));
     let request2 = session2
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine2 = TestEngine::start_idle();
     engine2.load_remote_as(
@@ -299,7 +299,7 @@ fn the_protection_survives_a_process_boundary() {
     let server1 = TestServer::start_on(port, Script::from_fixture("sine-5s.flac"));
     let mut session1 = Session::new(PersistedState::default());
     let request1 = session1
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine1 = TestEngine::start_idle();
     engine1.load_remote_as(request1, &url, ResumeIntent::StartAt(Duration::ZERO));
@@ -331,7 +331,7 @@ fn the_protection_survives_a_process_boundary() {
     let (store2, clock2) = RemoteRig::store_in(dir.path());
     let mut session2 = Session::new(reload(dir.path()));
     let request2 = session2
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine2 = TestEngine::start_idle();
     engine2.load_remote_as(
@@ -387,7 +387,7 @@ fn the_protection_survives_a_process_boundary() {
     let (store3, clock3) = RemoteRig::store_in(dir.path());
     let mut session3 = Session::new(reload(dir.path()));
     let request3 = session3
-        .register_load(LoadTarget::Legacy, &media)
+        .register_load(LoadTarget::Detached, &media)
         .unwrap_or_else(|error| panic!("registered: {error:?}"));
     let mut engine3 = TestEngine::start_idle();
     engine3.load_remote_as(

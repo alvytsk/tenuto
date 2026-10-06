@@ -443,23 +443,6 @@ fn a_failed_adoption_changes_neither_playing_nor_any_cursor() {
     assert_eq!(set, before);
 }
 
-#[test]
-fn clearing_the_playing_cursor_leaves_other_cursors_alone() {
-    let mut set = PlaylistSet::default();
-    let a = set.playing();
-    let b = create(&mut set, "B");
-    let in_a = add(&mut set, a, vec![entry("a1")]);
-    let in_b = add(&mut set, b, vec![entry("b1")]);
-    set.adopt(in_b[0])
-        .unwrap_or_else(|error| panic!("queued: {error}"));
-    set.adopt(in_a[0])
-        .unwrap_or_else(|error| panic!("queued: {error}"));
-    set.clear_playing_cursor();
-    assert_eq!(cursor(&set, a), None);
-    assert_eq!(cursor(&set, b), Some(in_b[0]));
-    assert_eq!(set.playing(), a);
-}
-
 // ---- shuffle and playback order (S6) ----
 
 #[test]

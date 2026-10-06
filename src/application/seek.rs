@@ -11,15 +11,15 @@ use crate::playback::event::PlaybackEvent;
 
 /// Sends one decoded key command through `EngineHandle::submit`, which
 /// applies each command's out-of-band rule itself (M9.4). `Shutdown` never
-/// reaches here: `handle_keys` decides to end the loop itself and has nothing
-/// left to route.
+/// reaches here: a front end ends its own loop on a quit and has nothing left
+/// to route.
 ///
 /// `SeekBy` is the one command this does not handle: an arrow press
 /// accumulates into a [`SeekBurst`] rather than reaching the engine on its
 /// own, so it is routed by [`KeyRouter::route`] before it ever gets here.
 fn route_command(engine: &EngineHandle, command: PlaybackCommand) {
     match command {
-        // Loop control, decided by `handle_keys` itself before this is ever
+        // Loop control, decided by the front end itself before this is ever
         // called - nothing to route.
         PlaybackCommand::Shutdown => {}
         // Never reaches here - `KeyRouter::route` intercepts it into the
@@ -41,7 +41,7 @@ fn route_command(engine: &EngineHandle, command: PlaybackCommand) {
 /// `pub`, alongside the rest of this crate's engine-facing surface
 /// (`EngineHandle`, `PlaybackCommand`), so a test can drive the exact routing
 /// a keypress takes with no tty and no crossterm event in the loop at all —
-/// `handle_keys` itself cannot be driven headlessly, since
+/// a front end's key loop cannot be driven headlessly, since
 /// `crossterm::event::read()` needs a real terminal. This is the only entry
 /// point production uses, so a test driving it cannot be exercising a path
 /// the application has stopped taking.

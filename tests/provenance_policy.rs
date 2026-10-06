@@ -34,7 +34,7 @@ fn loaded(
     position: Duration,
 ) -> PlaybackEvent {
     let request = session
-        .register_load(LoadTarget::Legacy, &media(name))
+        .register_load(LoadTarget::Detached, &media(name))
         .unwrap_or_else(|error| panic!("room for a load: {error:?}"));
     PlaybackEvent::Loaded {
         session_rev,
