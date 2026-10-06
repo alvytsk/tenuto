@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or URL on its own and leaves your playlists, their cursors and the playing
   playlist as they were. Its resume position and the volume are still
   saved.
+- In `tenuto play`, an arrow key pressed while the track is still loading no
+  longer jumps to a spot counted from the start; it waits for the load, as
+  the player's does.
 - Pressing Stop twice no longer forgets a seek made while stopped: the
   position shown and the next arrow press start from the target, and Play
   resumes there.

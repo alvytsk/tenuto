@@ -190,6 +190,18 @@ fn run_resolved_locked(
         hook: TestHook::None,
     });
     runtime.play_detached(media, location);
+    // A load that failed before it reached the engine (the HTTP service
+    // would not start, say) is reported now, before the terminal goes raw and
+    // before `Loading` is printed.
+    let view = runtime.view();
+    if let Some(failed) = outcome(
+        view.phase,
+        view.now_playing.as_ref(),
+        view.status.as_deref(),
+    ) {
+        report_flush(runtime.shutdown());
+        return failed;
+    }
 
     // Entered only now (R5, Ruling 1): every fallible step above can still
     // fail before a single key is read, which is what keeps a rejected
@@ -378,10 +390,10 @@ fn report_flush(report: FlushReport) {
     }
 }
 
-/// Installs raw mode and restores it on drop. `finish` drops it explicitly, so
-/// the writer's shutdown bound is never spent with the terminal still raw; the
-/// `Drop` covers a panic, which is the only way out of either loop that does
-/// not reach that line. It owns the thread that reads keys while the terminal
+/// Installs raw mode and restores it on drop. The play loop drops it
+/// explicitly, so the writer's shutdown bound is never spent with the terminal
+/// still raw; the `Drop` covers a panic, which is the only way out of the loop
+/// that does not reach that line. It owns the thread that reads keys while the terminal
 /// is raw.
 struct RawModeGuard {
     input: InputReader,
@@ -395,7 +407,7 @@ impl RawModeGuard {
     /// for want of a tty, which is the CI case this type exists to keep out
     /// of raw-mode restoration's way (Ruling 1). Such a session reads no
     /// keys; `Loading` and any failure still print, and nothing here is left
-    /// toggled for `finish` to restore. A key reader thread that cannot be
+    /// toggled for the loop to restore. A key reader thread that cannot be
     /// started leaves the terminal as it was and the session the same way.
     fn enable() -> Option<Self> {
         if let Err(error) = crossterm::terminal::enable_raw_mode() {

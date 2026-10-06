@@ -67,7 +67,7 @@ fn log_load(store: &StateStore, loaded: &LoadOutcome) {
     }
     // §6: a repaired queue logs here too, distinct from the warning
     // `StateStore::load` already emits — that one is unconditional, this
-    // one is what the TUI's status line (Task 17) will surface.
+    // one is what the TUI's status line surfaces.
     if let Some(repair) = &loaded.queue_repair {
         match &repair.backup {
             QueueBackup::Saved(path) => {

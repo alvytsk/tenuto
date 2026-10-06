@@ -467,12 +467,22 @@ impl PlayerRuntime {
         self.status = Some(message.into());
     }
 
+    /// The playing playlist's active entry, as what this runtime plays —
+    /// `None` while a detached load plays instead (M9.3), since the row the
+    /// cursor rests on is then not what is heard.
+    fn active_entry(&self) -> Option<&QueueEntry> {
+        if self.detached.is_some() {
+            return None;
+        }
+        let queue = self.session.state().playlists().playing_playlist().queue();
+        queue.get(queue.active()?)
+    }
+
     /// The directory holding the active queue entry, when that entry is a
     /// local file; `None` for a remote or podcast entry or no active entry.
     /// Read from the queue alone — nothing touches the filesystem.
     pub fn active_local_dir(&self) -> Option<PathBuf> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         match entry.source() {
             QueueSource::LocalFile(path) => path.as_path().parent().map(Path::to_path_buf),
             QueueSource::RemoteUrl(_) | QueueSource::Podcast { .. } => None,
@@ -491,8 +501,7 @@ impl PlayerRuntime {
     // on the cover source as well as the media, so the new art does show on
     // that next load (M7.1 §8.1), not merely "eventually".
     pub fn cover_key(&self) -> Option<CoverKey> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         Some(CoverKey {
             media: entry.media().clone(),
             load: self.mirror.as_ref().map(|mirror| mirror.load),
@@ -515,8 +524,7 @@ impl PlayerRuntime {
     /// are read straight from the store, which is authoritative for them.
     /// Both refresh on add or re-probe/feed refresh, never mid-playback.
     pub fn active_cover(&self) -> Option<(MediaId, CoverSource)> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         let embedded = || {
             let mirror = self
                 .mirror
@@ -559,8 +567,7 @@ impl PlayerRuntime {
     /// artwork of its own. `None` when nothing is active, which is the one
     /// case that still draws the plain placeholder.
     pub fn active_cover_kind(&self) -> Option<CoverKind> {
-        let queue = self.session.state().playlists().playing_playlist().queue();
-        let entry = queue.get(queue.active()?)?;
+        let entry = self.active_entry()?;
         let station = self
             .library
             .as_ref()
@@ -955,11 +962,15 @@ impl PlayerRuntime {
             Ok(request) => self.submit_load(request, media, location, |engine, request| {
                 engine.submit(PlaybackCommand::PlayLoaded { request })
             }),
+            // A refusal is a failed load: nothing went in, so nothing else
+            // will ever end it.
             Err(RegisterLoadError::Busy) => {
-                self.status = Some(TOO_MANY_PENDING_LOADS.to_owned());
+                self.fail_before_admission(TOO_MANY_PENDING_LOADS.to_owned());
             }
             // A detached target names no entry, so neither can happen.
-            Err(RegisterLoadError::UnknownEntry | RegisterLoadError::MediaMismatch) => {}
+            Err(error @ (RegisterLoadError::UnknownEntry | RegisterLoadError::MediaMismatch)) => {
+                self.fail_before_admission(format!("cannot play: {error:?}"));
+            }
         }
     }
 
@@ -1866,5 +1877,22 @@ mod tests {
         mirror.apply_progress(&progress_at(Duration::from_secs(58)), false);
         assert_eq!(mirror.position, Duration::from_secs(58));
         assert_eq!(mirror.provenance, PositionProvenance::Established);
+    }
+
+    /// A detached play the session refuses is a failed load, so `play`
+    /// reports it and ends rather than waiting on a load that never went in.
+    #[test]
+    fn a_refused_detached_play_is_a_failed_load() {
+        let mut runtime = runtime();
+        let media = MediaId::LocalFile(AbsolutePath::new(PathBuf::from(FIVE)).expect("absolute"));
+        for _ in 0..crate::session::MAX_PENDING_LOADS {
+            runtime
+                .session
+                .register_load(LoadTarget::Detached, &media)
+                .expect("room");
+        }
+        runtime.play_detached(media, SourceLocation::LocalPath(PathBuf::from(FIVE)));
+        assert!(runtime.load_failed);
+        assert_eq!(runtime.status.as_deref(), Some(TOO_MANY_PENDING_LOADS));
     }
 }

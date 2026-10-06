@@ -66,6 +66,10 @@ fn a_detached_play_shows_its_own_media_and_keeps_the_cursor() {
     assert_eq!(now.entry, None);
     assert_eq!(now.title, "sine-5s.flac");
     assert_eq!(view.active, Some(row), "the cursor stays on the row");
+    // The row is not what plays, so nothing describes its cover.
+    assert!(rig.runtime.cover_key().is_none());
+    assert!(rig.runtime.active_cover().is_none());
+    assert!(rig.runtime.active_cover_kind().is_none());
     let _ = rig.runtime.shutdown();
 }
 

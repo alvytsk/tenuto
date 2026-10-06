@@ -148,7 +148,9 @@ fn live_refuses(input: TransportInput, phase: PlaybackPhase, live: bool) -> bool
 /// The transport table for media played on its own (`tenuto play`, M9.3):
 /// there is no playlist to start, retry or navigate, so every key goes to the
 /// engine as itself. What the engine answers (a warning for Space after the
-/// end, say) is the engine's rule, not this table's.
+/// end, say) is the engine's rule, not this table's. The one exception is a
+/// seek while loading: no position exists to step from until the engine has
+/// decided the resume, so it waits, as the playlist table's does.
 pub fn decide_detached(
     input: TransportInput,
     phase: PlaybackPhase,
@@ -156,6 +158,11 @@ pub fn decide_detached(
 ) -> TransportDecision {
     if live_refuses(input, phase, live) {
         return TransportDecision::Notice(LIVE_NO_SEEK);
+    }
+    if phase == PlaybackPhase::Loading
+        && matches!(input, TransportInput::SeekBy(_) | TransportInput::SeekTo(_))
+    {
+        return TransportDecision::Notice(STILL_LOADING);
     }
     match input {
         TransportInput::Space => TransportDecision::TogglePause,
@@ -253,9 +260,27 @@ mod tests {
                 decide_detached(TransportInput::Home, phase, false),
                 TransportDecision::Restart
             );
+        }
+        for phase in [Playing, Paused, Stopped, Ended, Reconnecting] {
             assert_eq!(
                 decide_detached(TransportInput::SeekBy(-10), phase, false),
                 TransportDecision::SeekBy(-10)
+            );
+        }
+    }
+
+    /// No position is known until the load lands (the engine decides the
+    /// resume), so a seek has nothing to step from: it waits, as the
+    /// playlist table's does. Home needs no position and still goes through.
+    #[test]
+    fn a_detached_seek_waits_for_the_load() {
+        for input in [
+            TransportInput::SeekBy(10),
+            TransportInput::SeekTo(Duration::from_secs(30)),
+        ] {
+            assert_eq!(
+                decide_detached(input, PlaybackPhase::Loading, false),
+                TransportDecision::Notice(STILL_LOADING)
             );
         }
     }
