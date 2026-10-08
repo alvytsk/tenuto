@@ -51,7 +51,7 @@ Rank cannot express three rules inside a layer, so they are named:
 `src/lib.rs` is not a ranked module and is not scanned for references. It is the list of top-level modules, and the test validates it:
 - Each line is blank, `pub mod <name>;` or `mod <name>;` (a declared module), or `pub use <module>::<name>;` (an alias with the rank of `<module>`; today only `queue` → `playlist`).
 - Any other line fails as unsupported: an inline `mod x { … }`, a `use`, or any item. The crate root stays a registry, so a module can never hide inside it.
-- Every declared module and alias must be in the map, and every map entry must be declared. A module missing from the map fails, so a new module is placed deliberately; a map entry with no declaration fails, so the map cannot rot.
+- Every declared module must be in the map, every map entry must be declared, and an alias's target must be a ranked module. An alias is not listed in the map itself; it takes its target's rank. A module missing from the map fails, so a new module is placed deliberately; a map entry with no declaration fails, so the map cannot rot.
 
 A file under `src/` belongs to the first path component below `src/`, without `.rs`. A file whose component is not declared fails as unknown.
 
