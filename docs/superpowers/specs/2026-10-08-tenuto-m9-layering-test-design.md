@@ -40,23 +40,60 @@ Rank cannot express three rules inside a layer, so they are named:
 - `playlist` never references `persistence`.
 - `resume` never references `persistence`.
 
-A top-level module missing from the map fails the test, so a new module must be placed deliberately.
-
 `src/main.rs` is the binary, not the library, and is not scanned.
 
 ## 3. Mechanism
 
-`tests/m9_layering.rs`, in the style of `tests/m9_4_submission_door.rs`:
+`tests/m9_layering.rs`, in the style of `tests/m9_4_submission_door.rs`. The checker is a set of plain functions over `(path, text)` pairs, so the self-tests (§3.4) feed it synthetic sources and the tree test feeds it `src/`.
 
-1. Walk `src/` recursively, skipping `main.rs`. A file's module is the first path component under `src/`, without `.rs`.
-2. For each line, drop everything from the first `//`. Doc links such as ``[`crate::persistence::store`]`` are not imports.
-3. Collect every `crate::<ident>` reference. No source uses a grouped `use crate::{…}`; if one appears, it fails as an unmapped module (`{` is not an identifier), which is the safe direction.
-4. Test modules (`#[cfg(test)]`) are scanned like the rest. Today they add only downward references.
-5. A reference violates when it points up a rank or breaks a named rule. It is excused when `(file, target module)` is on the allowlist.
+### 3.1 The crate root is the module registry
 
-The test fails when either list is non-empty:
+`src/lib.rs` is not a ranked module and is not scanned for references. It is the list of top-level modules, and the test validates it:
+- Each line is blank, `pub mod <name>;` or `mod <name>;` (a declared module), or `pub use <module>::<name>;` (an alias with the rank of `<module>`; today only `queue` → `playlist`).
+- Any other line fails as unsupported: an inline `mod x { … }`, a `use`, or any item. The crate root stays a registry, so a module can never hide inside it.
+- Every declared module and alias must be in the map, and every map entry must be declared. A module missing from the map fails, so a new module is placed deliberately; a map entry with no declaration fails, so the map cannot rot.
+
+A file under `src/` belongs to the first path component below `src/`, without `.rs`. A file whose component is not declared fails as unknown.
+
+### 3.2 Reference forms
+
+For each line of a scanned file, everything from the first `//` is dropped first. Doc links such as ``[`crate::persistence::store`]`` are not imports. Test modules (`#[cfg(test)]`) are scanned like the rest; today they add only downward references.
+
+Handled:
+- **`crate::<ident>`** is a reference to top-level `<ident>`.
+- **`super::` chains that can reach the crate root.** A file's depth is its number of module path components: `src/resume.rs` and `src/media/mod.rs` are 1, `src/media/tags.rs` is 2, `src/tui/render/browser.rs` is 3. A chain of `k` `super::` segments with `k >= depth`, followed by an identifier that is a declared top-level module, is a reference to that module. So `use super::persistence::…` in `src/resume.rs` is caught. The scanner does not track inline modules: inside `mod tests` the real target is one level shallower, so it may report a reference that does not exist, never miss one that does. The fix for such a false positive is to write the path with `crate::`. Today every chain with `k >= depth` is `use super::*` or `use super::<local item>` inside a test module, and neither names a top-level module.
+
+Rejected as unsupported (fails, naming the line):
+- **`crate::{`**: a grouped import from the crate root. Write one `use crate::<module>::…` per module.
+- **`super::{` or `super::*` with `k >= depth`, before the file's first `#[cfg(test)]` line**: what it imports from the crate root cannot be read off the line. After that line it is taken to sit inside a test module, where it means the file's own module. Today all five such imports (`clock.rs`, `commands.rs`, `app.rs`, `tui/mod.rs`, `playlist/mod.rs`) follow the file's first `#[cfg(test)]`.
+
+`super::<ident>` that reaches the crate root and names something other than a declared module is ignored: the registry (§3.1) keeps the crate root free of anything but modules, so such a path can only be a local item seen from a test module.
+- **`tenuto::`**: the crate naming itself, which only `extern crate self as tenuto` would allow.
+
+Not detected, by construction: whitespace inside a path (`crate :: x`), which `cargo fmt --check` normalizes before CI's tests run; and `use crate as c`, which no source uses and rustfmt does not rewrite. Both are named in the test's module doc so the gap is visible.
+
+### 3.3 Checking and output
+
+A reference violates when it points up a rank or breaks a named rule. It is excused when `(file, target module)` is on the allowlist.
+
+The test fails when any list is non-empty:
+- **Registry errors:** an unsupported `lib.rs` line, an unmapped module, a map entry with no declaration, a file under an undeclared module.
+- **Unsupported forms:** one line each, `src/x.rs:LINE: <form>`.
 - **Violations:** one line each, `src/x.rs:LINE: from (rank n) -> to (rank m)`, or the named rule it breaks.
 - **Stale allowlist entries:** an entry that excused nothing. This is the ratchet: the PR that removes an edge must delete its entry.
+
+### 3.4 Self-tests
+
+Scanning today's tree only proves today's tree is clean. A handful of unit tests in the same file feed the checker synthetic sources and assert it catches each case:
+- a downward reference passes; a same-rank reference passes;
+- an upward `crate::` reference fails;
+- each named rule fails (`playback`, `playlist`, `resume` → `persistence`);
+- an escaping `super::persistence` in a depth-1 file fails; `super::` in a depth-2 file does not count;
+- `crate::{`, an escaping `super::*` before any `#[cfg(test)]`, and `tenuto::` each fail as unsupported;
+- a reference in a `//` comment is ignored;
+- a `lib.rs` with an inline `mod x {`, an undeclared map entry, or a declared module missing from the map fails;
+- a file under an undeclared module fails;
+- an allowlisted violation passes, and an allowlist entry that excuses nothing fails as stale.
 
 ## 4. Allowlist today
 
@@ -93,4 +130,5 @@ Each entry carries a comment naming the PR that removes it.
 
 - Content rules such as "`library` never prints or calls `block_on`". They are a different check and can join this file later.
 - Fixing any allowlisted edge. That is B's and C's work.
-- Edges below module granularity, such as which `playback` submodule `application` may reach.
+- Edges below module granularity, such as which `playback` submodule `application` may reach. The `(file, target)` allowlist is coarse on purpose: an existing exception also excuses a second import along the same edge. It is a temporary cleanup list, not symbol-level tracking.
+- Tracking inline modules or braces. The `super::` rule (§3.2) is depth-by-file with a `#[cfg(test)]` cut-off, which errs toward reporting.
