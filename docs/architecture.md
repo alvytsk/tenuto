@@ -121,7 +121,6 @@ flowchart TB
     subgraph appl["Application"]
         runtime["application/runtime.rs<br/>PlayerRuntime: owns engine, Session,<br/>writer, HttpService, workers"]
         session["session.rs<br/>checkpoint policy, load correlation,<br/>sole owner of PersistedState"]
-        queue["playlist/ (PlaylistSet, Playlist, Queue), resume.rs<br/>the playlist rules, resume decision"]
         library["library.rs<br/>list, resolve, subscribe,<br/>refresh, unsubscribe, stations"]
         workers["application/browse, enrich<br/>background workers"]
         artwork["artwork/<br/>cover resolve and decode,<br/>tenuto-artwork worker"]
@@ -142,6 +141,7 @@ flowchart TB
     subgraph base["Foundation"]
         media["media/<br/>MediaId, capabilities,<br/>metadata, tags, VBR header"]
         persist["persistence/<br/>model, store, atomic, writer"]
+        queue["playlist/ (PlaylistSet, Playlist, Queue), resume.rs<br/>the playlist rules, resume decision"]
         lifecycle["lifecycle/<br/>lock, signals, panic containment,<br/>stderr redirect, terminal, input"]
         clock["clock.rs, telemetry.rs, error.rs"]
     end
@@ -179,6 +179,7 @@ flowchart TB
     feed --> media
     subscr --> media
     persist --> media
+    persist --> queue
     tui --> lifecycle
     app --> lifecycle
 ```
@@ -202,10 +203,12 @@ flowchart TB
 | `media` | Validating identities, capabilities, metadata, tag and VBR-header reading. | Perform network I/O |
 | `tui` | Startup, event loop, teardown, layout tiers, drawing, the browser and its feed management, artwork placement, spectrum bars. | Mutate `PersistedState` except through `Session`; decode, read directories or probe tags inline |
 
-**Known layering exceptions.** The code has edges the diagram leaves out. Each is debt, not design, and the M9 roadmap (§12) names the fix:
+**Layering is checked.** `tests/m9_layering.rs` gives each top-level module a rank: Foundation 0 (`playlist` and `resume` included, since `persistence` and `playback` build on them), Sources 1, Engine 2, Application 3, Front end 4, Entry 5. A module may import its own rank or lower, and `playback`, `playlist` and `resume` never import `persistence`. `src/lib.rs` is the module registry: a module declared there without a rank in the test's `LAYERS` fails it, so every new module is placed deliberately.
 
-- The entry layer is imported from below. `commands::displayable` is used by `application` (runtime, view, browse), `tui/render/browser.rs` and `lifecycle::panic`. `tui/mod.rs` takes its stores from `commands::platform_*_store`, and `application::browse` calls `commands::wait_http` (M9.3).
-- `media` reaches up into `playback`. `media::tags` calls `playback::decode`'s probing functions, and `media::tags` and `media::vbr_header` return `playback::error::PlaybackError`. `media`, `playlist` and `persistence` also import value types from `playback`: `provenance`, `checkpoint` and `volume`.
+**Known layering exceptions.** The test's `ALLOWED` list is the authority; an entry that no longer excuses anything fails, so the list only shrinks. Each is debt, not design, and the M9 roadmap (§12) names the fix:
+
+- The entry layer is imported from below. `commands::displayable` is used by `application` (runtime, view, browse), `tui/render/browser.rs` and `lifecycle::panic`. `tui/mod.rs` takes its stores from `commands::platform_*_store`, and `application::browse` calls `commands::wait_http` (M9.3 feed operations).
+- Foundation reaches up. `media::tags` calls `playback::decode`'s probing functions, and `media::tags` and `media::vbr_header` return `playback::error::PlaybackError`. `media`, `playlist`, `resume` and `persistence` import value types from `playback`: `provenance`, `checkpoint` and `volume`. `error.rs` holds `AppError`, which wraps `feed` and `playback` errors. `media::display` uses `http`'s `redact_url`. `tui` takes `ArtworkMode` and `MouseMode` from `cli` (M9 foundation cleanup).
 - Both front ends load `StateStore` and take the profile lock themselves at startup; `application::profile::open_state` then builds the `Session` and writer for each (M9.2).
 
 **The playlist model (M8).** A `Playlist` wraps today's `Queue` with an identity, a name and an optional shuffle; a `PlaylistSet` holds the `Vec<Playlist>` in place of the old single queue. Entry IDs and playlist IDs are each their own global, monotonic counter held by `PlaylistSet` (M9.1), never by a `Queue` or a `Playlist` itself, so an entry ID is unique across every playlist, not just within one. `PersistedState` holds the set privately and forwards every mutation to it; it applies the set's effect on the persisted current media when the playing playlist is deleted. The set remembers which playlist is `playing` and each playlist's cursor; `PersistedState` keeps the persisted `current_media` beside it. A cursor is adopted, not merely selected, and ownership survives moving between playlists (§9.1). The *viewed* playlist — which tab the front end is looking at — is transient runtime state kept by `application::runtime`, never written to disk.
@@ -632,7 +635,7 @@ the script tests without a container.
 - **Known limitations.** Non-UTF-8 paths. Estimated position where the device reports no latency. Seek support that stays `Unknown` until probed. Symphonia reads an embedded picture in full while probing, before the 10 MiB artwork cap applies. Shoutcast v1 (`ICY 200 OK`) and streams without ICY headers are not playable (`docs/m1-known-debt.md`).
 - **Live radio, next.** ICY now-playing titles (M7.2) are the planned follow-up: a pure demultiplexer ahead of Symphonia, a generation-keyed latest-value slot, and a droppable `StreamMetadata` event. Not implemented; recorded in the M7 spec §12 so the seams are in the right place.
 - **Finite recovery does not revalidate across a reopen (M10).** A reopen probes fresh at byte zero without the previous response's validator, so an episode replaced on the server during an outage resumes at the same time offset in the new file. Stop → Play has the same limit.
-- **Architecture deepening (M9).** The nearest structural work is recorded layer by layer in [`superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md`](superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md). M9.1's first item has shipped (#31): `PlaylistSet` owns the playlist rules (§4). Still open: M9.1's versioned-file module under the three JSON stores and moving resume intent into `resume.rs`; feed operations below `commands` (M9.3); the engine's transport and event-outbox items (M9.4; the submission door and the landing have shipped). M9.5 has shipped: every playback network budget reads an injectable `Clock` (§5), the headless runtime suites run on one virtual clock, and `HttpMediaSource::open_and_probe` is the one opening protocol that playback, the station probe and the tests share. M9.2's mirror and M9.3's `play` item have shipped: `play` is a front end over `PlayerRuntime`, so there is one display mirror and one state opener, and its detached load (`LoadTarget::Detached`) leaves the playlists alone. None of it revisits the decisions above.
+- **Architecture deepening (M9).** The nearest structural work is recorded layer by layer in [`superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md`](superpowers/specs/2026-09-29-tenuto-m9-architecture-deepening.md). M9.1's first item has shipped (#31): `PlaylistSet` owns the playlist rules (§4). Still open: M9.1's versioned-file module under the three JSON stores and moving resume intent into `resume.rs`; feed operations below `commands` (M9.3); the engine's transport and event-outbox items (M9.4; the submission door and the landing have shipped). M9.5 has shipped: every playback network budget reads an injectable `Clock` (§5), the headless runtime suites run on one virtual clock, and `HttpMediaSource::open_and_probe` is the one opening protocol that playback, the station probe and the tests share. M9.2's mirror and M9.3's `play` item have shipped: `play` is a front end over `PlayerRuntime`, so there is one display mirror and one state opener, and its detached load (`LoadTarget::Detached`) leaves the playlists alone. `tests/m9_layering.rs` checks the layering of §4 and holds the exceptions still to remove. None of it revisits the decisions above.
 - **Radio tab and stations.json (M7.1).** A saved-station list, `stations.json`, mirrors `subscriptions.json` in atomicity and quarantine behavior. A probe opens the real source through `HttpMediaSource::open` rather than a bespoke header-only request, so a station's verified identity can never disagree with what playback itself would classify. A station's logo is fetched and decoded (SVG via `resvg` 0.48, `default-features = false`, both `image_href_resolver` halves closed) only on add or re-probe, never mid-playback — the one exception to the rule that stored identity is never authority over a live open.
 
 The reference acceptance scenario is the Radio-T flow: subscribe, list, play an episode, seek, stop, play again and resume, quit, start again and resume from the last checkpoint. The automated suites cover it against a local test server with no public-network dependency. The manual terminal checks for M5, M6, M7 and M7.1 are recorded as pending in their acceptance documents.

@@ -25,12 +25,64 @@
 //! on the same line.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+/// Rank per top-level module: 0 foundation, 1 sources, 2 engine,
+/// 3 application, 4 front end, 5 entry.
+const LAYERS: &[(&str, u8)] = &[
+    ("clock", 0),
+    ("telemetry", 0),
+    ("error", 0),
+    ("lifecycle", 0),
+    ("media", 0),
+    ("persistence", 0),
+    ("playlist", 0),
+    ("resume", 0),
+    ("http", 1),
+    ("feed", 1),
+    ("subscription", 1),
+    ("station", 1),
+    ("playback", 2),
+    ("application", 3),
+    ("session", 3),
+    ("library", 3),
+    ("artwork", 3),
+    ("tui", 4),
+    ("app", 5),
+    ("cli", 5),
+    ("commands", 5),
+];
 
 /// `(from, to)`: `from` never references `to`, whatever their ranks.
 const NAMED_RULES: &[(&str, &str)] = &[
     ("playback", "persistence"),
     ("playlist", "persistence"),
     ("resume", "persistence"),
+];
+
+/// `(file, target module)` pairs excused today. Delete an entry with the
+/// edge it excuses.
+const ALLOWED: &[(&str, &str)] = &[
+    // B: foundation cleanup.
+    ("src/media/metadata.rs", "playback"),
+    ("src/media/tags.rs", "playback"),
+    ("src/media/vbr_header.rs", "playback"),
+    ("src/persistence/model.rs", "playback"),
+    ("src/persistence/queue_codec.rs", "playback"),
+    ("src/playlist/queue.rs", "playback"),
+    ("src/resume.rs", "playback"),
+    ("src/error.rs", "feed"),
+    ("src/error.rs", "playback"),
+    ("src/media/display.rs", "http"),
+    ("src/tui/mod.rs", "cli"),
+    ("src/tui/images.rs", "cli"),
+    // C: feed operations below `commands`.
+    ("src/application/browse.rs", "commands"),
+    ("src/application/runtime.rs", "commands"),
+    ("src/application/view.rs", "commands"),
+    ("src/lifecycle/panic.rs", "commands"),
+    ("src/tui/mod.rs", "commands"),
+    ("src/tui/render/browser.rs", "commands"),
 ];
 
 fn is_ident_char(c: char) -> bool {
@@ -261,6 +313,42 @@ fn check(
         }
     }
     errors
+}
+
+#[allow(clippy::unwrap_used)] // A bare helper: an unreadable source tree is a test failure.
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn the_source_tree_respects_the_layers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    let mut paths = Vec::new();
+    rust_files(&root.join("src"), &mut paths);
+    let mut files: Vec<(String, String)> = paths
+        .iter()
+        .map(|path| {
+            let relative = path.strip_prefix(root).unwrap();
+            let name = relative.to_string_lossy().replace('\\', "/");
+            (name, std::fs::read_to_string(path).unwrap())
+        })
+        .filter(|(name, _)| name != "src/lib.rs" && name != "src/main.rs")
+        .collect();
+    files.sort();
+    let errors = check(&lib, &files, LAYERS, NAMED_RULES, ALLOWED);
+    assert!(
+        errors.is_empty(),
+        "layering (docs/architecture.md §4, tests/m9_layering.rs):\n{}",
+        errors.join("\n")
+    );
 }
 
 // The checker itself, on synthetic sources.
