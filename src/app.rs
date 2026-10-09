@@ -17,6 +17,7 @@ use crate::application::transport::PlaybackPhase;
 use crate::application::view::NowPlaying;
 use crate::cli::{self, CliCommand};
 use crate::clock::{Clock, SystemClock};
+use crate::error::LifecycleError;
 use crate::http::channel::{SourceInterrupt, WaitHook};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
@@ -36,6 +37,19 @@ use crate::playback::state::PlaybackState;
 use crate::volume::Volume;
 use unicode_width::UnicodeWidthStr;
 
+/// What [`run`] returns (design doc §6.5). Both arms are
+/// `transparent`, so `main.rs`'s `{error}` and `?error` keep printing the
+/// concrete failure rather than a wrapper that says nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error(transparent)]
+    Playback(#[from] crate::playback::error::PlaybackError),
+    #[error(transparent)]
+    Feed(#[from] crate::feed::error::FeedError),
+    #[error(transparent)]
+    Lifecycle(#[from] LifecycleError),
+}
+
 /// Re-exported so a test can drive the exact key routing this file's own key
 /// loop uses, with no tty and no crossterm event in the loop at all.
 pub use crate::application::seek::KeyRouter;
@@ -54,14 +68,15 @@ const HELP_LINE: &str =
 /// else dispatches to [`crate::commands`], which owns every line this
 /// program prints for a feed command, the one synchronous bridge into the
 /// HTTP runtime, and the exit status a partial failure has to carry.
-pub fn run(cli: cli::Cli) -> Result<RunOutcome, crate::error::AppError> {
+pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
     // A bare `tenuto` opens the player. The defaults are the ones
     // `tenuto tui` applies when neither flag is given.
     let Some(command) = cli.command else {
         return crate::tui::run(crate::tui::TuiOptions {
             mouse: cli::MouseMode::default(),
             artwork: cli::ArtworkMode::default(),
-        });
+        })
+        .map_err(AppError::from);
     };
     match command {
         CliCommand::Play {
@@ -109,7 +124,7 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, crate::error::AppError> {
             run_resolved(media, location)
         }
         CliCommand::Tui { mouse, artwork } => {
-            crate::tui::run(crate::tui::TuiOptions { mouse, artwork })
+            crate::tui::run(crate::tui::TuiOptions { mouse, artwork }).map_err(AppError::from)
         }
         command => crate::commands::run(command)
             .map(|()| RunOutcome::Completed)
@@ -133,11 +148,7 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, crate::error::AppError> {
 /// reported as the shutdown it actually was. `signals.outcome()` is read
 /// before `close()`, which only tears the listener down and cannot change
 /// what it already recorded.
-fn run_resolved(
-    media: MediaId,
-    location: SourceLocation,
-) -> Result<RunOutcome, crate::error::AppError> {
-    use crate::error::LifecycleError;
+fn run_resolved(media: MediaId, location: SourceLocation) -> Result<RunOutcome, AppError> {
     use crate::lifecycle::lock::{LockError, ProfileLock};
 
     let signals = ShutdownSignals::install().map_err(LifecycleError::Signals)?;
