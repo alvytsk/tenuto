@@ -139,11 +139,11 @@ flowchart TB
     end
 
     subgraph base["Foundation"]
-        media["media/<br/>MediaId, capabilities,<br/>metadata, tags, VBR header"]
+        media["media/<br/>MediaId, capabilities, provenance,<br/>metadata, container probe, tags, VBR header"]
         persist["persistence/<br/>model, store, atomic, writer"]
         queue["playlist/ (PlaylistSet, Playlist, Queue), resume.rs<br/>the playlist rules, resume decision"]
         lifecycle["lifecycle/<br/>lock, signals, panic containment,<br/>stderr redirect, terminal, input"]
-        clock["clock.rs, telemetry.rs, error.rs"]
+        clock["clock.rs, telemetry.rs, error.rs, volume.rs"]
     end
 
     main --> app
@@ -187,12 +187,12 @@ flowchart TB
 | Component | Responsibility | Must not |
 |---|---|---|
 | `cli`, `main` | Parse arguments. Map outcomes to exit codes. Print the final error. | Contain policy |
-| `app` | Resolve a `play` argument into `(MediaId, SourceLocation)`. Run `play` as a front end over `application::runtime`: its keys, `Loading` line, status row and exit codes. Dispatch `tui`. | Decode or persist directly; touch the engine except through the runtime |
+| `app` | Resolve a `play` argument into `(MediaId, SourceLocation)`. Run `play` as a front end over `application::runtime`: its keys, `Loading` line, status row and exit codes. Dispatch `tui`. Own `AppError`, the transparent union `run` returns. | Decode or persist directly; touch the engine except through the runtime |
 | `commands` | Format feed command columns. Decide feed command exit status. Own `wait_http`, the synchronous bridge into the Tokio runtime that feed commands and the browse worker share. | Decide what to fetch or commit |
 | `library` | The application seam for feeds and stations: `list_feeds`, `list_episodes`, `resolve_episode`, `subscribe`, `unsubscribe`, `refresh`, `refresh_all`, and since M7.1 `list_stations`, `add_station`, `remove_station`, `reprobe_station`. Async where the network is involved. | Print, `block_on`, open a device or a terminal |
 | `application::runtime` | One owner for the engine, `Session`, the writer, the `HttpService` and the workers, for both front ends. Driven by `AppCommand` values, plus `play_detached` for media played outside every playlist (M9.3). Pumped once per front-end iteration. `application::profile::open_state` opens `state.json` into its `Session` and writer. | Read a key or draw a frame |
 | `session` | Decide what to checkpoint and when. Allocate and track `LoadRequestId` tokens. Build every state snapshot. | Perform I/O or own a thread |
-| `playlist` (`PlaylistSet`, `Playlist`, `Queue`), `resume` | `PlaylistSet` owns every playlist rule: global entry and playlist IDs, the entry cap, cursors, `playing`, shuffle and its pin, the successor on delete, and recovery of stored playlists. `resume` is the resume decision from a position and a completion flag. | Import persistence. Hand out mutable access to a queue, playlist or entry |
+| `playlist` (`PlaylistSet`, `Playlist`, `Queue`), `resume` | `PlaylistSet` owns every playlist rule: global entry and playlist IDs, the entry cap, cursors, `playing`, shuffle and its pin, the successor on delete, and recovery of stored playlists. `resume` is the resume decision from a position and a completion flag, and holds `PlaybackCheckpoint`, the logical resume position. | Import persistence. Hand out mutable access to a queue, playlist or entry |
 | `playback` | The decode worker, the CPAL stream's whole lifecycle, position accounting, the command and event protocol, the spectrum tap and worker. | Depend on persistence or block on Tokio |
 | `http` | Produce encoded bytes and the evidence that classifies them. One fetch task per source generation. One capped whole-document fetch per call. | Own a decoder, a resampler or a stream |
 | `feed`, `subscription` | Parse a document, bind items to `MediaId::PodcastEpisode`, store the cache and the subscription list. | Touch playback state |
@@ -200,7 +200,7 @@ flowchart TB
 | `artwork` | Resolve the active entry's cover (an embedded tag picture, a local file or a remote URL) and decode it within the caps on the `tenuto-artwork` worker. Rasterize SVG station logos. Hold the built-in default covers. | Encode for the terminal or place the image; that is `tui`'s |
 | `persistence` | Read, classify and atomically replace `state.json`. Coalesce writes on one thread. | Merge snapshots |
 | `lifecycle` | Profile lock, signal listener, panic containment, fd-2 redirect, terminal cleanup, input thread, test hooks. | Contain business logic |
-| `media` | Validating identities, capabilities, metadata, tag and VBR-header reading. | Perform network I/O |
+| `media` | Validating identities, capabilities, position provenance, metadata, the container probe (`media::probe`, shared with playback), tag and VBR-header reading. | Perform network I/O |
 | `tui` | Startup, event loop, teardown, layout tiers, drawing, the browser and its feed management, artwork placement, spectrum bars. | Mutate `PersistedState` except through `Session`; decode, read directories or probe tags inline |
 
 **Layering is checked.** `tests/m9_layering.rs` gives each top-level module a rank: Foundation 0 (`playlist` and `resume` included, since `persistence` and `playback` build on them), Sources 1, Engine 2, Application 3, Front end 4, Entry 5. A module may import its own rank or lower, and `playback`, `playlist` and `resume` never import `persistence`. `src/lib.rs` is the module registry: a module declared there without a rank in the test's `LAYERS` fails it, so every new module is placed deliberately.
@@ -208,7 +208,6 @@ flowchart TB
 **Known layering exceptions.** The test's `ALLOWED` list is the authority; an entry that no longer excuses anything fails, so the list only shrinks. Each is debt, not design, and the M9 roadmap (§12) names the fix:
 
 - The entry layer is imported from below. `commands::displayable` is used by `application` (runtime, view, browse), `tui/render/browser.rs` and `lifecycle::panic`. `tui/mod.rs` takes its stores from `commands::platform_*_store`, and `application::browse` calls `commands::wait_http` (M9.3 feed operations).
-- Foundation reaches up. `media::tags` calls `playback::decode`'s probing functions, and `media::tags` and `media::vbr_header` return `playback::error::PlaybackError`. `media`, `playlist`, `resume` and `persistence` import value types from `playback`: `provenance`, `checkpoint` and `volume`. `error.rs` holds `AppError`, which wraps `feed` and `playback` errors. `media::display` uses `http`'s `redact_url`. `tui` takes `ArtworkMode` and `MouseMode` from `cli` (M9 foundation cleanup).
 - Both front ends load `StateStore` and take the profile lock themselves at startup; `application::profile::open_state` then builds the `Session` and writer for each (M9.2).
 
 **The playlist model (M8).** A `Playlist` wraps today's `Queue` with an identity, a name and an optional shuffle; a `PlaylistSet` holds the `Vec<Playlist>` in place of the old single queue. Entry IDs and playlist IDs are each their own global, monotonic counter held by `PlaylistSet` (M9.1), never by a `Queue` or a `Playlist` itself, so an entry ID is unique across every playlist, not just within one. `PersistedState` holds the set privately and forwards every mutation to it; it applies the set's effect on the persisted current media when the playing playlist is deleted. The set remembers which playlist is `playing` and each playlist's cursor; `PersistedState` keeps the persisted `current_media` beside it. A cursor is adopted, not merely selected, and ownership survives moving between playlists (§9.1). The *viewed* playlist — which tab the front end is looking at — is transient runtime state kept by `application::runtime`, never written to disk.
@@ -494,7 +493,7 @@ Every subscription mutation, CLI or browser, holds `subscriptions.lock` for its 
 
 Tracing is controlled by `RUST_LOG`. The default filter is `tenuto=info`. An invalid filter fails startup. Logs go to stderr, except under `tui`, where fd 2 is redirected for the whole run to `logs/tenuto-tui-<stamp>-<pid>.log`. Per-frame logging is forbidden.
 
-Errors are typed. `PlaybackEvent::Failed` carries `cause: Option<RemoteFailure>` with one variant per remote failure category. `FeedError` is the single type for feed operations. `AppError` is the transparent union `app::run` returns.
+Errors are typed. `PlaybackEvent::Failed` carries `cause: Option<RemoteFailure>` with one variant per remote failure category. `FeedError` is the single type for feed operations. `AppError` (`app.rs`) is the transparent union `app::run` returns; `tui::run` returns the `LifecycleError` it can only fail with, and `app::run` converts it.
 
 Three redaction rules bind messages and logs alike:
 
