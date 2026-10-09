@@ -222,33 +222,13 @@ pub enum BrowseRequest {
     Episodes {
         slug: String,
     },
-    /// `tenuto subscribe <url>`, slug derived.
-    Subscribe {
-        url: String,
-    },
-    /// `tenuto refresh [slug]`: one feed, or every feed for `None`.
-    Refresh {
-        slug: Option<String>,
-    },
-    /// `tenuto unsubscribe <slug>`.
-    Unsubscribe {
-        slug: String,
-    },
     /// The Radio tab's listing (M7.1 design doc §6). Read-only, like `Feeds`:
     /// never touches the network.
     Stations,
-    /// Validates, probes and saves a station by URL (M7.1 §6, §10).
-    AddStation {
-        url: String,
-    },
-    /// Drops a saved station. Local-only, like `Unsubscribe` (M7.1 §6).
-    RemoveStation {
-        slug: String,
-    },
-    /// Re-probes a saved station, refreshing its cached identity (M7.1 §6).
-    ReprobeStation {
-        slug: String,
-    },
+    /// A change to the feed library or the saved stations, run the way its
+    /// CLI command runs it ([`feed_ops::run`]). Only `Subscribe`,
+    /// `Refresh`, `AddStation` and `ReprobeStation` touch the network.
+    Op(FeedOp),
     /// A Files-tab folder add (M8 §8): the recursive walk behind `a`.
     CollectTree {
         roots: Vec<PathBuf>,
@@ -348,12 +328,7 @@ fn answer_with(request: BrowseRequest, message: &str) -> BrowseResult {
             episodes: Err(message.to_owned()),
         },
         BrowseRequest::Stations => BrowseResult::Stations(Err(message.to_owned())),
-        request @ (BrowseRequest::Subscribe { .. }
-        | BrowseRequest::Refresh { .. }
-        | BrowseRequest::Unsubscribe { .. }
-        | BrowseRequest::AddStation { .. }
-        | BrowseRequest::RemoveStation { .. }
-        | BrowseRequest::ReprobeStation { .. }) => BrowseResult::Mutation {
+        request @ BrowseRequest::Op(_) => BrowseResult::Mutation {
             request,
             outcome: Err(message.to_owned()),
         },
@@ -396,12 +371,7 @@ fn answer(
             ),
             None => answer_with(request, NO_LIBRARY),
         },
-        request @ (BrowseRequest::Subscribe { .. }
-        | BrowseRequest::Refresh { .. }
-        | BrowseRequest::Unsubscribe { .. }
-        | BrowseRequest::AddStation { .. }
-        | BrowseRequest::RemoveStation { .. }
-        | BrowseRequest::ReprobeStation { .. }) => {
+        request @ BrowseRequest::Op(_) => {
             let outcome = match library {
                 Some(stores) => mutate(stores, http, &request),
                 None => Err(NO_LIBRARY.to_owned()),
@@ -426,24 +396,14 @@ fn mutate(
     http: &mut Option<Arc<HttpService>>,
     request: &BrowseRequest,
 ) -> Result<String, String> {
-    // Temporary: Task 4 replaces this conversion with `BrowseRequest::Op`.
-    let op = match request {
-        BrowseRequest::Subscribe { url } => FeedOp::Subscribe {
-            url: url.clone(),
-            slug: None,
-        },
-        BrowseRequest::Refresh { slug } => FeedOp::Refresh { slug: slug.clone() },
-        BrowseRequest::Unsubscribe { slug } => FeedOp::Unsubscribe { slug: slug.clone() },
-        BrowseRequest::AddStation { url } => FeedOp::AddStation { url: url.clone() },
-        BrowseRequest::RemoveStation { slug } => FeedOp::RemoveStation { slug: slug.clone() },
-        BrowseRequest::ReprobeStation { slug } => FeedOp::ReprobeStation { slug: slug.clone() },
+    match request {
+        BrowseRequest::Op(op) => feed_ops::run(op, stores, http).into_notice(),
         BrowseRequest::Directory(_)
         | BrowseRequest::Feeds
         | BrowseRequest::Episodes { .. }
         | BrowseRequest::Stations
-        | BrowseRequest::CollectTree { .. } => return Err("not a mutation".to_owned()),
-    };
-    feed_ops::run(&op, stores, http).into_notice()
+        | BrowseRequest::CollectTree { .. } => Err("not a mutation".to_owned()),
+    }
 }
 
 /// Returns a redacted description of the request for logging, redacting any
@@ -453,16 +413,49 @@ fn describe(request: &BrowseRequest) -> String {
         BrowseRequest::Directory(_) => "Directory".to_string(),
         BrowseRequest::Feeds => "Feeds".to_string(),
         BrowseRequest::Episodes { slug } => format!("Episodes({})", slug),
-        BrowseRequest::Subscribe { url } => format!("Subscribe({})", redact_url(url)),
-        BrowseRequest::Refresh { slug: Some(slug) } => format!("Refresh({})", slug),
-        BrowseRequest::Refresh { slug: None } => "Refresh(all)".to_string(),
-        BrowseRequest::Unsubscribe { slug } => format!("Unsubscribe({})", slug),
         BrowseRequest::Stations => "Stations".to_string(),
+        BrowseRequest::Op(FeedOp::Subscribe { url, .. }) => {
+            format!("Subscribe({})", redact_url(url))
+        }
+        BrowseRequest::Op(FeedOp::Refresh { slug: Some(slug) }) => format!("Refresh({})", slug),
+        BrowseRequest::Op(FeedOp::Refresh { slug: None }) => "Refresh(all)".to_string(),
+        BrowseRequest::Op(FeedOp::Unsubscribe { slug }) => format!("Unsubscribe({})", slug),
         // A station URL can carry userinfo exactly as a feed URL can, so it
         // is redacted here for the same reason `Subscribe` is (§7.2).
-        BrowseRequest::AddStation { url } => format!("AddStation({})", redact_url(url)),
-        BrowseRequest::RemoveStation { slug } => format!("RemoveStation({})", slug),
-        BrowseRequest::ReprobeStation { slug } => format!("ReprobeStation({})", slug),
+        BrowseRequest::Op(FeedOp::AddStation { url }) => {
+            format!("AddStation({})", redact_url(url))
+        }
+        BrowseRequest::Op(FeedOp::RemoveStation { slug }) => format!("RemoveStation({})", slug),
+        BrowseRequest::Op(FeedOp::ReprobeStation { slug }) => {
+            format!("ReprobeStation({})", slug)
+        }
         BrowseRequest::CollectTree { roots, .. } => format!("CollectTree({} roots)", roots.len()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review focus 4: a feed or station URL can carry userinfo or a signed
+    /// query, and the worker's log line must not (§7.2).
+    #[test]
+    fn describe_redacts_feed_and_station_urls() {
+        let url = "https://user:pw@example.org/feed?token=secret".to_string();
+        assert_eq!(
+            describe(&BrowseRequest::Op(FeedOp::Subscribe {
+                url: url.clone(),
+                slug: None,
+            })),
+            "Subscribe(https://example.org/feed)"
+        );
+        assert_eq!(
+            describe(&BrowseRequest::Op(FeedOp::AddStation { url })),
+            "AddStation(https://example.org/feed)"
+        );
+        assert_eq!(
+            describe(&BrowseRequest::Op(FeedOp::Refresh { slug: None })),
+            "Refresh(all)"
+        );
     }
 }
