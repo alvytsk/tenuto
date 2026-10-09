@@ -29,9 +29,9 @@ use crate::application::view::{
 };
 use crate::artwork::default::CoverKind;
 use crate::artwork::worker::CoverSource;
-use crate::clock::Clock;
-use crate::commands::displayable;
+use crate::clock::{Clock, SystemClock};
 use crate::feed::cache::CacheStore;
+use crate::feed::error::FeedError;
 use crate::http::error::RemoteFailure;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
@@ -63,7 +63,7 @@ use crate::session::{
 };
 use crate::station::store::StationStore;
 use crate::subscription::store::SubscriptionStore;
-use crate::telemetry::redact_url;
+use crate::telemetry::{displayable, redact_url};
 use crate::volume::Volume;
 
 /// Shown when the engine refuses a command for want of queue room.
@@ -98,6 +98,35 @@ pub struct LibraryStores {
     pub subscriptions: SubscriptionStore,
     pub cache: CacheStore,
     pub stations: StationStore,
+}
+
+impl LibraryStores {
+    /// The stores on this platform's directories: `subscriptions.json` and
+    /// `stations.json` in the data directory, the feed cache under the cache
+    /// directory's `feeds`.
+    ///
+    /// No constructor touches the filesystem: each file comes into existence
+    /// on its first write, so a listing on a machine that has never
+    /// subscribed creates nothing (M4 §8.4), and a command that never uses
+    /// the station store pays nothing for it. The one failure, no platform
+    /// data directory, is reported as the subscriptions being unreadable,
+    /// which is what every feed command has always said.
+    pub fn platform() -> Result<Self, FeedError> {
+        let dirs = directories::ProjectDirs::from("", "", "tenuto").ok_or_else(|| {
+            FeedError::SubscriptionsUnreadable {
+                reason: "no platform data directory is available".to_string(),
+            }
+        })?;
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        Ok(Self {
+            subscriptions: SubscriptionStore::new(
+                dirs.data_dir().join("subscriptions.json"),
+                Arc::clone(&clock),
+            ),
+            cache: CacheStore::new(dirs.cache_dir().join("feeds")),
+            stations: StationStore::new(dirs.data_dir().join("stations.json"), clock),
+        })
+    }
 }
 
 pub struct RuntimeParts {

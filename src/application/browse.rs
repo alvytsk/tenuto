@@ -23,17 +23,12 @@ use std::thread;
 
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::application::feed_ops::{self, FeedOp};
 use crate::application::runtime::LibraryStores;
 use crate::application::source::resolve_path;
-use crate::commands::{
-    finish_add_station, finish_refresh_batch, finish_refresh_one, finish_remove_station,
-    finish_reprobe_station, finish_subscribe, finish_unsubscribe, report, wait_http,
-};
-use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::library::{
-    EpisodeCandidate, FeedSummary, StationRow, add_station, episode_candidates, list_feeds,
-    list_stations, refresh, refresh_all, remove_station, reprobe_station, subscribe, unsubscribe,
+    EpisodeCandidate, FeedSummary, StationRow, episode_candidates, list_feeds, list_stations,
 };
 use crate::media::id::MediaId;
 use crate::playlist::PlaylistId;
@@ -227,33 +222,13 @@ pub enum BrowseRequest {
     Episodes {
         slug: String,
     },
-    /// `tenuto subscribe <url>`, slug derived.
-    Subscribe {
-        url: String,
-    },
-    /// `tenuto refresh [slug]`: one feed, or every feed for `None`.
-    Refresh {
-        slug: Option<String>,
-    },
-    /// `tenuto unsubscribe <slug>`.
-    Unsubscribe {
-        slug: String,
-    },
     /// The Radio tab's listing (M7.1 design doc §6). Read-only, like `Feeds`:
     /// never touches the network.
     Stations,
-    /// Validates, probes and saves a station by URL (M7.1 §6, §10).
-    AddStation {
-        url: String,
-    },
-    /// Drops a saved station. Local-only, like `Unsubscribe` (M7.1 §6).
-    RemoveStation {
-        slug: String,
-    },
-    /// Re-probes a saved station, refreshing its cached identity (M7.1 §6).
-    ReprobeStation {
-        slug: String,
-    },
+    /// A change to the feed library or the saved stations, run the way its
+    /// CLI command runs it (`feed_ops::run`). Only `Subscribe`,
+    /// `Refresh`, `AddStation` and `ReprobeStation` touch the network.
+    Op(FeedOp),
     /// A Files-tab folder add (M8 §8): the recursive walk behind `a`.
     CollectTree {
         roots: Vec<PathBuf>,
@@ -353,12 +328,7 @@ fn answer_with(request: BrowseRequest, message: &str) -> BrowseResult {
             episodes: Err(message.to_owned()),
         },
         BrowseRequest::Stations => BrowseResult::Stations(Err(message.to_owned())),
-        request @ (BrowseRequest::Subscribe { .. }
-        | BrowseRequest::Refresh { .. }
-        | BrowseRequest::Unsubscribe { .. }
-        | BrowseRequest::AddStation { .. }
-        | BrowseRequest::RemoveStation { .. }
-        | BrowseRequest::ReprobeStation { .. }) => BrowseResult::Mutation {
+        request @ BrowseRequest::Op(_) => BrowseResult::Mutation {
             request,
             outcome: Err(message.to_owned()),
         },
@@ -401,12 +371,7 @@ fn answer(
             ),
             None => answer_with(request, NO_LIBRARY),
         },
-        request @ (BrowseRequest::Subscribe { .. }
-        | BrowseRequest::Refresh { .. }
-        | BrowseRequest::Unsubscribe { .. }
-        | BrowseRequest::AddStation { .. }
-        | BrowseRequest::RemoveStation { .. }
-        | BrowseRequest::ReprobeStation { .. }) => {
+        request @ BrowseRequest::Op(_) => {
             let outcome = match library {
                 Some(stores) => mutate(stores, http, &request),
                 None => Err(NO_LIBRARY.to_owned()),
@@ -424,74 +389,21 @@ fn answer(
 }
 
 /// Runs one mutation the way its CLI command does, and reports it the way
-/// the CLI prints it (§3). Only `Subscribe`, `Refresh`, `AddStation` and
-/// `ReprobeStation` need the service; `RemoveStation` is a local edit like
-/// `Unsubscribe` and must never call [`http_service`] (M7.1 §6, R3).
+/// the CLI prints it (§3). The service in `http` is spawned on first use,
+/// and only by an operation that needs the network (`feed_ops::run`).
 fn mutate(
     stores: &LibraryStores,
     http: &mut Option<Arc<HttpService>>,
     request: &BrowseRequest,
 ) -> Result<String, String> {
-    let subs = &stores.subscriptions;
-    let cache = &stores.cache;
-    let stations = &stores.stations;
     match request {
-        BrowseRequest::Subscribe { url } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, subscribe(&service, subs, cache, url, None))
-                .map_err(|error| error.to_string())?;
-            report(finish_subscribe, outcome)
-        }
-        BrowseRequest::Refresh { slug: Some(slug) } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, refresh(&service, subs, cache, slug))
-                .map_err(|error| error.to_string())?;
-            report(finish_refresh_one, outcome)
-        }
-        BrowseRequest::Refresh { slug: None } => {
-            let service = http_service(http)?;
-            let outcomes = wait_http(&service, refresh_all(&service, subs, cache))
-                .map_err(|error| error.to_string())?;
-            report(finish_refresh_batch, outcomes)
-        }
-        BrowseRequest::Unsubscribe { slug } => {
-            let outcome = unsubscribe(subs, cache, slug).map_err(|error| error.to_string())?;
-            report(finish_unsubscribe, outcome)
-        }
-        BrowseRequest::AddStation { url } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, add_station(&service, stations, url))
-                .map_err(|error| error.to_string())?;
-            report(finish_add_station, outcome)
-        }
-        BrowseRequest::RemoveStation { slug } => {
-            let outcome = remove_station(stations, slug).map_err(|error| error.to_string())?;
-            report(finish_remove_station, outcome)
-        }
-        BrowseRequest::ReprobeStation { slug } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, reprobe_station(&service, stations, slug))
-                .map_err(|error| error.to_string())?;
-            report(finish_reprobe_station, outcome)
-        }
+        BrowseRequest::Op(op) => feed_ops::run(op, stores, http).into_notice(),
         BrowseRequest::Directory(_)
         | BrowseRequest::Feeds
         | BrowseRequest::Episodes { .. }
         | BrowseRequest::Stations
         | BrowseRequest::CollectTree { .. } => Err("not a mutation".to_owned()),
     }
-}
-
-/// The worker's HTTP service, built on the first request that needs one
-/// and kept for the thread's lifetime. A failure to start is this request's
-/// error; the next request tries again.
-fn http_service(slot: &mut Option<Arc<HttpService>>) -> Result<Arc<HttpService>, String> {
-    if let Some(service) = slot {
-        return Ok(Arc::clone(service));
-    }
-    let service = HttpService::spawn(Limits::default()).map_err(|error| error.to_string())?;
-    *slot = Some(Arc::clone(&service));
-    Ok(service)
 }
 
 /// Returns a redacted description of the request for logging, redacting any
@@ -501,16 +413,49 @@ fn describe(request: &BrowseRequest) -> String {
         BrowseRequest::Directory(_) => "Directory".to_string(),
         BrowseRequest::Feeds => "Feeds".to_string(),
         BrowseRequest::Episodes { slug } => format!("Episodes({})", slug),
-        BrowseRequest::Subscribe { url } => format!("Subscribe({})", redact_url(url)),
-        BrowseRequest::Refresh { slug: Some(slug) } => format!("Refresh({})", slug),
-        BrowseRequest::Refresh { slug: None } => "Refresh(all)".to_string(),
-        BrowseRequest::Unsubscribe { slug } => format!("Unsubscribe({})", slug),
         BrowseRequest::Stations => "Stations".to_string(),
+        BrowseRequest::Op(FeedOp::Subscribe { url, .. }) => {
+            format!("Subscribe({})", redact_url(url))
+        }
+        BrowseRequest::Op(FeedOp::Refresh { slug: Some(slug) }) => format!("Refresh({})", slug),
+        BrowseRequest::Op(FeedOp::Refresh { slug: None }) => "Refresh(all)".to_string(),
+        BrowseRequest::Op(FeedOp::Unsubscribe { slug }) => format!("Unsubscribe({})", slug),
         // A station URL can carry userinfo exactly as a feed URL can, so it
         // is redacted here for the same reason `Subscribe` is (§7.2).
-        BrowseRequest::AddStation { url } => format!("AddStation({})", redact_url(url)),
-        BrowseRequest::RemoveStation { slug } => format!("RemoveStation({})", slug),
-        BrowseRequest::ReprobeStation { slug } => format!("ReprobeStation({})", slug),
+        BrowseRequest::Op(FeedOp::AddStation { url }) => {
+            format!("AddStation({})", redact_url(url))
+        }
+        BrowseRequest::Op(FeedOp::RemoveStation { slug }) => format!("RemoveStation({})", slug),
+        BrowseRequest::Op(FeedOp::ReprobeStation { slug }) => {
+            format!("ReprobeStation({})", slug)
+        }
         BrowseRequest::CollectTree { roots, .. } => format!("CollectTree({} roots)", roots.len()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review focus 4: a feed or station URL can carry userinfo or a signed
+    /// query, and the worker's log line must not (§7.2).
+    #[test]
+    fn describe_redacts_feed_and_station_urls() {
+        let url = "https://user:pw@example.org/feed?token=secret".to_string();
+        assert_eq!(
+            describe(&BrowseRequest::Op(FeedOp::Subscribe {
+                url: url.clone(),
+                slug: None,
+            })),
+            "Subscribe(https://example.org/feed)"
+        );
+        assert_eq!(
+            describe(&BrowseRequest::Op(FeedOp::AddStation { url })),
+            "AddStation(https://example.org/feed)"
+        );
+        assert_eq!(
+            describe(&BrowseRequest::Op(FeedOp::Refresh { slug: None })),
+            "Refresh(all)"
+        );
     }
 }

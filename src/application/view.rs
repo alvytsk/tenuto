@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::application::transport::PlaybackPhase;
-use crate::commands::displayable;
 use crate::media::capabilities::SeekSupport;
 use crate::media::display::{display_name, episode_name};
 use crate::media::id::MediaId;
@@ -16,6 +15,7 @@ use crate::playback::command::LoadRequestId;
 use crate::playback::state::PlaybackState;
 use crate::playlist::PlaylistId;
 use crate::queue::{DisplayDuration, QueueEntry, QueueEntryId};
+use crate::telemetry::displayable;
 use crate::volume::Volume;
 
 /// What listening history says about a media, as a row shows it.

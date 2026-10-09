@@ -278,7 +278,7 @@ fn start_runtime(
         persisting,
         clock,
         engine_factory: Box::new(EngineHandle::spawn_for_environment),
-        library: library_stores(),
+        library: LibraryStores::platform().ok(),
         http_limits: Limits::default(),
         metadata_probe: Some(default_probe(hook)),
         hook,
@@ -302,19 +302,6 @@ fn start_runtime(
         runtime.set_status(status);
     }
     runtime
-}
-
-/// The platform's subscription, feed-cache and station stores, or `None`
-/// when there is no platform data directory. Both the runtime and the
-/// browse worker call this, each owning its own stores.
-fn library_stores() -> Option<LibraryStores> {
-    let (subscriptions, cache) = crate::commands::platform_subscription_stores().ok()?;
-    let stations = crate::commands::platform_station_store().ok()?;
-    Some(LibraryStores {
-        subscriptions,
-        cache,
-        stations,
-    })
 }
 
 /// Each change is marked for cleanup as soon as it is made, so a failure
@@ -646,7 +633,7 @@ impl Browsing {
 
     fn request(&mut self, request: BrowseRequest) {
         self.worker
-            .get_or_insert_with(|| BrowseWorker::spawn(library_stores()))
+            .get_or_insert_with(|| BrowseWorker::spawn(LibraryStores::platform().ok()))
             .request(request);
     }
 

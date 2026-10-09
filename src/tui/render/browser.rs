@@ -11,8 +11,8 @@ use ratatui::widgets::{Block, Clear, Widget};
 
 use super::{centered_box, clock, draw_scrollbar, row};
 use crate::application::browse::EntryKind;
-use crate::commands::displayable;
 use crate::media::display::fit_to_width;
+use crate::telemetry::displayable;
 use crate::tui::browser::{BrowserState, BrowserTab, NoticeKind};
 use crate::tui::layout::{inset, take_left, take_right, visible_rows};
 use crate::tui::theme::Theme;

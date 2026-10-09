@@ -68,6 +68,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 **Feed operations below `commands.rs`.**
 - Problem: `commands.rs::run` and `application/browse.rs::mutate` dispatch the same seven arms. The application and TUI import upward from the entry layer: `wait_http`, `report`, `finish_*`, `displayable`, the stores. "A partial success never exits zero" is encoded as an `Ok` carrying a `followup`, which every caller must know means failure.
 - Direction: a feed-operations module beside `library` returns report text plus a complete-or-incomplete classification. `commands.rs` keeps column layout and exit-code mapping, and `displayable` moves down a layer. The §4 component table needs revising, because `commands` stops deciding completeness.
+- Status: shipped (C). `application::feed_ops` runs every feed and station mutation for both front ends and returns the report text with a complete-or-incomplete outcome; `commands` keeps the listing columns and maps the outcome to the exit status. `displayable` lives in `telemetry` and the platform stores come from `LibraryStores::platform`. `tests/m9_layering.rs` has no exceptions (`docs/m9-c-acceptance.md`).
 
 **`play` over `PlayerRuntime`.** Worth exploring after the M9.2 mirror work.
 - Direction: `tenuto play` becomes a one-entry front end over the runtime, and `LoadTarget::Legacy` retires.

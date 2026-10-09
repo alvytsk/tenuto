@@ -6,8 +6,10 @@
 //! those values into the columns §6.1 specifies and into the `Err` that
 //! §6.4's "a partial failure cannot exit successfully" requires. The split
 //! is what lets M5 reuse the library with a different presentation, and what
-//! keeps `block_on` out of `library`. `wait_http` is shared with the browse
-//! worker; the artwork worker blocks on its own (architecture §5).
+//! keeps `block_on` out of `library`. The operations themselves, and the
+//! one synchronous bridge into the runtime, are
+//! [`crate::application::feed_ops`]'s; the artwork worker blocks on its own
+//! (architecture §5).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,22 +17,15 @@ use std::sync::Arc;
 
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::application::feed_ops::{self, ABSENT, FeedOp, Report};
+use crate::application::runtime::LibraryStores;
 use crate::cli::CliCommand;
 use crate::clock::SystemClock;
-use crate::feed::cache::CacheStore;
 use crate::feed::error::FeedError;
-use crate::http::limits::Limits;
-use crate::http::service::HttpService;
-use crate::http::source::StationIdentity;
-use crate::library::{
-    AddStationOutcome, EpisodeRow, FeedSummary, FollowupStep, Progress, RefreshOutcome,
-    RemoveStationOutcome, SubscribeOutcome, UnsubscribeOutcome,
-};
+use crate::library::{EpisodeRow, FeedSummary, Progress};
 use crate::persistence::PersistenceError;
 use crate::persistence::store::StateStore;
-use crate::station::store::StationStore;
-use crate::subscription::store::SubscriptionStore;
-use crate::telemetry::redact_url;
+use crate::telemetry::displayable;
 
 /// Runs one feed command to completion.
 ///
@@ -42,7 +37,11 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
     let mut out = std::io::stdout().lock();
     let outcome = match command {
         CliCommand::Feeds => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             write_feeds(&mut out, &crate::library::list_feeds(&subs, &cache)?)
         }
         CliCommand::Episodes {
@@ -50,7 +49,11 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
             limit,
             reverse,
         } => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             // Read before listing, and surfaced rather than defaulted: a
             // state file that cannot be read is not "nothing has played",
             // and printing every episode as unplayed would misreport a
@@ -63,40 +66,9 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
             let rows = if reverse { reversed(rows, limit) } else { rows };
             write_episodes(&mut out, &rows)
         }
-        CliCommand::Subscribe { url, slug } => {
-            let (subs, cache) = platform_subscription_stores()?;
-            let service = HttpService::spawn(Limits::default())?;
-            let outcome = wait_http(
-                &service,
-                crate::library::subscribe(&service, &subs, &cache, &url, slug.as_deref()),
-            )?;
-            finish_subscribe(&mut out, outcome)
-        }
-        CliCommand::Unsubscribe { slug } => {
-            // No `HttpService`: removing a subscription is a local edit, and
-            // spawning a runtime for it would be work with nothing to do.
-            let (subs, cache) = platform_subscription_stores()?;
-            let outcome = crate::library::unsubscribe(&subs, &cache, &slug)?;
-            finish_unsubscribe(&mut out, outcome)
-        }
-        CliCommand::Refresh { slug: Some(slug) } => {
-            let (subs, cache) = platform_subscription_stores()?;
-            let service = HttpService::spawn(Limits::default())?;
-            let outcome = wait_http(
-                &service,
-                crate::library::refresh(&service, &subs, &cache, &slug),
-            )?;
-            finish_refresh_one(&mut out, outcome)
-        }
-        CliCommand::Refresh { slug: None } => {
-            let (subs, cache) = platform_subscription_stores()?;
-            let service = HttpService::spawn(Limits::default())?;
-            let outcomes = wait_http(
-                &service,
-                crate::library::refresh_all(&service, &subs, &cache),
-            )?;
-            finish_refresh_batch(&mut out, outcomes)
-        }
+        CliCommand::Subscribe { url, slug } => operate(&mut out, &FeedOp::Subscribe { url, slug })?,
+        CliCommand::Unsubscribe { slug } => operate(&mut out, &FeedOp::Unsubscribe { slug })?,
+        CliCommand::Refresh { slug } => operate(&mut out, &FeedOp::Refresh { slug })?,
         CliCommand::Play { .. } => Err(FeedError::Malformed {
             detail: "play is resolved by the application, not by the command table".to_string(),
         }),
@@ -110,45 +82,6 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
     outcome
 }
 
-/// The subscription and cache stores on this platform's directories.
-///
-/// Neither constructor touches the filesystem: `subscriptions.json` and the
-/// `feeds` directory come into existence on the first write, so a listing on
-/// a machine that has never subscribed creates nothing (§8.4). Checkpoints
-/// are deliberately absent — [`platform_state_store`] is a separate call, so
-/// that a command with no progress column to join against never opens
-/// `state.json` at all.
-pub(crate) fn platform_subscription_stores() -> Result<(SubscriptionStore, CacheStore), FeedError> {
-    let dirs = directories::ProjectDirs::from("", "", "tenuto").ok_or_else(|| {
-        FeedError::SubscriptionsUnreadable {
-            reason: "no platform data directory is available".to_string(),
-        }
-    })?;
-    let clock = Arc::new(SystemClock);
-    Ok((
-        SubscriptionStore::new(dirs.data_dir().join("subscriptions.json"), clock),
-        CacheStore::new(dirs.cache_dir().join("feeds")),
-    ))
-}
-
-/// The saved-station store on this platform's directory (M7.1 design doc §4,
-/// §6), at `stations.json` beside `subscriptions.json` in the same
-/// `data_dir`. A separate lookup from [`platform_subscription_stores`]
-/// rather than a third element of its tuple: every one of that function's
-/// callers is a feed command with no use for a station store, and widening
-/// its return type would hand each of them a store they never touch.
-pub(crate) fn platform_station_store() -> Result<StationStore, FeedError> {
-    let dirs = directories::ProjectDirs::from("", "", "tenuto").ok_or_else(|| {
-        FeedError::StationsUnreadable {
-            reason: "no platform data directory is available".to_string(),
-        }
-    })?;
-    Ok(StationStore::new(
-        dirs.data_dir().join("stations.json"),
-        Arc::new(SystemClock),
-    ))
-}
-
 /// The checkpoint store, on the same path playback itself uses —
 /// [`StateStore::platform_path`] stays the one discovery point for it (§13).
 pub(crate) fn platform_state_store() -> Result<StateStore, FeedError> {
@@ -156,15 +89,6 @@ pub(crate) fn platform_state_store() -> Result<StateStore, FeedError> {
         StateStore::platform_path()?,
         Arc::new(SystemClock),
     ))
-}
-
-/// The shared synchronous bridge (§6.6). Every network command enters the
-/// runtime here and nowhere else, and the browse worker's mutations
-/// ([`crate::application::browse`]) use it too: `library.rs` stays free of
-/// `block_on`, and `run_resolved`'s decoder path never enters a runtime at
-/// all.
-pub(crate) fn wait_http<F: std::future::Future>(service: &HttpService, future: F) -> F::Output {
-    service.handle().block_on(future)
 }
 
 /// A command that could not report its own result has not succeeded, however
@@ -177,30 +101,34 @@ fn stdout_failure(source: std::io::Error) -> FeedError {
     })
 }
 
-/// The CLI's report of `outcome` as text, for a front end that shows it
-/// instead of printing it: `Ok` is what stdout would have carried, `Err`
-/// that text (when any) followed by the error the exit status would have
-/// named. Trailing whitespace is dropped; the TUI splits on the rest.
-pub(crate) fn report<T>(
-    finish: impl FnOnce(&mut dyn Write, T) -> Result<(), FeedError>,
-    outcome: T,
-) -> Result<String, String> {
-    let mut out = Vec::new();
-    let status = finish(&mut out, outcome);
-    let text = String::from_utf8_lossy(&out).trim_end().to_owned();
-    match status {
-        Ok(()) => Ok(text),
-        Err(error) if text.is_empty() => Err(error.to_string()),
-        Err(error) => Err(format!("{text}\n{error}")),
+/// A feed operation, printed. The outer `Err` is an operation that failed
+/// before it had anything to print, as a store, spawn or library call can:
+/// it returns before the final flush, as it always has. The inner result is
+/// the printed report's: a stdout failure outranks the operation's own
+/// error, and the final flush outranks both.
+fn operate(out: &mut dyn Write, op: &FeedOp) -> Result<Result<(), FeedError>, FeedError> {
+    // Held until the report is written: dropping the last service shuts its
+    // runtime down, which waits for blocking tasks such as a slow DNS lookup,
+    // and that wait belongs after the output, not before it.
+    let mut http = None;
+    let report = feed_ops::run(op, &LibraryStores::platform()?, &mut http);
+    if report.text.is_empty()
+        && let Err(error) = report.outcome
+    {
+        return Err(error);
     }
+    Ok(write_report(out, report))
+}
+
+/// The report's text on stdout, then its outcome. A command that could not
+/// report its own result has not succeeded, however far its work got.
+fn write_report(out: &mut dyn Write, report: Report) -> Result<(), FeedError> {
+    out.write_all(report.text.as_bytes())
+        .map_err(stdout_failure)
+        .and(report.outcome)
 }
 
 // --- Formatting (§6.1, §6.2) -----------------------------------------
-
-/// The em dash every absent value prints: no episode count, no publication
-/// date, no checkpoint. One spelling, so a reader never has to decide
-/// whether two blanks mean the same thing.
-const ABSENT: &str = "—";
 
 /// `H:MM:SS` only once there are hours to show, `M:SS` otherwise — a
 /// leading `0:` on every podcast position would be noise, and a bare `MM:SS`
@@ -263,13 +191,6 @@ fn date_text(value: OffsetDateTime) -> String {
     )
 }
 
-/// Feed-supplied text reaching a terminal, made safe **at the formatting
-/// boundary only**: the cached title and the identity derived from it are
-/// untouched, so nothing here changes what a later refresh compares against.
-/// A newline would break the row layout and an escape sequence would reach
-/// the terminal, so every character that can do either becomes a visible
-/// escape; all the rest — Cyrillic, CJK, emoji — pass through exactly as
-/// stored, since transliterating a title would make it someone else's title.
 /// The listing in reverse, cut to `limit` from the end.
 ///
 /// §1.2 keeps feed document order and never renumbers, so this changes only
@@ -282,51 +203,6 @@ fn reversed(mut rows: Vec<EpisodeRow>, limit: Option<std::num::NonZeroUsize>) ->
     rows.reverse();
     rows.truncate(limit.map_or(usize::MAX, std::num::NonZeroUsize::get));
     rows
-}
-
-pub(crate) fn displayable(text: &str) -> String {
-    if !text.chars().any(needs_escape) {
-        return text.to_string();
-    }
-    text.chars()
-        .map(|value| match value {
-            '\n' => r"\n".to_string(),
-            '\r' => r"\r".to_string(),
-            '\t' => r"\t".to_string(),
-            other if needs_escape(other) => format!("\\u{{{:x}}}", other as u32),
-            other => other.to_string(),
-        })
-        .collect()
-}
-
-/// What a title may not carry into a row.
-///
-/// `char::is_control` alone is not the whole set: U+2028 LINE SEPARATOR and
-/// U+2029 PARAGRAPH SEPARATOR are line breaks that it does not classify as
-/// control characters, and the bidi overrides U+202A–U+202E can reorder
-/// everything rendered after them — including the columns beside the title
-/// — without being line breaks at all. Neither are the bidi **isolates**
-/// U+2066–U+2069 (LRI/RLI/FSI/PDI): they reorder the same way the overrides
-/// do, and are the half of the Trojan Source technique that survives in
-/// modern Unicode, since isolates were added specifically so an override
-/// could not leak its reordering past its own text — the isolate itself
-/// still reorders whatever it wraps. U+200E/U+200F (LRM/RLM) and U+061C
-/// (ALM) are direction marks rather than reordering ranges, but they are
-/// invisible and feed-controlled, so they are escaped alongside the rest
-/// for the same reason. A feed title is untrusted input on its way to a
-/// terminal, so every one of these groups is escaped rather than displayed.
-fn needs_escape(value: char) -> bool {
-    value.is_control()
-        || matches!(
-            value,
-            '\u{200e}'
-                | '\u{200f}'
-                | '\u{061c}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
 }
 
 /// A title cell. An item with no title at all still has to occupy its
@@ -478,281 +354,6 @@ fn write_row(out: &mut dyn Write, cells: &[String]) -> Result<(), FeedError> {
 
 // --- Outcomes and exit status (§5.3, §6.4) ---------------------------
 
-/// One refresh outcome, in full: what the fetch found, what committed, and —
-/// where a §5.3 second step failed — exactly which step it was and why.
-///
-/// `url_moved` is redacted again here even though [`crate::library`] already
-/// supplied redacted text: this is the presentation boundary, and a
-/// redaction that depends on every producer having remembered to apply it is
-/// one edit away from not holding.
-fn write_refresh(out: &mut dyn Write, outcome: &RefreshOutcome) -> Result<(), FeedError> {
-    let (slug, url_moved, followup) = match outcome {
-        RefreshOutcome::Updated {
-            slug,
-            retained,
-            skipped,
-            url_moved,
-            followup,
-        } => {
-            writeln!(
-                out,
-                "{slug}: updated, {retained} episodes retained, {skipped} skipped"
-            )
-            .map_err(stdout_failure)?;
-            (slug, url_moved, followup)
-        }
-        RefreshOutcome::Unchanged {
-            slug,
-            url_moved,
-            followup,
-        } => {
-            writeln!(out, "{slug}: unchanged").map_err(stdout_failure)?;
-            (slug, url_moved, followup)
-        }
-        RefreshOutcome::Failed { slug, error } => {
-            // Nothing committed, so there is no redirect to report and no
-            // followup to name: the fetch, the parse or the cache write is
-            // the whole story.
-            return writeln!(out, "{slug}: failed: {error}").map_err(stdout_failure);
-        }
-    };
-
-    if let Some(moved) = url_moved {
-        writeln!(out, "{slug}: feed URL moved to {}", redact_url(moved)).map_err(stdout_failure)?;
-    }
-    if let Some(failure) = followup {
-        // The cache is the first half of every refresh commit (§5.3), so it
-        // is what did land whichever step failed after it.
-        let detail = match (failure.step, url_moved.is_some()) {
-            (FollowupStep::SaveSubscription, true) => {
-                "the redirected feed URL could not be recorded"
-            }
-            (FollowupStep::SaveSubscription, false) => {
-                "the feed's changed title could not be recorded"
-            }
-            (FollowupStep::RemoveCache, _) => "a stale cache entry could not be removed",
-        };
-        writeln!(
-            out,
-            "{slug}: the episode cache was saved, but {detail}: {}",
-            failure.error
-        )
-        .map_err(stdout_failure)?;
-    }
-    Ok(())
-}
-
-/// `tenuto refresh` with no slug (§6.4): every feed is printed, and only
-/// then does the count of feeds that did not complete decide the exit
-/// status. One bad feed neither hides the others nor exits zero.
-pub(crate) fn finish_refresh_batch(
-    out: &mut dyn Write,
-    outcomes: Vec<RefreshOutcome>,
-) -> Result<(), FeedError> {
-    let total = outcomes.len();
-    let mut failed = 0;
-    for outcome in outcomes {
-        let bad = match &outcome {
-            RefreshOutcome::Failed { .. } => true,
-            RefreshOutcome::Updated { followup, .. }
-            | RefreshOutcome::Unchanged { followup, .. } => followup.is_some(),
-        };
-        write_refresh(out, &outcome)?;
-        failed += usize::from(bad);
-    }
-    if failed == 0 {
-        Ok(())
-    } else {
-        Err(FeedError::BatchIncomplete { failed, total })
-    }
-}
-
-/// `tenuto refresh <slug>` (§6.4): the concrete error, after printing what
-/// did commit. A batch count would tell a single-feed caller nothing it did
-/// not already know.
-pub(crate) fn finish_refresh_one(
-    out: &mut dyn Write,
-    outcome: RefreshOutcome,
-) -> Result<(), FeedError> {
-    write_refresh(out, &outcome)?;
-    match outcome {
-        RefreshOutcome::Failed { error, .. } => Err(error),
-        RefreshOutcome::Updated { followup, .. } | RefreshOutcome::Unchanged { followup, .. } => {
-            followup.map_or(Ok(()), |failure| Err(failure.error))
-        }
-    }
-}
-
-/// `tenuto subscribe` (§5.3, §6.4). The commit order is cache first,
-/// subscription second, so the only step that can fail after something
-/// landed is the subscription — and when it does, the cache file is left
-/// behind unreferenced and *nothing is subscribed*. Reporting that as a
-/// subscription would send the listener looking for a feed that `tenuto
-/// feeds` will not show.
-pub(crate) fn finish_subscribe(
-    out: &mut dyn Write,
-    outcome: SubscribeOutcome,
-) -> Result<(), FeedError> {
-    let SubscribeOutcome {
-        slug,
-        retained,
-        skipped,
-        followup,
-        ..
-    } = outcome;
-    let Some(failure) = followup else {
-        return writeln!(
-            out,
-            "{slug}: subscribed, {retained} episodes retained, {skipped} skipped"
-        )
-        .map_err(stdout_failure);
-    };
-    writeln!(
-        out,
-        "{slug}: {retained} episodes were cached, but the subscription itself \
-         could not be saved; nothing is subscribed: {}",
-        failure.error
-    )
-    .map_err(stdout_failure)?;
-    Err(failure.error)
-}
-
-/// `tenuto unsubscribe` (§5.3, §6.4). The subscription is removed first,
-/// so a followup failure means the subscription is genuinely gone and only
-/// its cache file remains — recoverable, and reported rather than silently
-/// left behind.
-pub(crate) fn finish_unsubscribe(
-    out: &mut dyn Write,
-    outcome: UnsubscribeOutcome,
-) -> Result<(), FeedError> {
-    let UnsubscribeOutcome { slug, followup } = outcome;
-    let Some(failure) = followup else {
-        return writeln!(out, "{slug}: unsubscribed").map_err(stdout_failure);
-    };
-    writeln!(
-        out,
-        "{slug}: the subscription was removed, but its cached episodes \
-         could not be deleted: {}",
-        failure.error
-    )
-    .map_err(stdout_failure)?;
-    Err(failure.error)
-}
-
-/// A verified station's identity, on one line: name, genre and bitrate,
-/// joined by ` · ` and each omitted when absent, matching the Radio tab's
-/// own row rendering (M7.1 design doc §7). `ABSENT` when nothing came back at
-/// all — legitimate for a station whose ICY headers carry neither a name
-/// nor a bitrate (§4).
-fn station_identity_text(identity: &StationIdentity) -> String {
-    let mut parts = Vec::new();
-    if let Some(name) = &identity.name {
-        parts.push(name.clone());
-    }
-    if let Some(genre) = &identity.genre {
-        parts.push(genre.clone());
-    }
-    if let Some(bitrate) = identity.bitrate_kbps {
-        parts.push(format!("{bitrate} kbps"));
-    }
-    if parts.is_empty() {
-        ABSENT.to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
-/// `AddStation`'s and `ReprobeStation`'s shared report (M7.1 design doc §10),
-/// `action` naming which one so the same taxonomy reads as "added" or
-/// "re-probed" rather than composing two near-identical formatters.
-fn write_station_probe(
-    out: &mut dyn Write,
-    outcome: AddStationOutcome,
-    action: &str,
-) -> Result<(), FeedError> {
-    match outcome {
-        AddStationOutcome::Verified { slug, identity } => writeln!(
-            out,
-            "{slug}: {action}, verified — {}",
-            station_identity_text(&identity)
-        )
-        .map_err(stdout_failure),
-        AddStationOutcome::Unverified { slug, reason } => {
-            writeln!(out, "{slug}: {action}, unverified: {reason}").map_err(stdout_failure)
-        }
-        // A duplicate add resolves to the station already saved (§10) and
-        // is not itself an error.
-        AddStationOutcome::AlreadySaved {
-            slug,
-            identity,
-            reprobe_failure: None,
-        } => writeln!(
-            out,
-            "{slug}: already saved, re-probed — {}",
-            identity
-                .as_ref()
-                .map_or_else(|| ABSENT.to_string(), station_identity_text)
-        )
-        .map_err(stdout_failure),
-        // A failed implicit re-probe is reported in the same line rather
-        // than swallowed, exactly as an explicit `ReprobeStation`'s failure
-        // is (`AddStationOutcome::AlreadySaved`'s own doc comment explains
-        // why this field exists at all) — and, like `finish_subscribe` and
-        // `finish_unsubscribe`'s own partial-failure arms, the text is
-        // written and *then* the call still returns `Err`. Returning `Ok`
-        // here would undo that fix at one remove: the reason would sit in
-        // the string, but `report()` would call it a success, the tracing
-        // line would drop its `failed:` prefix, and the browser would paint
-        // it with `NoticeKind::Ok` instead of the error colour.
-        AddStationOutcome::AlreadySaved {
-            slug,
-            identity,
-            reprobe_failure: Some(reason),
-        } => {
-            writeln!(
-                out,
-                "{slug}: already saved; re-probe failed: {reason} (last known: {})",
-                identity
-                    .as_ref()
-                    .map_or_else(|| ABSENT.to_string(), station_identity_text)
-            )
-            .map_err(stdout_failure)?;
-            Err(FeedError::StationsUnreadable { reason })
-        }
-    }
-}
-
-/// `AddStation` (M7.1 design doc §6, §10).
-pub(crate) fn finish_add_station(
-    out: &mut dyn Write,
-    outcome: AddStationOutcome,
-) -> Result<(), FeedError> {
-    write_station_probe(out, outcome, "added")
-}
-
-/// `ReprobeStation` (M7.1 design doc §6). [`reprobe_station`] only ever
-/// produces [`AddStationOutcome::Verified`] on success — a station cannot
-/// re-probe its way into being a duplicate of itself — but the outcome type
-/// is shared with `AddStation`, so every arm is still handled.
-///
-/// [`reprobe_station`]: crate::library::reprobe_station
-pub(crate) fn finish_reprobe_station(
-    out: &mut dyn Write,
-    outcome: AddStationOutcome,
-) -> Result<(), FeedError> {
-    write_station_probe(out, outcome, "re-probed")
-}
-
-/// `RemoveStation` (M7.1 design doc §6): a local edit, always successful once
-/// [`crate::library::remove_station`] returns `Ok`.
-pub(crate) fn finish_remove_station(
-    out: &mut dyn Write,
-    outcome: RemoveStationOutcome,
-) -> Result<(), FeedError> {
-    let RemoveStationOutcome { slug } = outcome;
-    writeln!(out, "{slug}: removed").map_err(stdout_failure)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,10 +361,7 @@ mod tests {
 
     use time::{Date, Month, OffsetDateTime, UtcOffset};
 
-    use crate::library::{
-        EpisodeRow, FeedSummary, FollowupFailure, FollowupStep, Progress, RefreshOutcome,
-        SubscribeOutcome, UnsubscribeOutcome,
-    };
+    use crate::library::{EpisodeRow, FeedSummary, Progress};
     use crate::media::id::{MediaId, NormalizedUrl};
 
     type Fallible = Result<(), Box<dyn std::error::Error>>;
@@ -1126,381 +724,6 @@ mod tests {
         Ok(())
     }
 
-    fn saved(error: FeedError) -> Option<FollowupFailure> {
-        Some(FollowupFailure {
-            step: FollowupStep::SaveSubscription,
-            error,
-        })
-    }
-
-    fn unreadable() -> FeedError {
-        FeedError::SubscriptionsUnreadable {
-            reason: "the disk is full".to_string(),
-        }
-    }
-
-    #[test]
-    fn a_clean_refresh_reports_what_changed() -> Fallible {
-        let mut out = Vec::new();
-        write_refresh(
-            &mut out,
-            &RefreshOutcome::Updated {
-                slug: "radio-t".to_string(),
-                retained: 412,
-                skipped: 3,
-                url_moved: None,
-                followup: None,
-            },
-        )?;
-        assert_eq!(
-            text(out)?,
-            "radio-t: updated, 412 episodes retained, 3 skipped\n"
-        );
-
-        let mut out = Vec::new();
-        write_refresh(
-            &mut out,
-            &RefreshOutcome::Unchanged {
-                slug: "radio-t".to_string(),
-                url_moved: None,
-                followup: None,
-            },
-        )?;
-        assert_eq!(text(out)?, "radio-t: unchanged\n");
-        Ok(())
-    }
-
-    /// §6.6: a 304 can still follow a permanent redirect, and that commit can
-    /// fail on its own. The redirect is reported, the cause is named, and the
-    /// URL is redacted at presentation even though the library already
-    /// supplied safe text.
-    #[test]
-    fn a_revalidated_feed_reports_a_failed_redirect_commit() -> Fallible {
-        let mut out = Vec::new();
-        write_refresh(
-            &mut out,
-            &RefreshOutcome::Unchanged {
-                slug: "radio-t".to_string(),
-                url_moved: Some("https://example.org/new?token=secret".to_string()),
-                followup: saved(unreadable()),
-            },
-        )?;
-        let rendered = text(out)?;
-        assert!(rendered.starts_with("radio-t: unchanged\n"), "{rendered}");
-        assert!(rendered.contains("https://example.org/new"), "{rendered}");
-        assert!(!rendered.contains("secret"), "{rendered}");
-        assert!(
-            rendered.contains("the redirected feed URL could not be recorded"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("the disk is full"), "{rendered}");
-        Ok(())
-    }
-
-    /// Without a redirect the same step means the feed's own metadata
-    /// changed, and saying "redirect" there would describe something that
-    /// did not happen.
-    #[test]
-    fn a_failed_metadata_commit_does_not_claim_a_redirect() -> Fallible {
-        let mut out = Vec::new();
-        write_refresh(
-            &mut out,
-            &RefreshOutcome::Updated {
-                slug: "radio-t".to_string(),
-                retained: 5,
-                skipped: 0,
-                url_moved: None,
-                followup: saved(unreadable()),
-            },
-        )?;
-        let rendered = text(out)?;
-        assert!(!rendered.contains("redirect"), "{rendered}");
-        assert!(
-            rendered.contains("the feed's changed title could not be recorded"),
-            "{rendered}"
-        );
-        Ok(())
-    }
-
-    /// §6.4: one bad feed neither hides the others nor exits zero. Every
-    /// outcome is printed before the batch error is returned, and the error
-    /// counts the feeds rather than naming one.
-    #[test]
-    fn a_mixed_batch_prints_everything_then_reports_the_count() -> Fallible {
-        let outcomes = vec![
-            RefreshOutcome::Updated {
-                slug: "radio-t".to_string(),
-                retained: 2,
-                skipped: 0,
-                url_moved: None,
-                followup: None,
-            },
-            RefreshOutcome::Failed {
-                slug: "sysdesign".to_string(),
-                error: FeedError::UnsupportedFormat,
-            },
-            RefreshOutcome::Unchanged {
-                slug: "late".to_string(),
-                url_moved: None,
-                followup: saved(unreadable()),
-            },
-        ];
-        let mut out = Vec::new();
-        let error = finish_refresh_batch(&mut out, outcomes)
-            .err()
-            .ok_or("a batch with two bad feeds must not succeed")?;
-        let rendered = text(out)?;
-        assert!(rendered.contains("radio-t: updated"), "{rendered}");
-        assert!(rendered.contains("sysdesign: failed"), "{rendered}");
-        assert!(rendered.contains("late: unchanged"), "{rendered}");
-        assert!(
-            matches!(
-                error,
-                FeedError::BatchIncomplete {
-                    failed: 2,
-                    total: 3
-                }
-            ),
-            "{error:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn a_clean_batch_exits_zero() -> Fallible {
-        let mut out = Vec::new();
-        finish_refresh_batch(
-            &mut out,
-            vec![RefreshOutcome::Unchanged {
-                slug: "radio-t".to_string(),
-                url_moved: None,
-                followup: None,
-            }],
-        )?;
-        assert_eq!(text(out)?, "radio-t: unchanged\n");
-
-        let mut empty = Vec::new();
-        finish_refresh_batch(&mut empty, Vec::new())?;
-        assert!(empty.is_empty());
-        Ok(())
-    }
-
-    /// §6.4: a single-feed command returns the concrete error — not a batch
-    /// count — after printing what did commit.
-    #[test]
-    fn one_feed_returns_its_own_error_after_printing() -> Fallible {
-        let mut out = Vec::new();
-        let error = finish_refresh_one(
-            &mut out,
-            RefreshOutcome::Failed {
-                slug: "radio-t".to_string(),
-                error: FeedError::UnsupportedFormat,
-            },
-        )
-        .err()
-        .ok_or("a failed refresh must not succeed")?;
-        assert!(text(out)?.contains("radio-t: failed"), "nothing printed");
-        assert!(matches!(error, FeedError::UnsupportedFormat), "{error:?}");
-
-        let mut out = Vec::new();
-        let error = finish_refresh_one(
-            &mut out,
-            RefreshOutcome::Updated {
-                slug: "radio-t".to_string(),
-                retained: 2,
-                skipped: 0,
-                url_moved: None,
-                followup: saved(unreadable()),
-            },
-        )
-        .err()
-        .ok_or("a followup failure must not succeed")?;
-        let rendered = text(out)?;
-        assert!(
-            rendered.contains("radio-t: updated, 2 episodes"),
-            "{rendered}"
-        );
-        assert!(
-            matches!(error, FeedError::SubscriptionsUnreadable { .. }),
-            "{error:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn subscribing_prints_its_slug_and_counts() -> Fallible {
-        let mut out = Vec::new();
-        finish_subscribe(
-            &mut out,
-            SubscribeOutcome {
-                slug: "radio-t".to_string(),
-                feed_id: crate::media::id::FeedId::new(
-                    "0123456789abcdef0123456789abcdef".to_string(),
-                )?,
-                title: Some("Радио-Т".to_string()),
-                retained: 412,
-                skipped: 3,
-                followup: None,
-            },
-        )?;
-        assert_eq!(
-            text(out)?,
-            "radio-t: subscribed, 412 episodes retained, 3 skipped\n"
-        );
-        Ok(())
-    }
-
-    /// §5.3's commit order is cache first, subscription second, so a
-    /// followup failure here means nothing is subscribed — and the line must
-    /// say so rather than reporting a subscription that does not exist.
-    #[test]
-    fn a_half_committed_subscribe_never_claims_success() -> Fallible {
-        let mut out = Vec::new();
-        let error = finish_subscribe(
-            &mut out,
-            SubscribeOutcome {
-                slug: "radio-t".to_string(),
-                feed_id: crate::media::id::FeedId::new(
-                    "0123456789abcdef0123456789abcdef".to_string(),
-                )?,
-                title: None,
-                retained: 412,
-                skipped: 0,
-                followup: saved(unreadable()),
-            },
-        )
-        .err()
-        .ok_or("a half-committed subscribe must not succeed")?;
-        let rendered = text(out)?;
-        assert!(!rendered.contains("radio-t: subscribed,"), "{rendered}");
-        assert!(rendered.contains("nothing is subscribed"), "{rendered}");
-        assert!(rendered.contains("412 episodes were cached"), "{rendered}");
-        assert!(
-            matches!(error, FeedError::SubscriptionsUnreadable { .. }),
-            "{error:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn unsubscribing_reports_a_cleanup_failure_as_a_failure() -> Fallible {
-        let mut out = Vec::new();
-        finish_unsubscribe(
-            &mut out,
-            UnsubscribeOutcome {
-                slug: "radio-t".to_string(),
-                followup: None,
-            },
-        )?;
-        assert_eq!(text(out)?, "radio-t: unsubscribed\n");
-
-        let mut out = Vec::new();
-        let error = finish_unsubscribe(
-            &mut out,
-            UnsubscribeOutcome {
-                slug: "radio-t".to_string(),
-                followup: Some(FollowupFailure {
-                    step: FollowupStep::RemoveCache,
-                    error: FeedError::UnsupportedFormat,
-                }),
-            },
-        )
-        .err()
-        .ok_or("a failed cleanup must not succeed")?;
-        let rendered = text(out)?;
-        assert!(
-            rendered.contains("the subscription was removed"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("cached episodes could not be deleted"),
-            "{rendered}"
-        );
-        assert!(matches!(error, FeedError::UnsupportedFormat), "{error:?}");
-        Ok(())
-    }
-
-    #[test]
-    fn adding_a_verified_station_prints_its_identity() -> Fallible {
-        let mut out = Vec::new();
-        finish_add_station(
-            &mut out,
-            AddStationOutcome::Verified {
-                slug: "test-radio".to_string(),
-                identity: StationIdentity {
-                    name: Some("Test Radio".to_string()),
-                    genre: Some("Lofi".to_string()),
-                    bitrate_kbps: Some(128),
-                    logo: None,
-                },
-            },
-        )?;
-        assert_eq!(
-            text(out)?,
-            "test-radio: added, verified — Test Radio · Lofi · 128 kbps\n"
-        );
-        Ok(())
-    }
-
-    /// `AddStationOutcome::AlreadySaved::reprobe_failure` exists so that a
-    /// duplicate add's implicit re-probe failure reaches the caller instead
-    /// of being swallowed by the "already saved" framing (M7.1 §6, §10); this
-    /// is the presentation-layer half of that fix — the reason must show up
-    /// in the printed line, not just in the value passed to `finish_add_station`.
-    #[test]
-    fn a_duplicate_adds_failed_reprobe_is_not_swallowed() -> Fallible {
-        let mut out = Vec::new();
-        let error = finish_add_station(
-            &mut out,
-            AddStationOutcome::AlreadySaved {
-                slug: "test-radio".to_string(),
-                identity: Some(StationIdentity {
-                    name: Some("Test Radio".to_string()),
-                    genre: None,
-                    bitrate_kbps: None,
-                    logo: None,
-                }),
-                reprobe_failure: Some("connection reset".to_string()),
-            },
-        )
-        .err()
-        .ok_or("a failed implicit re-probe must not report success")?;
-        // Not just the text: `report()` (`src/commands.rs`) only calls
-        // `tracing::info!` with a `failed:` prefix, and the browser
-        // (`src/tui/browser.rs`) only paints `NoticeKind::Err`, when this
-        // call returns `Err` — exactly like `finish_subscribe`'s and
-        // `finish_unsubscribe`'s own partial-failure arms. A `contains()`
-        // check on the string alone would pass even if this returned `Ok`.
-        assert!(
-            matches!(error, FeedError::StationsUnreadable { .. }),
-            "{error:?}"
-        );
-        let rendered = text(out)?;
-        assert!(rendered.contains("already saved"), "{rendered}");
-        assert!(
-            rendered.contains("re-probe failed: connection reset"),
-            "the re-probe failure must be surfaced, not swallowed: {rendered}"
-        );
-        assert!(
-            rendered.contains("Test Radio"),
-            "the station's prior identity is still shown: {rendered}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn removing_a_station_prints_its_slug() -> Fallible {
-        let mut out = Vec::new();
-        finish_remove_station(
-            &mut out,
-            RemoveStationOutcome {
-                slug: "test-radio".to_string(),
-            },
-        )?;
-        assert_eq!(text(out)?, "test-radio: removed\n");
-        Ok(())
-    }
-
     /// `play` is dispatched by `app::run`, which resolves both of its forms
     /// itself. If it ever reaches the command table anyway, the refusal must
     /// not echo the argument back: a `play` source can be a URL, and §7.2
@@ -1551,15 +774,20 @@ mod tests {
             other => return Err(format!("expected an Io failure, got {other:?}").into()),
         }
 
-        assert!(
-            finish_unsubscribe(
-                &mut Broken,
-                UnsubscribeOutcome {
-                    slug: "radio-t".to_string(),
-                    followup: None,
-                },
-            )
-            .is_err()
+        // A report whose operation also failed: the stdout failure is what
+        // the command reports, as it always was.
+        let error = write_report(
+            &mut Broken,
+            Report {
+                text: "radio-t: unsubscribed\n".to_string(),
+                outcome: Err(FeedError::UnsupportedFormat),
+            },
+        )
+        .err()
+        .ok_or("a broken writer must not report success")?;
+        assert_eq!(
+            error.to_string(),
+            "cannot write command output to \"<stdout>\""
         );
         Ok(())
     }

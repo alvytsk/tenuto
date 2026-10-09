@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use crossbeam_channel::Sender;
 
-use crate::commands::displayable;
 use crate::lifecycle::terminal::TerminalCleanup;
+use crate::telemetry::displayable;
 
 thread_local! {
     /// Whether the current thread is inside a [`run_contained`] job. Read by
@@ -250,7 +250,7 @@ fn panic_message(info: &panic::PanicHookInfo<'_>) -> String {
 }
 
 /// The panic message, escaped the same way a feed-supplied title is
-/// (`commands::displayable`) and cut to 512 characters, so a pathological
+/// (`telemetry::displayable`) and cut to 512 characters, so a pathological
 /// or adversarial payload cannot inject terminal control sequences into a
 /// log file or grow it unboundedly.
 fn sanitized_panic_message(info: &panic::PanicHookInfo<'_>) -> String {

@@ -65,9 +65,8 @@ const HELP_LINE: &str =
 /// entering the shared playback body: one positional through the existing
 /// [`resolve_source`], two through [`crate::library::resolve_episode`].
 /// `resolve_source` itself is unchanged; it gained a sibling. Everything
-/// else dispatches to [`crate::commands`], which owns every line this
-/// program prints for a feed command, the one synchronous bridge into the
-/// HTTP runtime, and the exit status a partial failure has to carry.
+/// else dispatches to [`crate::commands`], which prints every line a feed
+/// command reports and maps a partial failure to a failing exit status.
 pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
     // A bare `tenuto` opens the player. The defaults are the ones
     // `tenuto tui` applies when neither flag is given.
@@ -100,7 +99,11 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
             // No `EngineHandle`, no `AudioOutput` and no `HttpService` exist
             // yet, which is what keeps `NotPlayable` (§6.4) a resolution
             // failure rather than a playback one.
-            let (subs, cache) = crate::commands::platform_subscription_stores()?;
+            let crate::application::runtime::LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = crate::application::runtime::LibraryStores::platform()?;
             let (media, location) =
                 crate::library::resolve_episode(&subs, &cache, &slug, index.get())?;
             if probe_only {
@@ -361,7 +364,7 @@ fn run_probe_only(source: &str) -> Result<(), PlaybackError> {
 
     // Decoder metadata is untrusted, local files included: escaped the way
     // playback's status row and the feed listings escape it.
-    let title = crate::commands::displayable(
+    let title = crate::telemetry::displayable(
         prepared
             .source
             .metadata()
