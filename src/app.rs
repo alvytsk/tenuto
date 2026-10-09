@@ -73,8 +73,8 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
     // `tenuto tui` applies when neither flag is given.
     let Some(command) = cli.command else {
         return crate::tui::run(crate::tui::TuiOptions {
-            mouse: cli::MouseMode::default(),
-            artwork: cli::ArtworkMode::default(),
+            mouse: crate::tui::MouseMode::default(),
+            artwork: crate::tui::images::ArtworkMode::default(),
         })
         .map_err(AppError::from);
     };

@@ -23,10 +23,22 @@ use ratatui_image::{Image, Resize};
 
 use crate::artwork::decode::ArtworkError;
 use crate::artwork::default::{CoverKind, default_cover};
-use crate::cli::ArtworkMode;
 use crate::lifecycle::hooks::TestHook;
 use crate::media::id::MediaId;
 use crate::tui::render::CoverWidget;
+
+/// How `tenuto tui` draws cover art: `auto` asks the terminal which image
+/// protocol it supports and falls back to colored half-blocks, `blocks`
+/// always uses half-blocks without asking, and `off` shows only the
+/// placeholder and never loads artwork — not even the built-in covers, so
+/// it stays a mode that puts no image on the screen at all.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum ArtworkMode {
+    #[default]
+    Auto,
+    Blocks,
+    Off,
+}
 
 /// How long `--artwork auto` waits for the terminal to answer its
 /// capability query before settling for half-blocks.

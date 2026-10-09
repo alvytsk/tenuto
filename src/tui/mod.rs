@@ -57,7 +57,6 @@ use crate::application::runtime::{
 };
 use crate::application::view::PlayerView;
 use crate::artwork::worker::{ArtworkWorker, CoverSource, default_loader};
-use crate::cli::{ArtworkMode, MouseMode};
 use crate::clock::{Clock, SystemClock};
 use crate::error::LifecycleError;
 use crate::http::limits::Limits;
@@ -72,7 +71,7 @@ use crate::media::id::MediaId;
 use crate::persistence::store::{LoadOutcome, QueueBackup, StateStore};
 use crate::playback::engine::EngineHandle;
 use crate::tui::browser::{BrowserEffect, BrowserState};
-use crate::tui::images::{CoverCache, failure_status, picker_for, query_terminal};
+use crate::tui::images::{ArtworkMode, CoverCache, failure_status, picker_for, query_terminal};
 use crate::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
 use crate::tui::layout::{regions, tier_for};
 use crate::tui::render::{CoverView, HitMap, Visuals};
@@ -83,6 +82,15 @@ use crate::tui::state::{Overlay, UiState};
 /// runtime again; also the bound on how late a signal or fatal panic is seen.
 const INPUT_POLL: Duration = Duration::from_millis(50);
 const STATE_NOT_SAVED: &str = "This session is not saved";
+
+/// Whether `tenuto tui` captures the mouse. Off leaves the terminal's own
+/// selection and scrolling alone.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum MouseMode {
+    #[default]
+    On,
+    Off,
+}
 
 pub struct TuiOptions {
     pub mouse: MouseMode,

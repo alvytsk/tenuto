@@ -4,7 +4,9 @@
 mod process;
 
 use clap::{CommandFactory, Parser};
-use tenuto::cli::{ArtworkMode, Cli, CliCommand, MouseMode};
+use tenuto::cli::{Cli, CliCommand};
+use tenuto::tui::MouseMode;
+use tenuto::tui::images::ArtworkMode;
 
 /// A bare `tenuto` is no longer a usage error: it resolves to no
 /// subcommand, which `app::run` dispatches to the player.

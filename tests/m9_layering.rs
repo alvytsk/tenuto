@@ -67,9 +67,6 @@ const NAMED_RULES: &[(&str, &str)] = &[
 /// `(file, target module)` pairs excused today. Delete an entry with the
 /// edge it excuses.
 const ALLOWED: &[(&str, &str)] = &[
-    // B: foundation cleanup.
-    ("src/tui/mod.rs", "cli"),
-    ("src/tui/images.rs", "cli"),
     // C: feed operations below `commands`.
     ("src/application/browse.rs", "commands"),
     ("src/application/runtime.rs", "commands"),
