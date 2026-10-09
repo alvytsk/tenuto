@@ -14,9 +14,9 @@ use crate::media::id::MediaId;
 use crate::persistence::model::{PersistedCheckpoint, PersistedState};
 use crate::playback::command::LoadRequestId;
 use crate::playback::state::PlaybackState;
-use crate::playback::volume::Volume;
 use crate::playlist::PlaylistId;
 use crate::queue::{DisplayDuration, QueueEntry, QueueEntryId};
+use crate::volume::Volume;
 
 /// What listening history says about a media, as a row shows it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -255,8 +255,8 @@ fn entry_subtitle(entry: &QueueEntry) -> Option<String> {
 mod tests {
     use super::*;
     use crate::media::id::AbsolutePath;
-    use crate::playback::checkpoint::PlaybackCheckpoint;
     use crate::queue::{DisplayMetadata, NewQueueEntry, QueueSource};
+    use crate::resume::PlaybackCheckpoint;
     use time::OffsetDateTime;
 
     fn checkpoint(

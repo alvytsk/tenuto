@@ -15,8 +15,8 @@ use tenuto::application::view::{
 use tenuto::media::id::{AbsolutePath, MediaId};
 use tenuto::persistence::model::PersistedState;
 use tenuto::playback::state::PlaybackState;
-use tenuto::playback::volume::Volume;
 use tenuto::queue::{DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueSource};
+use tenuto::volume::Volume;
 
 /// The ids a fresh queue assigns to three entries; the same on every call.
 pub fn ids() -> Vec<QueueEntryId> {

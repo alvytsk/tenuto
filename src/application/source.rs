@@ -7,10 +7,11 @@ use std::path::Path;
 
 use url::Url;
 
-use crate::http::error::{RemoteFailure, redact_url};
+use crate::http::error::RemoteFailure;
 use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
 use crate::media::source::SourceLocation;
 use crate::playback::error::PlaybackError;
+use crate::telemetry::redact_url;
 
 /// §5's disambiguation. An explicit http/https scheme is a URL; everything
 /// else keeps existing path behaviour, so `./https:weird` remains an

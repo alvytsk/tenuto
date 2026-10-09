@@ -7,7 +7,7 @@ use tenuto::playback::command::PlaybackCommand;
 use tenuto::playback::event::PlaybackEvent;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::playback::volume::Volume;
+use tenuto::volume::Volume;
 
 mod support;
 

@@ -335,10 +335,10 @@ mod tests {
     use crate::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
     use crate::media::id::{AbsolutePath, MediaId};
     use crate::media::metadata::MediaMetadata;
+    use crate::media::provenance::PositionProvenance;
     use crate::playback::command::LoadRequestId;
     use crate::playback::event::StartDisposition;
-    use crate::playback::provenance::PositionProvenance;
-    use crate::playback::volume::Volume;
+    use crate::volume::Volume;
 
     /// The step this file's own key mapping uses for an arrow press. A local
     /// copy rather than an import: `SEEK_STEP_SECS` is a key-mapping detail

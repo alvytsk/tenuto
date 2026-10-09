@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::application::transport::PlaybackPhase;
 use crate::application::view::{NowPlaying, PersistenceStatus, PlayerView, QueueRow, format_saved};
 use crate::media::display::format_hms;
-use crate::playback::provenance::PositionProvenance;
+use crate::media::provenance::PositionProvenance;
 use crate::playlist::PlaylistId;
 use crate::queue::{DisplayDuration, DurationSource, QueueEntryId};
 use crate::tui::browser::BrowserState;

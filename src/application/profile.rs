@@ -96,10 +96,10 @@ mod tests {
     use crate::media::id::{EpisodeKey, FeedId, MediaId};
     use crate::persistence::model::PersistedState;
     use crate::persistence::writer::Urgency;
-    use crate::playback::checkpoint::PlaybackCheckpoint;
     use crate::playback::command::ResumeIntent;
-    use crate::playback::volume::Volume;
+    use crate::resume::PlaybackCheckpoint;
     use crate::resume::ResumeCandidate;
+    use crate::volume::Volume;
     use std::time::Duration;
     use time::OffsetDateTime;
 

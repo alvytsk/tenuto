@@ -8,13 +8,13 @@ use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use tenuto::media::id::{EpisodeKey, FeedId, MediaId};
 use tenuto::media::metadata::MediaMetadata;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::persistence::PersistenceError;
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::store::StateStore;
 use tenuto::persistence::writer::{StateSink, Urgency, WriterHandle};
 use tenuto::playback::command::{LoadRequestId, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
 use tenuto::queue::{
@@ -314,7 +314,7 @@ fn volume_and_display_updates_submit_through_the_session() {
         )
         .expect("fits");
     assert!(matches!(
-        session.set_volume(tenuto::playback::volume::Volume::new(0.4)),
+        session.set_volume(tenuto::volume::Volume::new(0.4)),
         Action::Submit { .. }
     ));
     let update = DisplayUpdate {

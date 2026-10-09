@@ -14,11 +14,12 @@ use symphonia::core::io::MediaSource;
 use url::Url;
 
 use super::channel::{ByteChannel, HeaderOutcome, ReadOutcome, SourceInterrupt, WaitHook};
-use super::error::{Operation, Phase, RemoteFailure, redact_url};
+use super::error::{Operation, Phase, RemoteFailure};
 use super::limits::Limits;
 use super::response::{Accepted, Established};
 use super::service::{FetchRequest, HttpService};
 use crate::media::capabilities::{DemuxerSeek, SourceEvidence};
+use crate::telemetry::redact_url;
 
 /// One absolute instant that every wait taken during opening is clamped
 /// against. Threaded down rather than checked around the outside, because

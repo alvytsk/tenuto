@@ -48,16 +48,3 @@ pub enum TelemetryError {
     #[error("cannot initialize tracing")]
     Install(#[from] tracing::subscriber::SetGlobalDefaultError),
 }
-
-/// What [`crate::app::run`] returns (design doc §6.5). Both arms are
-/// `transparent`, so `main.rs`'s `{error}` and `?error` keep printing the
-/// concrete failure rather than a wrapper that says nothing.
-#[derive(Debug, thiserror::Error)]
-pub enum AppError {
-    #[error(transparent)]
-    Playback(#[from] crate::playback::error::PlaybackError),
-    #[error(transparent)]
-    Feed(#[from] crate::feed::error::FeedError),
-    #[error(transparent)]
-    Lifecycle(#[from] LifecycleError),
-}

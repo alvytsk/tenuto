@@ -6,10 +6,10 @@ use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 
 use super::command::LoadRequestId;
-use super::provenance::PositionProvenance;
 use super::state::PlaybackState;
 use super::timeline::PositionQuality;
-use super::volume::Volume;
+use crate::media::provenance::PositionProvenance;
+use crate::volume::Volume;
 
 /// What a load actually did with its resume intent (§8). Carried on `Loaded`
 /// rather than announced as a separate event, so a policy that must act on it

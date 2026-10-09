@@ -57,9 +57,8 @@ use crate::application::runtime::{
 };
 use crate::application::view::PlayerView;
 use crate::artwork::worker::{ArtworkWorker, CoverSource, default_loader};
-use crate::cli::{ArtworkMode, MouseMode};
 use crate::clock::{Clock, SystemClock};
-use crate::error::{AppError, LifecycleError};
+use crate::error::LifecycleError;
 use crate::http::limits::Limits;
 use crate::lifecycle::RunOutcome;
 use crate::lifecycle::hooks::TestHook;
@@ -72,7 +71,7 @@ use crate::media::id::MediaId;
 use crate::persistence::store::{LoadOutcome, QueueBackup, StateStore};
 use crate::playback::engine::EngineHandle;
 use crate::tui::browser::{BrowserEffect, BrowserState};
-use crate::tui::images::{CoverCache, failure_status, picker_for, query_terminal};
+use crate::tui::images::{ArtworkMode, CoverCache, failure_status, picker_for, query_terminal};
 use crate::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
 use crate::tui::layout::{regions, tier_for};
 use crate::tui::render::{CoverView, HitMap, Visuals};
@@ -83,6 +82,15 @@ use crate::tui::state::{Overlay, UiState};
 /// runtime again; also the bound on how late a signal or fatal panic is seen.
 const INPUT_POLL: Duration = Duration::from_millis(50);
 const STATE_NOT_SAVED: &str = "This session is not saved";
+
+/// Whether `tenuto tui` captures the mouse. Off leaves the terminal's own
+/// selection and scrolling alone.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum MouseMode {
+    #[default]
+    On,
+    Off,
+}
 
 pub struct TuiOptions {
     pub mouse: MouseMode,
@@ -105,12 +113,12 @@ enum Ending {
     Requested,
     /// A panic on another thread took the fatal path.
     WorkerPanicked,
-    Failed(AppError),
+    Failed(LifecycleError),
     /// A panic on this thread, to be resumed once teardown is done.
     Panicked(Box<dyn Any + Send>),
 }
 
-pub fn run(options: TuiOptions) -> Result<RunOutcome, AppError> {
+pub fn run(options: TuiOptions) -> Result<RunOutcome, LifecycleError> {
     let hook = TestHook::from_env();
     // The loop polls `fatal_requested` at least every `INPUT_POLL`, so the
     // wake receiver only has to stay alive for the hook's `try_send`.
@@ -154,7 +162,7 @@ macro_rules! attempt {
     ($result:expr) => {
         match $result {
             Ok(value) => value,
-            Err(error) => return Ending::Failed(AppError::from(error)),
+            Err(error) => return Ending::Failed(error),
         }
     };
 }
@@ -353,7 +361,7 @@ fn run_loop(
     // Only now: the cover-art query in `start_and_loop` has read its answer.
     let input = match InputReader::spawn(MAX_EVENTS_PER_PASS) {
         Ok(input) => input,
-        Err(error) => return Ending::Failed(LifecycleError::Terminal(error).into()),
+        Err(error) => return Ending::Failed(LifecycleError::Terminal(error)),
     };
     loop {
         let mut front = Front {
@@ -365,7 +373,7 @@ fn run_loop(
             signals,
         };
         if let Err(error) = handle_input(&mut front, &hits, &input) {
-            return Ending::Failed(LifecycleError::Terminal(error).into());
+            return Ending::Failed(LifecycleError::Terminal(error));
         }
         runtime.pump();
         // A finished folder walk belongs to the application, not the
@@ -387,7 +395,7 @@ fn run_loop(
         }
         // Before the view, so an encoding failure's status shows this frame.
         if let Err(error) = artwork.prepare(runtime, terminal, &ui, cleanup) {
-            return Ending::Failed(LifecycleError::Terminal(error).into());
+            return Ending::Failed(LifecycleError::Terminal(error));
         }
         let view = runtime.view();
         ui.reconcile(&view, None);
@@ -395,7 +403,7 @@ fn run_loop(
             browser.sync_queue(&view.rows);
         }
         if let Err(error) = update_spectrum(runtime, terminal, &view, &mut spectrum) {
-            return Ending::Failed(LifecycleError::Terminal(error).into());
+            return Ending::Failed(LifecycleError::Terminal(error));
         }
         let visuals = Visuals {
             cover: artwork
@@ -415,7 +423,7 @@ fn run_loop(
         if let Err(error) = terminal.draw(|frame| {
             hits = render::draw(frame, &view, &ui, &visuals);
         }) {
-            return Ending::Failed(LifecycleError::Terminal(error).into());
+            return Ending::Failed(LifecycleError::Terminal(error));
         }
     }
 }
@@ -852,7 +860,7 @@ fn teardown(
     stages: Stages,
     cleanup: &FatalCleanup,
     signals: ShutdownSignals,
-) -> Result<RunOutcome, AppError> {
+) -> Result<RunOutcome, LifecycleError> {
     let Stages {
         lock,
         runtime,
@@ -885,7 +893,7 @@ fn teardown(
 
     match ending {
         Ending::Panicked(payload) => panic::resume_unwind(payload),
-        Ending::WorkerPanicked => Err(LifecycleError::WorkerPanicked.into()),
+        Ending::WorkerPanicked => Err(LifecycleError::WorkerPanicked),
         // As in `play`, a recorded signal is what the run reports, even when
         // it arrived alongside a failure (a hung-up pane, say).
         Ending::Failed(error) => match outcome {

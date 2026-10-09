@@ -23,9 +23,10 @@ use reqwest::header::{
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use super::error::{Operation, Phase, RemoteFailure, redact_url};
+use super::error::{Operation, Phase, RemoteFailure};
 use super::limits::Limits;
 use super::response::accept_redirect;
+use crate::telemetry::redact_url;
 
 /// §3.5: an XML feed first, everything else as a low-priority fallback.
 const ACCEPT_VALUE: &str =

@@ -16,12 +16,12 @@ use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use tenuto::media::id::MediaId;
 use tenuto::media::metadata::MediaMetadata;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::persistence::model::PersistedState;
-use tenuto::playback::checkpoint::PlaybackCheckpoint;
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
+use tenuto::resume::PlaybackCheckpoint;
 use tenuto::session::{Action, CAPTURE_INTERVAL, LoadTarget, Session};
 
 mod support;

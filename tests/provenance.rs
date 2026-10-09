@@ -1,4 +1,4 @@
-use tenuto::playback::provenance::PositionProvenance;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::playback::timeline::PositionQuality;
 
 #[test]

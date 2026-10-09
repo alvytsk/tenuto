@@ -5,13 +5,13 @@
 use std::time::Duration;
 
 use tenuto::media::id::MediaId;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::media::source::SourceLocation;
 use tenuto::playback::command::{LoadRequestId, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, StartDisposition};
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
-use tenuto::playback::volume::Volume;
 use tenuto::resume::ResumeCandidate;
+use tenuto::volume::Volume;
 
 mod support;
 use support::TestEngine;

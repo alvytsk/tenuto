@@ -14,8 +14,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use tenuto::media::id::AbsolutePath;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::playback::decode::DecodedSource;
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::resume::{KnownDuration, ResumeCandidate, ResumeDecision, decide_resume};
 
 #[allow(clippy::unwrap_used)]

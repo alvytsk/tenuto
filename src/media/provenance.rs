@@ -1,7 +1,7 @@
 //! Position provenance (§3): whether an absolute media time was
 //! decoder-established or derived from a byte-offset estimate.
 //!
-//! **A second axis, orthogonal to `PositionQuality`** (`timeline.rs`), never
+//! **A second axis, orthogonal to `PositionQuality`** (`playback::timeline`), never
 //! a fourth variant of it and never merged into it. `PositionQuality`
 //! reports how precisely we know how much has been *heard*, reconstructed
 //! from the output callback's spans — the ordinary state during playback.

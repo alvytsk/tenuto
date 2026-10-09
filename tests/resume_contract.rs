@@ -13,19 +13,19 @@ use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use tenuto::media::id::{AbsolutePath, MediaId};
 use tenuto::media::metadata::MediaMetadata;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::persistence::model::{PersistedCheckpoint, PersistedState, SCHEMA_VERSION};
 use tenuto::persistence::store::StateStore;
 use tenuto::persistence::writer::Urgency;
-use tenuto::playback::checkpoint::PlaybackCheckpoint;
 use tenuto::playback::command::{PlaybackCommand, ResumeIntent};
 use tenuto::playback::decode::DecodedSource;
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::playback::volume::Volume;
+use tenuto::resume::PlaybackCheckpoint;
 use tenuto::resume::{RestartPreference, decide_resume, restart_preference, resume_candidate};
 use tenuto::session::{Action, CAPTURE_INTERVAL, LoadTarget, Session};
+use tenuto::volume::Volume;
 
 mod support;
 

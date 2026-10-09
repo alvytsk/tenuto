@@ -20,3 +20,4 @@ pub mod station;
 pub mod subscription;
 pub mod telemetry;
 pub mod tui;
+pub mod volume;

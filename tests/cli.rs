@@ -3,8 +3,10 @@
 #[path = "support/process.rs"]
 mod process;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use tenuto::cli::{Cli, CliCommand};
+use tenuto::tui::MouseMode;
+use tenuto::tui::images::ArtworkMode;
 
 /// A bare `tenuto` is no longer a usage error: it resolves to no
 /// subcommand, which `app::run` dispatches to the player.
@@ -74,4 +76,54 @@ fn version_flag_prints_the_package_version() {
         String::from_utf8_lossy(&output.stdout),
         format!("tenuto {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+/// M9 foundation cleanup §5: `MouseMode` and `ArtworkMode` move modules,
+/// and `tui`'s flags must parse, default and print exactly as before. A
+/// bare `tenuto` uses `default()`, so that is pinned too.
+#[test]
+fn the_tui_flags_keep_their_defaults_and_help() -> Result<(), Box<dyn std::error::Error>> {
+    const TUI_HELP: &str = concat!(
+        "Open the terminal player on the saved queue\n",
+        "\n",
+        "Usage: tui [OPTIONS]\n",
+        "\n",
+        "Options:\n",
+        "      --mouse <MOUSE>\n",
+        "          Whether the player captures the mouse\n",
+        "          \n",
+        "          [default: on]\n",
+        "          [possible values: on, off]\n",
+        "\n",
+        "      --artwork <ARTWORK>\n",
+        "          How the player draws cover art\n",
+        "          \n",
+        "          [default: auto]\n",
+        "          [possible values: auto, blocks, off]\n",
+        "\n",
+        "  -h, --help\n",
+        "          Print help\n",
+    );
+    let Some(CliCommand::Tui { mouse, artwork }) = Cli::try_parse_from(["tenuto", "tui"])?.command
+    else {
+        panic!("`tenuto tui` parses to the tui subcommand");
+    };
+    assert_eq!((mouse, artwork), (MouseMode::On, ArtworkMode::Auto));
+    assert_eq!(
+        (MouseMode::default(), ArtworkMode::default()),
+        (MouseMode::On, ArtworkMode::Auto)
+    );
+
+    let flags = ["tenuto", "tui", "--mouse", "off", "--artwork", "blocks"];
+    let Some(CliCommand::Tui { mouse, artwork }) = Cli::try_parse_from(flags)?.command else {
+        panic!("the flags parse to the tui subcommand");
+    };
+    assert_eq!((mouse, artwork), (MouseMode::Off, ArtworkMode::Blocks));
+
+    let mut command = Cli::command();
+    let tui = command
+        .find_subcommand_mut("tui")
+        .expect("tui is a subcommand");
+    assert_eq!(tui.render_long_help().to_string(), TUI_HELP);
+    Ok(())
 }

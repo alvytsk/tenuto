@@ -19,7 +19,7 @@ use url::Url;
 
 use crate::clock::{Clock, SystemClock};
 use crate::http::channel::{ByteChannel, ReadOutcome, SourceInterrupt, WaitHook};
-use crate::http::error::{Operation, RemoteFailure, redact_url};
+use crate::http::error::{Operation, RemoteFailure};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{is_retired, remote_cause};
@@ -28,6 +28,7 @@ use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 use crate::media::source::SourceLocation;
 use crate::resume::{KnownDuration, ResumeDecision, decide_resume};
+use crate::telemetry::redact_url;
 
 use super::callback::CallbackCore;
 use super::command::{Admission, LoadRequestId, PlaybackCommand, ResumeIntent};
@@ -40,7 +41,6 @@ use super::output::cpal_output::{CpalOutput, OutputFault};
 use super::output::null_output::NullOutput;
 use super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
 use super::prepare::{PrepareContext, prepare};
-use super::provenance::PositionProvenance;
 use super::reconnect::{Next, Outage, ReconnectPolicy, retryable};
 use super::resample::Converter;
 use super::spectrum::registry::{TapMapping, TapRegistry};
@@ -49,8 +49,9 @@ use super::spectrum::worker::{
 };
 use super::state::PlaybackState;
 use super::timeline::{PositionQuality, Timeline};
-use super::volume::Volume;
 use super::wait::{Servicing, SessionFacts, WaitService};
+use crate::media::provenance::PositionProvenance;
+use crate::volume::Volume;
 
 const STOP: u8 = 1;
 const SHUTDOWN: u8 = 2;

@@ -1,4 +1,5 @@
-use tenuto::http::error::{Operation, RangeRejection, RemoteFailure, redact_url};
+use tenuto::http::error::{Operation, RangeRejection, RemoteFailure};
+use tenuto::telemetry::redact_url;
 
 #[test]
 fn a_signed_query_never_reaches_a_diagnostic() {

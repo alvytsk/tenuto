@@ -29,9 +29,9 @@ use super::command::LoadRequestId;
 use super::engine::{DEADLINE, EVENT_CAPACITY, PUMP_NAP, RESERVED_EVENT_SLOTS, TransportCore};
 use super::event::{PlaybackEvent, Progress};
 use super::output::Nanos;
-use super::provenance::PositionProvenance;
 use super::state::PlaybackState;
 use super::timeline::PositionQuality;
+use crate::media::provenance::PositionProvenance;
 
 /// A poisoned lock means a thread already panicked while holding it; there is
 /// nothing better to do than carry on with the state it left. Same pattern as

@@ -32,7 +32,7 @@ use crate::artwork::worker::CoverSource;
 use crate::clock::Clock;
 use crate::commands::displayable;
 use crate::feed::cache::CacheStore;
-use crate::http::error::{RemoteFailure, redact_url};
+use crate::http::error::RemoteFailure;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::library::EpisodeCandidate;
@@ -40,6 +40,7 @@ use crate::lifecycle::hooks::TestHook;
 use crate::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use crate::media::display::{display_name, episode_name};
 use crate::media::id::MediaId;
+use crate::media::provenance::PositionProvenance;
 use crate::media::source::SourceLocation;
 use crate::media::tags::CoverBytes;
 use crate::persistence::PersistenceError;
@@ -49,11 +50,9 @@ use crate::playback::command::{Admission, LoadRequestId, PlaybackCommand};
 use crate::playback::engine::EngineHandle;
 use crate::playback::error::PlaybackError;
 use crate::playback::event::{PlaybackEvent, Progress};
-use crate::playback::provenance::PositionProvenance;
 use crate::playback::spectrum::worker::SpectrumHandle;
 use crate::playback::state::PlaybackState;
 use crate::playback::timeline::PositionQuality;
-use crate::playback::volume::Volume;
 use crate::playlist::PlaylistId;
 use crate::queue::{
     Direction, DisplayDuration, DisplayMetadata, DurationSource, MAX_PLAYLIST_ENTRIES,
@@ -64,6 +63,8 @@ use crate::session::{
 };
 use crate::station::store::StationStore;
 use crate::subscription::store::SubscriptionStore;
+use crate::telemetry::redact_url;
+use crate::volume::Volume;
 
 /// Shown when the engine refuses a command for want of queue room.
 pub const PLAYER_BUSY: &str = "Player is busy";

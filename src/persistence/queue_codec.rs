@@ -10,7 +10,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
-use crate::playback::provenance::PositionProvenance;
+use crate::media::provenance::PositionProvenance;
 use crate::playlist::{
     DEFAULT_NAME, Field, MAX_PLAYLISTS, Playlist, PlaylistSet, RecordParts, Repair, ShuffleField,
     Stage,

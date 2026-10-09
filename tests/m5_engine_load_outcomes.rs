@@ -138,7 +138,7 @@ fn shutdown_during_a_stalled_open_reports_the_cancellation() {
 
 #[test]
 fn automatic_start_does_not_reopen_a_failed_remote_load() {
-    use tenuto::playback::volume::Volume;
+    use tenuto::volume::Volume;
     let server = TestServer::start(Script::serving(Vec::new()).status(404));
     let mut engine = TestEngine::start_idle();
     engine
@@ -164,7 +164,7 @@ fn automatic_start_does_not_reopen_a_failed_remote_load() {
 #[test]
 fn an_older_automatic_start_cannot_play_a_newer_load() {
     use tenuto::playback::state::PlaybackState;
-    use tenuto::playback::volume::Volume;
+    use tenuto::volume::Volume;
     let mut engine = TestEngine::start_idle();
     engine.send(local_load(81));
     engine.send(local_load(82));

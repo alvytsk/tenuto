@@ -4,6 +4,9 @@ use std::num::NonZeroUsize;
 
 use clap::{Parser, Subcommand};
 
+use crate::tui::MouseMode;
+use crate::tui::images::ArtworkMode;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "tenuto",
@@ -16,28 +19,6 @@ pub struct Cli {
     /// `tenuto tui` uses when its flags are omitted.
     #[command(subcommand)]
     pub command: Option<CliCommand>,
-}
-
-/// Whether `tenuto tui` captures the mouse. Off leaves the terminal's own
-/// selection and scrolling alone.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
-pub enum MouseMode {
-    #[default]
-    On,
-    Off,
-}
-
-/// How `tenuto tui` draws cover art: `auto` asks the terminal which image
-/// protocol it supports and falls back to colored half-blocks, `blocks`
-/// always uses half-blocks without asking, and `off` shows only the
-/// placeholder and never loads artwork — not even the built-in covers, so
-/// it stays a mode that puts no image on the screen at all.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
-pub enum ArtworkMode {
-    #[default]
-    Auto,
-    Blocks,
-    Off,
 }
 
 #[derive(Debug, Subcommand)]

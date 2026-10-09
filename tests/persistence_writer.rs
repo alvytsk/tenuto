@@ -8,7 +8,7 @@ use tenuto::clock::{Clock, FakeClock};
 use tenuto::persistence::PersistenceError;
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::writer::{ShutdownOutcome, StateSink, Urgency, WriterHandle};
-use tenuto::playback::volume::Volume;
+use tenuto::volume::Volume;
 
 const PATIENCE: Duration = Duration::from_secs(5);
 

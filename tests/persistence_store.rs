@@ -12,7 +12,7 @@ use support::media;
 use tenuto::clock::FakeClock;
 use tenuto::persistence::model::{PersistedState, SCHEMA_VERSION};
 use tenuto::persistence::store::{LoadReason, MAX_QUARANTINE_CANDIDATES, StateStore};
-use tenuto::playback::checkpoint::PlaybackCheckpoint;
+use tenuto::resume::PlaybackCheckpoint;
 use time::OffsetDateTime;
 
 /// The stamp a `FakeClock` produces, which starts at the epoch.

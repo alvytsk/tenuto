@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use tenuto::application::transport::PlaybackPhase;
 use tenuto::application::view::{PersistenceStatus, PlayerView, SavedHistory};
-use tenuto::playback::provenance::PositionProvenance;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::queue::{DisplayDuration, DurationSource};
 use tenuto::tui::layout::{Regions, Tier, regions, tier_for};
 use tenuto::tui::render::{CoverView, CoverWidget, HitMap, TransportButton, Visuals, draw};

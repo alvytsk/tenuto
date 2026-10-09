@@ -6,17 +6,17 @@ use tenuto::clock::{Clock, FakeClock};
 use tenuto::media::capabilities::{Continuity, MediaCapabilities, SeekSupport};
 use tenuto::media::id::MediaId;
 use tenuto::media::metadata::MediaMetadata;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::writer::Urgency;
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::playback::volume::Volume;
 use tenuto::resume::resume_candidate;
 use tenuto::session::{
     Action, CAPTURE_INTERVAL, LoadTarget, ResumeDecision, Session, decide_resume,
 };
+use tenuto::volume::Volume;
 
 mod support;
 use support::media;
@@ -125,7 +125,7 @@ fn is_none(action: &Action) -> bool {
 fn state_with(media: &MediaId, position: Duration, completed: bool) -> PersistedState {
     let mut state = PersistedState::default();
     state.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media.clone(),
             position,
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -357,7 +357,7 @@ fn reloading_the_same_media_submits_nothing() {
 fn playing_clears_a_completed_flag_carried_in_from_the_file() {
     let mut opening = PersistedState::default();
     opening.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media("a"),
             position: Duration::from_secs(240),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -662,7 +662,7 @@ fn a_resumed_stopped_seek_clears_the_target_through_its_seek_completed() {
 fn a_stopped_seek_clears_the_completion_its_target_supersedes() {
     let mut opening = PersistedState::default();
     opening.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media("a"),
             position: Duration::from_secs(240),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -715,7 +715,7 @@ fn a_launch_that_never_establishes_writes_no_checkpoint() {
     // opening the device, and the device refuses to open.
     let mut opening = PersistedState::default();
     opening.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media("a"),
             position: Duration::from_secs(240),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -760,7 +760,7 @@ fn a_launch_that_never_establishes_writes_no_checkpoint() {
 fn a_switch_away_from_a_media_that_never_established_records_nothing_for_it() {
     let mut opening = PersistedState::default();
     opening.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media("a"),
             position: Duration::from_secs(300),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -804,7 +804,7 @@ fn a_switch_away_from_a_media_that_never_established_records_nothing_for_it() {
 fn a_switch_onto_a_completed_entry_does_not_capture_its_unvalidated_zero() {
     let mut opening = PersistedState::default();
     opening.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media("b"),
             position: Duration::from_secs(240),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,
@@ -846,7 +846,7 @@ fn a_switch_onto_a_completed_entry_does_not_capture_its_unvalidated_zero() {
 fn a_stop_before_anything_establishes_writes_no_checkpoint() {
     let mut opening = PersistedState::default();
     opening.record(
-        &tenuto::playback::checkpoint::PlaybackCheckpoint {
+        &tenuto::resume::PlaybackCheckpoint {
             media: media("a"),
             position: Duration::from_secs(240),
             updated_at: time::OffsetDateTime::UNIX_EPOCH,

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ratatui::layout::Rect;
 use ratatui_image::picker::Picker;
 use tenuto::artwork::default::CoverKind;
-use tenuto::cli::ArtworkMode;
 use tenuto::media::id::{AbsolutePath, MediaId};
+use tenuto::tui::images::ArtworkMode;
 use tenuto::tui::images::{CoverCache, picker_for};
 
 #[allow(clippy::expect_used)] // A literal absolute path always parses.

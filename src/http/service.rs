@@ -16,12 +16,13 @@ use reqwest::header::{ACCEPT_ENCODING, IF_RANGE, LOCATION, RANGE};
 use url::Url;
 
 use super::channel::{ByteChannel, HeaderOutcome, Outcome, SourceInterrupt, WaitHook};
-use super::error::{Operation, Phase, RangeRejection, RemoteFailure, redact_url};
+use super::error::{Operation, Phase, RangeRejection, RemoteFailure};
 use super::limits::Limits;
 use super::response::{
     Accepted, Established, FetchAccepted, Headers, accept, accept_redirect, if_range_value,
     validator_from,
 };
+use crate::telemetry::redact_url;
 
 /// How often the body loop re-tests the freeze flag and re-arms its stall
 /// timer. Short enough that a pause is noticed promptly; long enough that
