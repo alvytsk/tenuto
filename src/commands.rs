@@ -19,7 +19,6 @@ use crate::cli::CliCommand;
 use crate::clock::SystemClock;
 use crate::feed::cache::CacheStore;
 use crate::feed::error::FeedError;
-use crate::http::error::redact_url;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::StationIdentity;
@@ -31,6 +30,7 @@ use crate::persistence::PersistenceError;
 use crate::persistence::store::StateStore;
 use crate::station::store::StationStore;
 use crate::subscription::store::SubscriptionStore;
+use crate::telemetry::redact_url;
 
 /// Runs one feed command to completion.
 ///

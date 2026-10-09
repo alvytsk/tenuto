@@ -19,7 +19,7 @@ use url::Url;
 
 use crate::clock::{Clock, SystemClock};
 use crate::http::channel::{ByteChannel, ReadOutcome, SourceInterrupt, WaitHook};
-use crate::http::error::{Operation, RemoteFailure, redact_url};
+use crate::http::error::{Operation, RemoteFailure};
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{is_retired, remote_cause};
@@ -28,6 +28,7 @@ use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 use crate::media::source::SourceLocation;
 use crate::resume::{KnownDuration, ResumeDecision, decide_resume};
+use crate::telemetry::redact_url;
 
 use super::callback::CallbackCore;
 use super::command::{Admission, LoadRequestId, PlaybackCommand, ResumeIntent};

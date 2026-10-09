@@ -9,8 +9,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use url::Url;
 
-use crate::http::error::redact_url;
 use crate::media::id::MediaId;
+use crate::telemetry::redact_url;
 
 /// What the status row calls a podcast episode: its title.
 ///

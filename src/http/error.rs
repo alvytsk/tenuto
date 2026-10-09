@@ -1,5 +1,3 @@
-use url::Url;
-
 /// Which request an outcome belongs to, so a failure says what was being done
 /// rather than only what went wrong.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,7 +61,7 @@ pub enum RangeRejection {
 /// Typed remote faults, one variant per §11 category.
 ///
 /// `Display` is the third-party-safe rendering: every URL here has already
-/// passed through [`redact_url`], so no signed query or userinfo can reach a
+/// passed through [`crate::telemetry::redact_url`], so no signed query or userinfo can reach a
 /// status line, a log line or a `PlaybackEvent::Failed` message.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RemoteFailure {
@@ -127,21 +125,4 @@ impl RemoteFailure {
             _ => false,
         }
     }
-}
-
-/// Scheme, host, port and path only.
-///
-/// Query and userinfo are the two places a bearer secret hides, and §11 keeps
-/// both out of normal diagnostics. An input that does not parse is reported as
-/// a placeholder rather than echoed: the unparseable text may itself be the
-/// secret.
-pub fn redact_url(input: &str) -> String {
-    let Ok(mut url) = Url::parse(input) else {
-        return "<unparseable URL>".to_string();
-    };
-    url.set_query(None);
-    url.set_fragment(None);
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.to_string()
 }

@@ -16,13 +16,14 @@ use symphonia::core::io::MediaSource;
 use url::Url;
 
 use crate::http::channel::{SourceInterrupt, WaitHook};
-use crate::http::error::{RemoteFailure, redact_url};
+use crate::http::error::RemoteFailure;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{HttpMediaSource, remote_cause};
 use crate::media::capabilities::{Continuity, MediaCapabilities};
 use crate::media::id::AbsolutePath;
 use crate::media::source::SourceLocation;
+use crate::telemetry::redact_url;
 
 use super::decode::DecodedSource;
 use super::error::PlaybackError;

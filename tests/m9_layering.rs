@@ -68,7 +68,6 @@ const NAMED_RULES: &[(&str, &str)] = &[
 /// edge it excuses.
 const ALLOWED: &[(&str, &str)] = &[
     // B: foundation cleanup.
-    ("src/media/display.rs", "http"),
     ("src/tui/mod.rs", "cli"),
     ("src/tui/images.rs", "cli"),
     // C: feed operations below `commands`.

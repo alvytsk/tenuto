@@ -16,7 +16,7 @@
 //!
 //! * **Transport URLs are secret.** A signed query and embedded userinfo are
 //!   where a bearer token hides, so every URL reaching a message has passed
-//!   through [`tenuto::http::error::redact_url`] first — under `Debug` as
+//!   through [`tenuto::telemetry::redact_url`] first — under `Debug` as
 //!   much as `Display`, because `main.rs` logs `?error`.
 //! * **File content is never quoted.** A `serde_json::Error`'s own `Display`
 //!   can echo the offending bytes, and a checkpoint key or a cached

@@ -29,7 +29,6 @@ use crate::commands::{
     finish_add_station, finish_refresh_batch, finish_refresh_one, finish_remove_station,
     finish_reprobe_station, finish_subscribe, finish_unsubscribe, report, wait_http,
 };
-use crate::http::error::redact_url;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::library::{
@@ -39,6 +38,7 @@ use crate::library::{
 use crate::media::id::MediaId;
 use crate::playlist::PlaylistId;
 use crate::queue::MAX_PLAYLIST_ENTRIES;
+use crate::telemetry::redact_url;
 
 /// The extensions a listing classifies as audio, compared ASCII
 /// case-insensitively.

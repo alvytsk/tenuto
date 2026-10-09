@@ -55,7 +55,7 @@ use crate::feed::error::FeedError;
 use crate::feed::parse::{ParseWarning, parse_feed};
 use crate::http::channel::{SourceInterrupt, WaitHook};
 use crate::http::document::{DocumentOutcome, DocumentRequest};
-use crate::http::error::{RemoteFailure, redact_url};
+use crate::http::error::RemoteFailure;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::http::source::{HttpMediaSource, StationIdentity};
@@ -68,6 +68,7 @@ use crate::station::model::{Station, choose_station_slug};
 use crate::station::store::{StationLoad, StationSnapshot, StationStore};
 use crate::subscription::model::{Subscription, choose_slug, new_feed_id, validate_slug};
 use crate::subscription::store::{SubscriptionLoad, SubscriptionSnapshot, SubscriptionStore};
+use crate::telemetry::redact_url;
 
 /// One row of `tenuto feeds` (§6.1, §6.6). `episodes` and
 /// `last_refreshed_at` are both `None` for a subscription that has never
