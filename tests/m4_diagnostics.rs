@@ -27,7 +27,7 @@
 //!   claimed about itself, and hiding them would make `unknown feed: …`,
 //!   `episode 2 "…" has no audio` and `unsupported feed encoding: …`
 //!   useless. They are escaped at the formatting boundary
-//!   (`commands::displayable`) rather than redacted, and this file asserts
+//!   (`telemetry::displayable`) rather than redacted, and this file asserts
 //!   they survive — otherwise "no secret in the message" could be passed by
 //!   a message that says nothing at all. None of the three is ever a URL.
 
@@ -631,7 +631,7 @@ fn a_control_character_in_the_encoding_label_never_reaches_a_terminal() -> Falli
 /// | Variant | Context | Built by | Why it is safe |
 /// |---|---|---|---|
 /// | `Encoding` | none | `feed::parse` | No payload at all. |
-/// | `UnsupportedEncoding` | `label` | `feed::parse` | Feed-controlled **content**, classified with titles rather than with transport. `src/feed/parse.rs` echoes the label precisely *because* `BytesDecl::encoder()` returned `None` for it, so the value is arbitrary text the feed wrote — but unlike a title, it never reaches `commands::displayable`'s formatting-boundary escaping, since `main.rs` and `tracing` print it directly. §8.5's scope (URLs, credentials, query strings) says nothing about control characters, and quick-xml does not enforce XML 1.0's `Char` production on this attribute, so the label could otherwise carry a raw ANSI escape. `sanitize_declaration_label` filters it to ASCII graphic characters and bounds its length *at construction*, before the field exists, so it is safe both because it is a declaration label rather than a URL and because it cannot contain a control byte, and useful because the listener still sees what was claimed. |
+/// | `UnsupportedEncoding` | `label` | `feed::parse` | Feed-controlled **content**, classified with titles rather than with transport. `src/feed/parse.rs` echoes the label precisely *because* `BytesDecl::encoder()` returned `None` for it, so the value is arbitrary text the feed wrote — but unlike a title, it never reaches `telemetry::displayable`'s formatting-boundary escaping, since `main.rs` and `tracing` print it directly. §8.5's scope (URLs, credentials, query strings) says nothing about control characters, and quick-xml does not enforce XML 1.0's `Char` production on this attribute, so the label could otherwise carry a raw ANSI escape. `sanitize_declaration_label` filters it to ASCII graphic characters and bounds its length *at construction*, before the field exists, so it is safe both because it is a declaration label rather than a URL and because it cannot contain a control byte, and useful because the listener still sees what was claimed. |
 /// | `UnsupportedFormat` | none | `feed::parse` | No payload at all. |
 /// | `Malformed` | `detail` | `feed::parse`, `commands` | A fixed phrase or a `quick-xml` position; never a document excerpt (`m4_feed_parse.rs` asserts this). |
 /// | `NotPlayable` | `slug`, `index`, `title` | `library::resolve_episode` | A validated slug, an integer, and a title — content the listener asked to see, escaped at the formatting boundary. |

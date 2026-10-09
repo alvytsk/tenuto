@@ -69,11 +69,7 @@ const NAMED_RULES: &[(&str, &str)] = &[
 const ALLOWED: &[(&str, &str)] = &[
     // C: feed operations below `commands`.
     ("src/application/browse.rs", "commands"),
-    ("src/application/runtime.rs", "commands"),
-    ("src/application/view.rs", "commands"),
-    ("src/lifecycle/panic.rs", "commands"),
     ("src/tui/mod.rs", "commands"),
-    ("src/tui/render/browser.rs", "commands"),
 ];
 
 fn is_ident_char(c: char) -> bool {

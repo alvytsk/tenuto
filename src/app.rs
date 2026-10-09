@@ -361,7 +361,7 @@ fn run_probe_only(source: &str) -> Result<(), PlaybackError> {
 
     // Decoder metadata is untrusted, local files included: escaped the way
     // playback's status row and the feed listings escape it.
-    let title = crate::commands::displayable(
+    let title = crate::telemetry::displayable(
         prepared
             .source
             .metadata()

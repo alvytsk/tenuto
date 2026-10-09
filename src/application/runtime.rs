@@ -30,7 +30,6 @@ use crate::application::view::{
 use crate::artwork::default::CoverKind;
 use crate::artwork::worker::CoverSource;
 use crate::clock::Clock;
-use crate::commands::displayable;
 use crate::feed::cache::CacheStore;
 use crate::http::error::RemoteFailure;
 use crate::http::limits::Limits;
@@ -63,6 +62,7 @@ use crate::session::{
 };
 use crate::station::store::StationStore;
 use crate::subscription::store::SubscriptionStore;
+use crate::telemetry::displayable;
 use crate::telemetry::redact_url;
 use crate::volume::Volume;
 
