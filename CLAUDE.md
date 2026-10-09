@@ -25,7 +25,7 @@ Linux builds need `libasound2-dev`.
 - Every URL in a message or log goes through `redact_url`; never log a parsed feed item or document whole (`tests/m4_diagnostics.rs` audits this).
 - Nothing plays, fetches or refreshes on its own — every network request follows a user action.
 - Stopping or recreating the transport must never reset the logical position.
-- Layering: `playback` never imports persistence or blocks on Tokio; `library` never prints or `block_on`s; only `session` builds `PersistedState` snapshots; `tui` mutates state only through `Session`.
+- Layering: `playback` never imports persistence or blocks on Tokio; `library` never prints or `block_on`s; only `session` builds `PersistedState` snapshots; `tui` mutates state only through `Session`. `tests/m9_layering.rs` checks import ranks (`docs/architecture.md` §4): fix the import, never add to `ALLOWED`.
 
 ## Tests
 
