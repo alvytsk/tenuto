@@ -107,7 +107,11 @@ fn stdout_failure(source: std::io::Error) -> FeedError {
 /// the printed report's: a stdout failure outranks the operation's own
 /// error, and the final flush outranks both.
 fn operate(out: &mut dyn Write, op: &FeedOp) -> Result<Result<(), FeedError>, FeedError> {
-    let report = feed_ops::run(op, &LibraryStores::platform()?, &mut None);
+    // Held until the report is written: dropping the last service shuts its
+    // runtime down, which waits for blocking tasks such as a slow DNS lookup,
+    // and that wait belongs after the output, not before it.
+    let mut http = None;
+    let report = feed_ops::run(op, &LibraryStores::platform()?, &mut http);
     if report.text.is_empty()
         && let Err(error) = report.outcome
     {

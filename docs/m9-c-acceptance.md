@@ -56,7 +56,7 @@ byte for byte with `diff -r`: **no difference**.
 |---|---|---|
 | 1 success | `subscribe <url> --as alpha`, `refresh alpha`, `unsubscribe alpha` | `alpha: subscribed, 1 episodes retained, 0 skipped`, `alpha: unchanged`, `alpha: unsubscribed`; exit 0 ×3; empty stderr |
 | 2a early failure | `refresh no-such-slug` | no stdout; `tenuto: unknown feed: no-such-slug` and the log line `command failed error=Feed(UnknownSlug { slug: "no-such-slug" })`; exit 1 |
-| 2b early failure, stdout closed | `refresh no-such-slug >&-` | the same unknown-slug error and log line, not a stdout failure; exit 1 |
+| 2b early failure, stdout closed | `refresh no-such-slug >&-` | the same unknown-slug error and log line; exit 1. This does not exercise a stdout failure: Rust's `Stdout` treats `EBADF` as a successful write, so `>&-` never fails a write on either binary. Stdout-over-operation precedence is pinned by the `write_report` unit test (`an_unwritable_stream_fails_the_command`) |
 | 3 partial failure | `refresh` with `beta`'s URL returning 404 | `alpha: unchanged`, `beta: failed: the server answered HTTP 404 while Open`; `tenuto: 1 of 2 feeds did not complete successfully` and `Feed(BatchIncomplete { failed: 1, total: 2 })`; exit 1 |
 
 `--as` coverage in the existing suites: `tests/m4_cli.rs` runs `subscribe
