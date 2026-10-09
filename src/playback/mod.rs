@@ -1,5 +1,4 @@
 pub mod callback;
-pub mod checkpoint;
 pub mod command;
 pub mod decode;
 pub mod engine;
@@ -9,11 +8,9 @@ pub mod handshake;
 pub mod link;
 pub mod output;
 pub mod prepare;
-pub mod provenance;
 pub mod reconnect;
 pub mod resample;
 pub mod spectrum;
 pub mod state;
 pub mod timeline;
-pub mod volume;
 pub mod wait;

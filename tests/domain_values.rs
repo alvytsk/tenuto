@@ -5,7 +5,7 @@ use tenuto::media::{
     metadata::MediaMetadata,
     source::SourceLocation,
 };
-use tenuto::playback::checkpoint::PlaybackCheckpoint;
+use tenuto::resume::PlaybackCheckpoint;
 use time::OffsetDateTime;
 use url::Url;
 
@@ -59,7 +59,7 @@ fn fetch_url_stays_separate_from_identity_and_unplayable_items_exist() {
             album: None,
             year: None,
             duration: None,
-            duration_provenance: tenuto::playback::provenance::PositionProvenance::Established,
+            duration_provenance: tenuto::media::provenance::PositionProvenance::Established,
             front_cover: None,
         }
         .duration,

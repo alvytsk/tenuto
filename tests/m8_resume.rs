@@ -5,8 +5,8 @@ use std::time::Duration;
 use support::media;
 use tenuto::media::id::{EpisodeKey, FeedId, MediaId, NormalizedUrl};
 use tenuto::persistence::model::PersistedState;
-use tenuto::playback::checkpoint::PlaybackCheckpoint;
 use tenuto::playback::command::ResumeIntent;
+use tenuto::resume::PlaybackCheckpoint;
 use tenuto::session::Session;
 use time::OffsetDateTime;
 

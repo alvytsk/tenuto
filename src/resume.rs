@@ -17,7 +17,21 @@
 
 use std::time::Duration;
 
-use crate::playback::provenance::PositionProvenance;
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+
+use crate::media::id::MediaId;
+use crate::media::provenance::PositionProvenance;
+
+/// Logical resume position, independent of current transport capabilities.
+/// `updated_at` is for inspection, never ordering or merging updates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackCheckpoint {
+    pub media: MediaId,
+    pub position: Duration,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
 
 /// A duration `decide_resume` reasons against, carrying whether it was
 /// derived from a real index/container header or extrapolated from a

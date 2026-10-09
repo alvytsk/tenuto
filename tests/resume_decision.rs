@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use tenuto::playback::provenance::PositionProvenance;
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::resume::{
     KnownDuration, RestartPreference, ResumeCandidate, ResumeDecision, decide_resume,
     restart_preference, resume_candidate,

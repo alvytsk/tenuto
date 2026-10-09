@@ -25,19 +25,19 @@ use crate::clock::ClockSample;
 use crate::media::capabilities::{Continuity, MediaCapabilities};
 use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
+use crate::media::provenance::PositionProvenance;
 use crate::persistence::model::{PersistedCheckpoint, PersistedState};
 use crate::persistence::writer::Urgency;
-use crate::playback::checkpoint::PlaybackCheckpoint;
 use crate::playback::command::{LoadRequestId, ResumeIntent};
 use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
-use crate::playback::provenance::PositionProvenance;
 use crate::playback::state::PlaybackState;
-use crate::playback::volume::Volume;
 use crate::playlist::{PlaylistError, PlaylistId};
 pub use crate::queue::DisplayUpdate;
 use crate::queue::{
     Direction, DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueError,
 };
+use crate::resume::PlaybackCheckpoint;
+use crate::volume::Volume;
 use url::Url;
 // Re-exported so `src/app.rs` and `tests/resume_contract.rs` keep importing
 // these from `session` — the type and the function moved to `src/resume.rs`
@@ -232,7 +232,7 @@ pub struct Session {
     /// (writes only `estimated`, and never bootstraps or overwrites
     /// `position`) — the session policy reads this field and *never*
     /// `PositionQuality`, which is an orthogonal axis (see
-    /// `playback::provenance`). Reset to `Established` on every `Loaded`:
+    /// `media::provenance`). Reset to `Established` on every `Loaded`:
     /// a fresh load is itself one of the acts that re-establishes the
     /// absolute position, and nothing has claimed otherwise for the
     /// incoming media yet.

@@ -9,10 +9,10 @@ use time::OffsetDateTime;
 
 use super::queue_codec::{self, QueueReset};
 use crate::media::id::MediaId;
-use crate::playback::checkpoint::PlaybackCheckpoint;
-use crate::playback::volume::Volume;
 use crate::playlist::{PlaylistError, PlaylistId, PlaylistSet};
 use crate::queue::{Direction, DisplayUpdate, NewQueueEntry, QueueEntryId, QueueError, Removed};
+use crate::resume::PlaybackCheckpoint;
+use crate::volume::Volume;
 use url::Url;
 
 pub const SCHEMA_VERSION: u32 = 4;

@@ -11,12 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tenuto::http::channel::{SourceInterrupt, WaitHook};
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::playback::engine::TransportCore;
 use tenuto::playback::event::{PlaybackEvent, Progress};
 use tenuto::playback::handshake::Handshake;
 use tenuto::playback::link::OutputLink;
 use tenuto::playback::output::{Nanos, SpanRecord};
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::{PositionQuality, Timeline};
 use tenuto::playback::wait::{SessionFacts, WaitService};

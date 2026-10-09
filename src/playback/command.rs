@@ -4,7 +4,7 @@ use crate::media::id::MediaId;
 use crate::media::source::SourceLocation;
 use crate::resume::ResumeCandidate;
 
-use super::volume::Volume;
+use crate::volume::Volume;
 
 /// How a load's start is decided. `Load` carries one of these rather than a
 /// bare `Duration` because a `Candidate` cannot be resolved into a position

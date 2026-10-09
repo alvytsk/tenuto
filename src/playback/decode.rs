@@ -19,7 +19,7 @@ use crate::media::metadata::MediaMetadata;
 use crate::media::vbr_header::{VbrHeader, probe_vbr_header};
 
 use super::error::PlaybackError;
-use super::provenance::PositionProvenance;
+use crate::media::provenance::PositionProvenance;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SeekOutcome {

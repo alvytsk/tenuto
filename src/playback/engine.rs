@@ -40,7 +40,6 @@ use super::output::cpal_output::{CpalOutput, OutputFault};
 use super::output::null_output::NullOutput;
 use super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
 use super::prepare::{PrepareContext, prepare};
-use super::provenance::PositionProvenance;
 use super::reconnect::{Next, Outage, ReconnectPolicy, retryable};
 use super::resample::Converter;
 use super::spectrum::registry::{TapMapping, TapRegistry};
@@ -49,8 +48,9 @@ use super::spectrum::worker::{
 };
 use super::state::PlaybackState;
 use super::timeline::{PositionQuality, Timeline};
-use super::volume::Volume;
 use super::wait::{Servicing, SessionFacts, WaitService};
+use crate::media::provenance::PositionProvenance;
+use crate::volume::Volume;
 
 const STOP: u8 = 1;
 const SHUTDOWN: u8 = 2;

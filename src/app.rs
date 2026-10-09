@@ -33,7 +33,7 @@ use crate::playback::engine::EngineHandle;
 use crate::playback::error::PlaybackError;
 use crate::playback::prepare::{PrepareContext, prepare};
 use crate::playback::state::PlaybackState;
-use crate::playback::volume::Volume;
+use crate::volume::Volume;
 use unicode_width::UnicodeWidthStr;
 
 /// Re-exported so a test can drive the exact key routing this file's own key
@@ -551,7 +551,7 @@ fn fit_status(name: &str, fields: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::playback::provenance::PositionProvenance;
+    use crate::media::provenance::PositionProvenance;
     use crate::playlist::queue::{DisplayDuration, DurationSource};
 
     fn press(code: KeyCode) -> KeyEvent {

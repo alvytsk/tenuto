@@ -41,6 +41,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("persistence", 0),
     ("playlist", 0),
     ("resume", 0),
+    ("volume", 0),
     ("http", 1),
     ("feed", 1),
     ("subscription", 1),
@@ -67,13 +68,8 @@ const NAMED_RULES: &[(&str, &str)] = &[
 /// edge it excuses.
 const ALLOWED: &[(&str, &str)] = &[
     // B: foundation cleanup.
-    ("src/media/metadata.rs", "playback"),
     ("src/media/tags.rs", "playback"),
     ("src/media/vbr_header.rs", "playback"),
-    ("src/persistence/model.rs", "playback"),
-    ("src/persistence/queue_codec.rs", "playback"),
-    ("src/playlist/queue.rs", "playback"),
-    ("src/resume.rs", "playback"),
     ("src/error.rs", "feed"),
     ("src/error.rs", "playback"),
     ("src/media/display.rs", "http"),

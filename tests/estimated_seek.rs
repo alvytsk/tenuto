@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 use tenuto::http::limits::Limits;
 use tenuto::http::service::HttpService;
 use tenuto::media::id::{MediaId, NormalizedUrl};
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::media::source::SourceLocation;
 use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::PlaybackEvent;
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::playback::state::PlaybackState;
 use url::Url;
 

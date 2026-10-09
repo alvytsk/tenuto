@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::media::provenance::PositionProvenance;
 use crate::media::tags::CoverBytes;
-use crate::playback::provenance::PositionProvenance;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MediaMetadata {

@@ -6,7 +6,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::media::id::{AbsolutePath, MediaId, NormalizedUrl};
-use crate::playback::provenance::PositionProvenance;
+use crate::media::provenance::PositionProvenance;
 
 /// The cap on entries across *all* playlists (M8 §4). Enforced by
 /// `PlaylistSet`, the one place IDs are allocated, never by a `Queue`.

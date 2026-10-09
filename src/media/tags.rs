@@ -10,12 +10,12 @@ use symphonia::core::formats::TrackType;
 use symphonia::core::meta::{Metadata, MetadataRevision, StandardVisualKey};
 
 use crate::media::id::AbsolutePath;
+use crate::media::provenance::PositionProvenance;
 use crate::playback::decode::{
     ProbedContainer, StandardNames, open_local_file, probe_container, standard_names,
     track_duration,
 };
 use crate::playback::error::PlaybackError;
-use crate::playback::provenance::PositionProvenance;
 
 /// The largest embedded cover kept, encoded (§9: 10 MiB).
 pub const MAX_EMBEDDED_COVER_BYTES: usize = 10 * 1024 * 1024;

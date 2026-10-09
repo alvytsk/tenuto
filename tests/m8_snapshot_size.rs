@@ -29,15 +29,15 @@ use tenuto::application::enrich::TagProbe;
 use tenuto::application::runtime::{AppCommand, MAX_ENRICHMENT_PER_PUMP};
 use tenuto::clock::FakeClock;
 use tenuto::media::id::{AbsolutePath, EpisodeKey, FeedId, MediaId, NormalizedUrl};
+use tenuto::media::provenance::PositionProvenance;
 use tenuto::media::tags::LocalTags;
 use tenuto::persistence::model::PersistedState;
 use tenuto::persistence::store::StateStore;
-use tenuto::playback::checkpoint::PlaybackCheckpoint;
-use tenuto::playback::provenance::PositionProvenance;
 use tenuto::queue::{
     DisplayDuration, DisplayMetadata, DurationSource, MAX_PLAYLIST_ENTRIES, NewQueueEntry,
     QueueSource,
 };
+use tenuto::resume::PlaybackCheckpoint;
 use tenuto::session::Session;
 use url::Url;
 
