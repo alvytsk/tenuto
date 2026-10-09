@@ -247,3 +247,30 @@ fn an_estimated_location_serialises_absent_rather_than_null_when_unset() {
         "an unset estimate must be absent, not present as null: {json}"
     );
 }
+
+/// M9 foundation cleanup §5: the whole serialized form, byte for byte. A
+/// volume, an established checkpoint, an estimated-only entry, and playlist
+/// entries with both decoded duration provenances. Moving the types these
+/// are built from must not change one character of `state.json`.
+#[test]
+fn a_full_state_serializes_to_exactly_these_bytes() {
+    const STATE: &str = concat!(
+        r#"{"schema_version":4,"current_media":"local:/music/a.flac","volume":0.5,"#,
+        r#""checkpoints":{"#,
+        r#""local:/music/a.flac":{"position":{"secs":93,"nanos":0},"completed":false,"#,
+        r#""touch_seq":1,"updated_at":"1970-01-01T00:00:00Z"},"#,
+        r#""local:/music/b.flac":{"position":null,"completed":false,"#,
+        r#""touch_seq":2,"updated_at":"1970-01-01T00:00:00Z","estimated":{"secs":45,"nanos":0}}},"#,
+        r#""playlists":[{"id":1,"name":"Default","shuffle":null,"entries":["#,
+        r#"{"id":1,"media":"local:/music/a.flac","source":{"kind":"local","path":"/music/a.flac"},"#,
+        r#""display":{"title":"A","artist":null,"album":null,"year":null,"#,
+        r#""duration_ms":600000,"duration_source":"decoded_estimated"}},"#,
+        r#"{"id":2,"media":"local:/music/b.flac","source":{"kind":"local","path":"/music/b.flac"},"#,
+        r#""display":{"title":null,"artist":null,"album":null,"year":null,"#,
+        r#""duration_ms":1000,"duration_source":"decoded"}}],"active_entry":1}],"#,
+        r#""playing":1,"next_entry_id":3,"next_playlist_id":2}"#,
+    );
+    let state: PersistedState = serde_json::from_str(STATE).unwrap();
+    assert_eq!(state.volume(), Volume::new(0.5));
+    assert_eq!(serde_json::to_string(&state).unwrap(), STATE);
+}
