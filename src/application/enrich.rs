@@ -17,8 +17,8 @@ use crossbeam_channel::{Receiver, Sender};
 use crate::lifecycle::hooks::TestHook;
 use crate::lifecycle::panic::run_contained;
 use crate::media::id::{AbsolutePath, MediaId};
+use crate::media::probe::ProbeError;
 use crate::media::tags::{LocalTags, probe_local_tags};
-use crate::playback::error::PlaybackError;
 
 /// Queued jobs beyond the ones in hand; one per entry the playlists can
 /// hold, so a folder add of a whole library — or the re-request `vacate`
@@ -33,7 +33,7 @@ const RESULT_CAPACITY: usize = 64;
 
 /// Reads a local file's tags. Shared by every worker, so it must be callable
 /// from several threads at once.
-pub type TagProbe = Arc<dyn Fn(&AbsolutePath) -> Result<LocalTags, PlaybackError> + Send + Sync>;
+pub type TagProbe = Arc<dyn Fn(&AbsolutePath) -> Result<LocalTags, ProbeError> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub enum EnrichOutcome {

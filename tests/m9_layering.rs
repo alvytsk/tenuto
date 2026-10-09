@@ -68,8 +68,6 @@ const NAMED_RULES: &[(&str, &str)] = &[
 /// edge it excuses.
 const ALLOWED: &[(&str, &str)] = &[
     // B: foundation cleanup.
-    ("src/media/tags.rs", "playback"),
-    ("src/media/vbr_header.rs", "playback"),
     ("src/error.rs", "feed"),
     ("src/error.rs", "playback"),
     ("src/media/display.rs", "http"),

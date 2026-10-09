@@ -2,6 +2,7 @@ pub mod capabilities;
 pub mod display;
 pub mod id;
 pub mod metadata;
+pub mod probe;
 pub mod provenance;
 pub mod source;
 pub mod tags;

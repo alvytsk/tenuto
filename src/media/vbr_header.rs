@@ -16,7 +16,7 @@ use std::io::SeekFrom;
 
 use symphonia::core::io::MediaSource;
 
-use crate::playback::error::PlaybackError;
+use crate::media::probe::ProbeError;
 
 /// Read at least this many bytes before giving up. Chosen against a real
 /// case, not a round number: the Radio-T episode this task's bug report
@@ -64,7 +64,7 @@ pub enum VbrHeader {
 /// Returns `Ok(None)` for a source this cannot answer for — a non-MP3
 /// container, a short read, or a source that is not seekable. `None` means
 /// "no evidence gathered", and the caller must not read it as `Absent`.
-pub fn probe_vbr_header(source: &mut dyn MediaSource) -> Result<Option<VbrHeader>, PlaybackError> {
+pub fn probe_vbr_header(source: &mut dyn MediaSource) -> Result<Option<VbrHeader>, ProbeError> {
     if !source.is_seekable() {
         return Ok(None);
     }
@@ -119,7 +119,7 @@ const TAG_REGION_LEN: usize = if 32 + 4 > VBRI_TAG_OFFSET_FROM_HEADER + MIN_VBRI
 /// further out keeps that blocking read confined to files that actually
 /// have that much of a tag — which is also the only case §5.5's evidence
 /// gathering needs it for.
-fn gather_evidence(source: &mut dyn MediaSource) -> Result<Vec<u8>, PlaybackError> {
+fn gather_evidence(source: &mut dyn MediaSource) -> Result<Vec<u8>, ProbeError> {
     let mut buf = read_up_to(source, INITIAL_LEN)?;
     // `first_frame_offset` never actually returns `None` (see its own
     // comment); the fallback is defensive, not a guess.
@@ -138,7 +138,7 @@ fn gather_evidence(source: &mut dyn MediaSource) -> Result<Vec<u8>, PlaybackErro
 /// Reads up to `len` further bytes from `source`'s current position,
 /// stopping early at EOF. The returned `Vec` is exactly as long as what was
 /// actually read.
-fn read_up_to(source: &mut dyn MediaSource, len: usize) -> Result<Vec<u8>, PlaybackError> {
+fn read_up_to(source: &mut dyn MediaSource, len: usize) -> Result<Vec<u8>, ProbeError> {
     let mut buf = vec![0u8; len];
     let mut filled = 0usize;
     while filled < buf.len() {
@@ -146,7 +146,7 @@ fn read_up_to(source: &mut dyn MediaSource, len: usize) -> Result<Vec<u8>, Playb
             Ok(0) => break,
             Ok(n) => filled += n,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(PlaybackError::from(error)),
+            Err(error) => return Err(ProbeError::Io(error)),
         }
     }
     buf.truncate(filled);

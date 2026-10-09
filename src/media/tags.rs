@@ -10,12 +10,11 @@ use symphonia::core::formats::TrackType;
 use symphonia::core::meta::{Metadata, MetadataRevision, StandardVisualKey};
 
 use crate::media::id::AbsolutePath;
-use crate::media::provenance::PositionProvenance;
-use crate::playback::decode::{
-    ProbedContainer, StandardNames, open_local_file, probe_container, standard_names,
+use crate::media::probe::{
+    ProbeError, ProbedContainer, StandardNames, open_local_file, probe_container, standard_names,
     track_duration,
 };
-use crate::playback::error::PlaybackError;
+use crate::media::provenance::PositionProvenance;
 
 /// The largest embedded cover kept, encoded (§9: 10 MiB).
 pub const MAX_EMBEDDED_COVER_BYTES: usize = 10 * 1024 * 1024;
@@ -115,7 +114,7 @@ pub struct LocalTags {
 /// Only a visual whose usage is `FrontCover` counts (decision 13): the spec
 /// asks for front-cover artwork, and an untyped or back-cover picture must
 /// not stand in for it.
-pub fn probe_local_tags(path: &AbsolutePath) -> Result<LocalTags, PlaybackError> {
+pub fn probe_local_tags(path: &AbsolutePath) -> Result<LocalTags, ProbeError> {
     let local = open_local_file(path)?;
     let ProbedContainer {
         mut reader,
