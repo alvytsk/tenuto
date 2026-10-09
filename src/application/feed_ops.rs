@@ -1,13 +1,13 @@
 //! Feed and station changes (M9 PR C): the one dispatch behind `tenuto
 //! subscribe`, `unsubscribe` and `refresh` and the browser's feed and
-//! station keys. Each operation returns a [`Report`]: the text the CLI
+//! station keys. Each operation returns a `Report`: the text the CLI
 //! prints on stdout, and whether the operation completed. A partial success
 //! never counts as complete (M4 design doc §6.4). The CLI prints the text
 //! and maps the outcome to its exit status (`commands`); the browser shows
-//! it as a notice ([`Report::into_notice`]). Listing columns stay in
+//! it as a notice (`Report::into_notice`). Listing columns stay in
 //! `commands`.
 //!
-//! [`wait_http`] is the one place the CLI and the browse worker enter the
+//! `wait_http` is the one place the CLI and the browse worker enter the
 //! Tokio runtime, which keeps `block_on` out of `library`.
 //!
 //! Report text is built in a `String`, which cannot fail to grow, so each

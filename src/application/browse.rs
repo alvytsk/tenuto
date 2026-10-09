@@ -226,7 +226,7 @@ pub enum BrowseRequest {
     /// never touches the network.
     Stations,
     /// A change to the feed library or the saved stations, run the way its
-    /// CLI command runs it ([`feed_ops::run`]). Only `Subscribe`,
+    /// CLI command runs it (`feed_ops::run`). Only `Subscribe`,
     /// `Refresh`, `AddStation` and `ReprobeStation` touch the network.
     Op(FeedOp),
     /// A Files-tab folder add (M8 §8): the recursive walk behind `a`.

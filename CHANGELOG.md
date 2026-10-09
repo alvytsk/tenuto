@@ -71,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tenuto play` runs on the same player runtime as the TUI, so both share one
   view of playback, one transport and one way of opening `state.json`. Its
   keys, status line and exit codes are unchanged.
+- Feed and station changes run through one operation, shared by `tenuto
+  subscribe`/`unsubscribe`/`refresh` and the player's browser. Output, exit
+  codes and notices are unchanged. Library API: `BrowseRequest`'s
+  `Subscribe`, `Refresh`, `Unsubscribe`, `AddStation`, `RemoveStation` and
+  `ReprobeStation` variants are now `BrowseRequest::Op(FeedOp)`.
 
 ## [0.2.0] - 2026-09-23
 
