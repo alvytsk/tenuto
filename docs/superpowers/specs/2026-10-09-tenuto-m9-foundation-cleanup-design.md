@@ -88,7 +88,7 @@ Signatures that change:
 
 ### 3.4 `redact_url` to `telemetry`
 
-`redact_url` moves from `http/error.rs` to `telemetry.rs` unchanged. Its doc comment carries §7.2's rule. Every importing file (13, plus `http/error.rs` itself) changes to `crate::telemetry::redact_url` (or `tenuto::telemetry::redact_url` in `tests/`), and so does the intra-doc link in `tests/m4_diagnostics.rs`'s module doc. `http/error.rs` imports it from `telemetry` for its own uses.
+`redact_url` moves from `http/error.rs` to `telemetry.rs` unchanged. Its doc comment carries §7.2's rule. All 13 files that import it change to `crate::telemetry::redact_url` (or `tenuto::telemetry::redact_url` in `tests/`), and so does the intra-doc link in `tests/m4_diagnostics.rs`'s module doc. `http/error.rs` keeps no copy; its intra-doc link on `RemoteFailure` becomes [`crate::telemetry::redact_url`].
 
 ### 3.5 `MouseMode` and `ArtworkMode` to `tui`
 
