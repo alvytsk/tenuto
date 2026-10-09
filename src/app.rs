@@ -100,7 +100,11 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
             // No `EngineHandle`, no `AudioOutput` and no `HttpService` exist
             // yet, which is what keeps `NotPlayable` (§6.4) a resolution
             // failure rather than a playback one.
-            let (subs, cache) = crate::commands::platform_subscription_stores()?;
+            let crate::application::runtime::LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = crate::application::runtime::LibraryStores::platform()?;
             let (media, location) =
                 crate::library::resolve_episode(&subs, &cache, &slug, index.get())?;
             if probe_only {

@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::application::runtime::LibraryStores;
 use crate::cli::CliCommand;
 use crate::clock::SystemClock;
-use crate::feed::cache::CacheStore;
 use crate::feed::error::FeedError;
 use crate::http::limits::Limits;
 use crate::http::service::HttpService;
@@ -28,8 +28,6 @@ use crate::library::{
 };
 use crate::persistence::PersistenceError;
 use crate::persistence::store::StateStore;
-use crate::station::store::StationStore;
-use crate::subscription::store::SubscriptionStore;
 use crate::telemetry::{displayable, redact_url};
 
 /// Runs one feed command to completion.
@@ -42,7 +40,11 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
     let mut out = std::io::stdout().lock();
     let outcome = match command {
         CliCommand::Feeds => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             write_feeds(&mut out, &crate::library::list_feeds(&subs, &cache)?)
         }
         CliCommand::Episodes {
@@ -50,7 +52,11 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
             limit,
             reverse,
         } => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             // Read before listing, and surfaced rather than defaulted: a
             // state file that cannot be read is not "nothing has played",
             // and printing every episode as unplayed would misreport a
@@ -64,7 +70,11 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
             write_episodes(&mut out, &rows)
         }
         CliCommand::Subscribe { url, slug } => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             let service = HttpService::spawn(Limits::default())?;
             let outcome = wait_http(
                 &service,
@@ -75,12 +85,20 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
         CliCommand::Unsubscribe { slug } => {
             // No `HttpService`: removing a subscription is a local edit, and
             // spawning a runtime for it would be work with nothing to do.
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             let outcome = crate::library::unsubscribe(&subs, &cache, &slug)?;
             finish_unsubscribe(&mut out, outcome)
         }
         CliCommand::Refresh { slug: Some(slug) } => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             let service = HttpService::spawn(Limits::default())?;
             let outcome = wait_http(
                 &service,
@@ -89,7 +107,11 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
             finish_refresh_one(&mut out, outcome)
         }
         CliCommand::Refresh { slug: None } => {
-            let (subs, cache) = platform_subscription_stores()?;
+            let LibraryStores {
+                subscriptions: subs,
+                cache,
+                ..
+            } = LibraryStores::platform()?;
             let service = HttpService::spawn(Limits::default())?;
             let outcomes = wait_http(
                 &service,
@@ -108,45 +130,6 @@ pub fn run(command: CliCommand) -> Result<(), FeedError> {
     // anything, whatever it committed, so the flush decides the status too.
     out.flush().map_err(stdout_failure)?;
     outcome
-}
-
-/// The subscription and cache stores on this platform's directories.
-///
-/// Neither constructor touches the filesystem: `subscriptions.json` and the
-/// `feeds` directory come into existence on the first write, so a listing on
-/// a machine that has never subscribed creates nothing (§8.4). Checkpoints
-/// are deliberately absent — [`platform_state_store`] is a separate call, so
-/// that a command with no progress column to join against never opens
-/// `state.json` at all.
-pub(crate) fn platform_subscription_stores() -> Result<(SubscriptionStore, CacheStore), FeedError> {
-    let dirs = directories::ProjectDirs::from("", "", "tenuto").ok_or_else(|| {
-        FeedError::SubscriptionsUnreadable {
-            reason: "no platform data directory is available".to_string(),
-        }
-    })?;
-    let clock = Arc::new(SystemClock);
-    Ok((
-        SubscriptionStore::new(dirs.data_dir().join("subscriptions.json"), clock),
-        CacheStore::new(dirs.cache_dir().join("feeds")),
-    ))
-}
-
-/// The saved-station store on this platform's directory (M7.1 design doc §4,
-/// §6), at `stations.json` beside `subscriptions.json` in the same
-/// `data_dir`. A separate lookup from [`platform_subscription_stores`]
-/// rather than a third element of its tuple: every one of that function's
-/// callers is a feed command with no use for a station store, and widening
-/// its return type would hand each of them a store they never touch.
-pub(crate) fn platform_station_store() -> Result<StationStore, FeedError> {
-    let dirs = directories::ProjectDirs::from("", "", "tenuto").ok_or_else(|| {
-        FeedError::StationsUnreadable {
-            reason: "no platform data directory is available".to_string(),
-        }
-    })?;
-    Ok(StationStore::new(
-        dirs.data_dir().join("stations.json"),
-        Arc::new(SystemClock),
-    ))
 }
 
 /// The checkpoint store, on the same path playback itself uses —
