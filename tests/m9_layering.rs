@@ -14,11 +14,14 @@
 //! - a `super::` chain at least as long as the file's module depth, followed
 //!   by a declared module name. The depth comes from the file path, not from
 //!   inline modules, so inside `mod tests` this can report a reference that
-//!   is not real (write it with `crate::`), never miss one that is.
+//!   is not real (write it with `crate::`), never miss one that is. A
+//!   leading `self::` is transparent.
 //!
-//! Rejected as unsupported: `crate::{`, `tenuto::`, and a `super::*` or
-//! `super::{` that can reach the crate root before the file's first
-//! `#[cfg(test)]`.
+//! Rejected as unsupported: `crate::{`; `tenuto::`; a `super::` inside a
+//! `::{` group, whose real depth includes the group's prefix; and a
+//! `super::*` or `super::{` at least as long as the file's depth, except in
+//! test code (after the file's first `#[cfg(test)]`) at exactly that depth,
+//! where it means the file's own module.
 //!
 //! Not detected: whitespace inside a path (`crate :: x`, which `cargo fmt`
 //! removes), `use crate as c`, and a reference after a `//` inside a string
@@ -102,17 +105,24 @@ fn code_of(line: &str) -> &str {
     line.split("//").next().unwrap_or_default()
 }
 
-/// Byte offsets where `word` starts a path: not preceded by an identifier
-/// character or a `:`.
+/// Whether the segment at `at` begins a path: not preceded by an identifier
+/// character or a `:`, except through a leading `self::`.
+fn starts_path(code: &str, at: usize) -> bool {
+    let before = &code[..at];
+    if let Some(prefix) = before.strip_suffix("self::") {
+        return starts_path(code, prefix.len());
+    }
+    !before
+        .chars()
+        .next_back()
+        .is_some_and(|c| is_ident_char(c) || c == ':')
+}
+
+/// Byte offsets where `word` starts a path.
 fn path_starts(code: &str, word: &str) -> Vec<usize> {
     code.match_indices(word)
         .map(|(at, _)| at)
-        .filter(|&at| {
-            !code[..at]
-                .chars()
-                .next_back()
-                .is_some_and(|c| is_ident_char(c) || c == ':')
-        })
+        .filter(|&at| starts_path(code, at))
         .collect()
 }
 
@@ -204,6 +214,8 @@ fn scan(text: &str, depth: usize, modules: &BTreeMap<String, String>) -> Scan {
     let mut references = Vec::new();
     let mut unsupported = Vec::new();
     let mut in_tests = false;
+    // One entry per open brace: whether it opened a `::{` group.
+    let mut groups: Vec<bool> = Vec::new();
     for (number, line) in text.lines().enumerate() {
         let number = number + 1;
         let code = code_of(line);
@@ -221,26 +233,39 @@ fn scan(text: &str, depth: usize, modules: &BTreeMap<String, String>) -> Scan {
         if !path_starts(code, "tenuto::").is_empty() {
             unsupported.push((number, "tenuto::"));
         }
-        for at in path_starts(code, "super::") {
-            let mut rest = &code[at..];
-            let mut supers = 0;
-            while let Some(after) = rest.strip_prefix("super::") {
-                supers += 1;
-                rest = after;
-            }
-            if supers < depth {
+        let mut at = 0;
+        while let Some(rest) = code.get(at..).filter(|rest| !rest.is_empty()) {
+            if rest.starts_with("super::") && starts_path(code, at) {
+                let mut tail = rest;
+                let mut supers = 0;
+                while let Some(after) = tail.strip_prefix("super::") {
+                    supers += 1;
+                    tail = after;
+                }
+                at = code.len() - tail.len();
+                if groups.last() == Some(&true) {
+                    unsupported.push((number, "super:: inside a `::{` group"));
+                } else if supers >= depth {
+                    // Only a test module's glob at exactly the file's depth
+                    // means the file's own module; anything longer is the
+                    // crate root or past it.
+                    if tail.starts_with('*') || tail.starts_with('{') {
+                        if !(in_tests && supers == depth) {
+                            unsupported
+                                .push((number, "super::* or super::{ reaching the crate root"));
+                        }
+                    } else if modules.contains_key(ident_prefix(tail)) {
+                        references.push((number, ident_prefix(tail).to_owned()));
+                    }
+                }
                 continue;
             }
-            if rest.starts_with('*') || rest.starts_with('{') {
-                if !in_tests {
-                    unsupported.push((number, "super::* or super::{ reaching the crate root"));
-                }
-            } else {
-                let name = ident_prefix(rest);
-                if modules.contains_key(name) {
-                    references.push((number, name.to_owned()));
-                }
+            if rest.starts_with('{') {
+                groups.push(code[..at].ends_with("::"));
+            } else if rest.starts_with('}') {
+                groups.pop();
             }
+            at += rest.chars().next().map_or(1, char::len_utf8);
         }
     }
     Scan {
@@ -523,4 +548,49 @@ fn an_allowlisted_violation_passes_and_an_unused_entry_is_stale() {
     let entry = [("src/playback/engine.rs", "application")];
     assert!(errors_with(&upward, &entry).is_empty());
     assert_one_error(&errors_with(&[], &entry), "stale allowlist entry");
+}
+
+#[test]
+fn a_glob_past_the_test_module_s_own_file_is_unsupported() {
+    let errors = errors_for(&[(
+        "src/resume.rs",
+        "#[cfg(test)]\nmod tests {\n    use super::super::*;\n}",
+    )]);
+    assert_one_error(&errors, "src/resume.rs:3: unsupported path form: super::*");
+    let errors = errors_for(&[(
+        "src/resume.rs",
+        "#[cfg(test)]\nmod tests {\n    use super::super::{persistence};\n}",
+    )]);
+    assert_one_error(&errors, "src/resume.rs:3: unsupported path form: super::*");
+}
+
+#[test]
+fn a_super_path_inside_a_prefixed_group_is_unsupported() {
+    let errors = errors_for(&[(
+        "src/playlist/queue.rs",
+        "use super::{super::persistence::model::State};",
+    )]);
+    assert_one_error(
+        &errors,
+        "src/playlist/queue.rs:1: unsupported path form: super:: inside a `::{` group",
+    );
+    let errors = errors_for(&[(
+        "src/playlist/queue.rs",
+        "use super::{\n    super::persistence::model::State,\n    local,\n};",
+    )]);
+    assert_one_error(
+        &errors,
+        "src/playlist/queue.rs:2: unsupported path form: super:: inside a `::{` group",
+    );
+    let errors = errors_for(&[(
+        "src/playlist/queue.rs",
+        "use super::{local, other::Thing};\nfn f() { super::local(); }",
+    )]);
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
+#[test]
+fn self_before_super_is_transparent() {
+    let errors = errors_for(&[("src/resume.rs", "use self::super::persistence::State;")]);
+    assert_one_error(&errors, "src/resume.rs:1: resume -> persistence");
 }

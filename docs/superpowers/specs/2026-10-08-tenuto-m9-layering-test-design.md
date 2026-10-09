@@ -61,16 +61,17 @@ For each line of a scanned file, everything from the first `//` is dropped first
 
 Handled:
 - **`crate::<ident>`** is a reference to top-level `<ident>`.
-- **`super::` chains that can reach the crate root.** A file's depth is its number of module path components: `src/resume.rs` and `src/media/mod.rs` are 1, `src/media/tags.rs` is 2, `src/tui/render/browser.rs` is 3. A chain of `k` `super::` segments with `k >= depth`, followed by an identifier that is a declared top-level module, is a reference to that module. So `use super::persistence::…` in `src/resume.rs` is caught. The scanner does not track inline modules: inside `mod tests` the real target is one level shallower, so it may report a reference that does not exist, never miss one that does. The fix for such a false positive is to write the path with `crate::`. Today every chain with `k >= depth` is `use super::*` or `use super::<local item>` inside a test module, and neither names a top-level module.
+- **`super::` chains that can reach the crate root.** A file's depth is its number of module path components: `src/resume.rs` and `src/media/mod.rs` are 1, `src/media/tags.rs` is 2, `src/tui/render/browser.rs` is 3. A chain of `k` `super::` segments with `k >= depth`, followed by an identifier that is a declared top-level module, is a reference to that module. So `use super::persistence::…` in `src/resume.rs` is caught. The scanner does not track inline modules: inside `mod tests` the real target is one level shallower, so it may report a reference that does not exist, never miss one that does. The fix for such a false positive is to write the path with `crate::`. A leading `self::` is transparent: `self::super::x` is read as `super::x`. Today every chain with `k >= depth` is `use super::*` or `use super::<local item>` inside a test module, and neither names a top-level module.
 
 Rejected as unsupported (fails, naming the line):
 - **`crate::{`**: a grouped import from the crate root. Write one `use crate::<module>::…` per module.
-- **`super::{` or `super::*` with `k >= depth`, before the file's first `#[cfg(test)]` line**: what it imports from the crate root cannot be read off the line. After that line it is taken to sit inside a test module, where it means the file's own module. Today all five such imports (`clock.rs`, `commands.rs`, `app.rs`, `tui/mod.rs`, `playlist/mod.rs`) follow the file's first `#[cfg(test)]`.
-
-`super::<ident>` that reaches the crate root and names something other than a declared module is ignored: the registry (§3.1) keeps the crate root free of anything but modules, so such a path can only be a local item seen from a test module.
+- **`super::{` or `super::*` with `k >= depth`**: what it imports from the crate root cannot be read off the line. The one exception is test code (after the file's first `#[cfg(test)]` line) with exactly `k == depth`: there it sits inside a test module and means the file's own module. A longer chain reaches the crate root or past it and is rejected wherever it appears. Today all five `k == depth` imports (`clock.rs`, `commands.rs`, `app.rs`, `tui/mod.rs`, `playlist/mod.rs`) follow the file's first `#[cfg(test)]`.
+- **`super::` inside a `::{` group** (`use super::{super::persistence::…}`, on one line or as rustfmt splits it): its real depth includes the group's prefix, which the chain alone does not show. The scanner keeps a stack of open braces across lines and rejects any `super::` whose innermost open brace followed `::`. Write the path on its own `use` line. No source does this today.
 - **`tenuto::`**: the crate naming itself, which only `extern crate self as tenuto` would allow.
 
-Not detected, by construction: whitespace inside a path (`crate :: x`), which `cargo fmt --check` normalizes before CI's tests run; and `use crate as c`, which no source uses and rustfmt does not rewrite. Both are named in the test's module doc so the gap is visible.
+`super::<ident>` that reaches the crate root and names something other than a declared module is ignored: the registry (§3.1) keeps the crate root free of anything but modules, so such a path can only be a local item seen from a test module.
+
+Not detected, by construction: whitespace inside a path (`crate :: x`), which `cargo fmt --check` normalizes before CI's tests run; `use crate as c`, which no source uses and rustfmt does not rewrite; and a reference after a `//` inside a string literal on the same line. All three are named in the test's module doc so the gap is visible.
 
 ### 3.3 Checking and output
 
@@ -94,6 +95,7 @@ Scanning today's tree only proves today's tree is clean. A handful of unit tests
 - a `lib.rs` with an inline `mod x {`, an undeclared map entry, or a declared module missing from the map fails;
 - a file under an undeclared module fails;
 - an allowlisted violation passes, and an allowlist entry that excuses nothing fails as stale.
+- added after the final review: a test module's `super::super::*` or `super::super::{` in a depth-1 file fails; a `super::` inside a `::{` group fails, on one line and split across lines; `self::super::persistence` counts as a reference.
 
 ## 4. Allowlist today
 
