@@ -646,7 +646,7 @@ fn a_control_character_in_the_encoding_label_never_reaches_a_terminal() -> Falli
 /// | `InvalidSlug` | `slug` | `subscription::model::validate_slug` | The alias the listener typed. |
 /// | `SlugTaken` | `slug` | `library::subscribe` | A stored, already-validated slug. |
 /// | `AlreadySubscribed` | `slug` | `library::subscribe` | A stored, already-validated slug — deliberately not the URL that matched. |
-/// | `BatchIncomplete` | counts | `commands::finish_refresh_batch` | Integers. |
+/// | `BatchIncomplete` | counts | `application::feed_ops::finish_refresh_batch` | Integers. |
 /// | `Remote` | transparent | `http` | Every URL-bearing variant holds `redact_url` output, never a live `Url`. |
 /// | `Persistence` | transparent | `persistence` | Paths this process chose; `Deserialize` carries no `#[source]`, so serde's quoting cannot reach it. |
 #[test]

@@ -23,17 +23,12 @@ use std::thread;
 
 use crossbeam_channel::{Receiver, Sender};
 
+use crate::application::feed_ops::{self, FeedOp};
 use crate::application::runtime::LibraryStores;
 use crate::application::source::resolve_path;
-use crate::commands::{
-    finish_add_station, finish_refresh_batch, finish_refresh_one, finish_remove_station,
-    finish_reprobe_station, finish_subscribe, finish_unsubscribe, report, wait_http,
-};
-use crate::http::limits::Limits;
 use crate::http::service::HttpService;
 use crate::library::{
-    EpisodeCandidate, FeedSummary, StationRow, add_station, episode_candidates, list_feeds,
-    list_stations, refresh, refresh_all, remove_station, reprobe_station, subscribe, unsubscribe,
+    EpisodeCandidate, FeedSummary, StationRow, episode_candidates, list_feeds, list_stations,
 };
 use crate::media::id::MediaId;
 use crate::playlist::PlaylistId;
@@ -424,74 +419,31 @@ fn answer(
 }
 
 /// Runs one mutation the way its CLI command does, and reports it the way
-/// the CLI prints it (§3). Only `Subscribe`, `Refresh`, `AddStation` and
-/// `ReprobeStation` need the service; `RemoveStation` is a local edit like
-/// `Unsubscribe` and must never call [`http_service`] (M7.1 §6, R3).
+/// the CLI prints it (§3). The service in `http` is spawned on first use,
+/// and only by an operation that needs the network (`feed_ops::run`).
 fn mutate(
     stores: &LibraryStores,
     http: &mut Option<Arc<HttpService>>,
     request: &BrowseRequest,
 ) -> Result<String, String> {
-    let subs = &stores.subscriptions;
-    let cache = &stores.cache;
-    let stations = &stores.stations;
-    match request {
-        BrowseRequest::Subscribe { url } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, subscribe(&service, subs, cache, url, None))
-                .map_err(|error| error.to_string())?;
-            report(finish_subscribe, outcome)
-        }
-        BrowseRequest::Refresh { slug: Some(slug) } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, refresh(&service, subs, cache, slug))
-                .map_err(|error| error.to_string())?;
-            report(finish_refresh_one, outcome)
-        }
-        BrowseRequest::Refresh { slug: None } => {
-            let service = http_service(http)?;
-            let outcomes = wait_http(&service, refresh_all(&service, subs, cache))
-                .map_err(|error| error.to_string())?;
-            report(finish_refresh_batch, outcomes)
-        }
-        BrowseRequest::Unsubscribe { slug } => {
-            let outcome = unsubscribe(subs, cache, slug).map_err(|error| error.to_string())?;
-            report(finish_unsubscribe, outcome)
-        }
-        BrowseRequest::AddStation { url } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, add_station(&service, stations, url))
-                .map_err(|error| error.to_string())?;
-            report(finish_add_station, outcome)
-        }
-        BrowseRequest::RemoveStation { slug } => {
-            let outcome = remove_station(stations, slug).map_err(|error| error.to_string())?;
-            report(finish_remove_station, outcome)
-        }
-        BrowseRequest::ReprobeStation { slug } => {
-            let service = http_service(http)?;
-            let outcome = wait_http(&service, reprobe_station(&service, stations, slug))
-                .map_err(|error| error.to_string())?;
-            report(finish_reprobe_station, outcome)
-        }
+    // Temporary: Task 4 replaces this conversion with `BrowseRequest::Op`.
+    let op = match request {
+        BrowseRequest::Subscribe { url } => FeedOp::Subscribe {
+            url: url.clone(),
+            slug: None,
+        },
+        BrowseRequest::Refresh { slug } => FeedOp::Refresh { slug: slug.clone() },
+        BrowseRequest::Unsubscribe { slug } => FeedOp::Unsubscribe { slug: slug.clone() },
+        BrowseRequest::AddStation { url } => FeedOp::AddStation { url: url.clone() },
+        BrowseRequest::RemoveStation { slug } => FeedOp::RemoveStation { slug: slug.clone() },
+        BrowseRequest::ReprobeStation { slug } => FeedOp::ReprobeStation { slug: slug.clone() },
         BrowseRequest::Directory(_)
         | BrowseRequest::Feeds
         | BrowseRequest::Episodes { .. }
         | BrowseRequest::Stations
-        | BrowseRequest::CollectTree { .. } => Err("not a mutation".to_owned()),
-    }
-}
-
-/// The worker's HTTP service, built on the first request that needs one
-/// and kept for the thread's lifetime. A failure to start is this request's
-/// error; the next request tries again.
-fn http_service(slot: &mut Option<Arc<HttpService>>) -> Result<Arc<HttpService>, String> {
-    if let Some(service) = slot {
-        return Ok(Arc::clone(service));
-    }
-    let service = HttpService::spawn(Limits::default()).map_err(|error| error.to_string())?;
-    *slot = Some(Arc::clone(&service));
-    Ok(service)
+        | BrowseRequest::CollectTree { .. } => return Err("not a mutation".to_owned()),
+    };
+    feed_ops::run(&op, stores, http).into_notice()
 }
 
 /// Returns a redacted description of the request for logging, redacting any

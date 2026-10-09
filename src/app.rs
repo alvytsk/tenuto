@@ -65,9 +65,8 @@ const HELP_LINE: &str =
 /// entering the shared playback body: one positional through the existing
 /// [`resolve_source`], two through [`crate::library::resolve_episode`].
 /// `resolve_source` itself is unchanged; it gained a sibling. Everything
-/// else dispatches to [`crate::commands`], which owns every line this
-/// program prints for a feed command, the one synchronous bridge into the
-/// HTTP runtime, and the exit status a partial failure has to carry.
+/// else dispatches to [`crate::commands`], which prints every line a feed
+/// command reports and maps a partial failure to a failing exit status.
 pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
     // A bare `tenuto` opens the player. The defaults are the ones
     // `tenuto tui` applies when neither flag is given.
