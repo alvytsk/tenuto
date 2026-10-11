@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The player no longer rebuilds the playlist view every frame, only when
   something in it changed. With a few thousand entries queued, the player
   idles at under 1% CPU with the browser open, down from about 4%.
+- When `subscriptions.json` or `stations.json` cannot be written because it
+  is malformed, unreadable or from a newer build, the message now reads the
+  same way for both files.
 
 ### Internal
 
@@ -76,6 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   codes and notices are unchanged. Library API: `BrowseRequest`'s
   `Subscribe`, `Refresh`, `Unsubscribe`, `AddStation`, `RemoveStation` and
   `ReprobeStation` variants are now `BrowseRequest::Op(FeedOp)`.
+- `state.json`, `subscriptions.json` and `stations.json` share one read,
+  recovery and save path. `ResumeIntent` moves to `resume` (still exported
+  from `playback::command`); `session::resume_intent_for`,
+  `resume::resume_candidate`, `resume::restart_preference` and
+  `RestartPreference` leave the library's public surface.
 
 ## [0.2.0] - 2026-09-23
 
