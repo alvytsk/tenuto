@@ -400,83 +400,75 @@ fn lock_subscriptions(subs: &SubscriptionStore) -> Result<ProfileLock, FeedError
     })
 }
 
+/// Narrows a store's `load` to the one outcome a mutation may proceed on: a
+/// writable `Loaded` or `Missing`. Every other `LoadReason` becomes a visible
+/// refusal, so a mutation never overwrites a file the store chose to
+/// preserve. A quarantine that worked leaves the session writable and still
+/// refuses this mutation: the user's list just moved aside, and saving an
+/// empty one over it now would look like data loss.
+fn writable<T>(
+    snapshot: T,
+    writable: bool,
+    reason: LoadReason,
+    file: &str,
+    consequence: &str,
+) -> Result<T, String> {
+    if writable && matches!(reason, LoadReason::Loaded | LoadReason::Missing) {
+        return Ok(snapshot);
+    }
+    Err(match reason {
+        LoadReason::Quarantined { moved_to } => format!(
+            "{file} was malformed and has been moved aside to {}; {consequence}",
+            moved_to.display()
+        ),
+        LoadReason::QuarantineFailed => {
+            format!("{file} is malformed and could not be moved aside; {consequence}")
+        }
+        LoadReason::Unreadable => format!("{file} could not be read; {consequence}"),
+        LoadReason::UnsupportedVersion { found } => format!(
+            "{file} is schema version {found}, which this build does not support; {consequence}"
+        ),
+        // Unreachable given the guard above: kept so this match stays
+        // exhaustive over every `LoadReason` rather than relying on a
+        // wildcard arm to paper over a future variant.
+        LoadReason::Loaded | LoadReason::Missing => {
+            format!("{file} is not writable; {consequence}")
+        }
+    })
+}
+
+/// [`writable`] for `subscriptions.json`.
 fn load_mutating(subs: &SubscriptionStore) -> Result<SubscriptionSnapshot, FeedError> {
     let SubscriptionLoad {
         snapshot,
-        writable,
+        writable: ok,
         reason,
     } = subs.load();
-
-    if writable && matches!(reason, LoadReason::Loaded | LoadReason::Missing) {
-        return Ok(snapshot);
-    }
-
-    let reason = match reason {
-        LoadReason::Quarantined { moved_to } => format!(
-            "subscriptions file was malformed and has been moved aside to {}; \
-             subscribe, unsubscribe and refresh are unavailable until this is resolved",
-            moved_to.display()
-        ),
-        LoadReason::QuarantineFailed => "subscriptions file is malformed and could not be \
-             moved aside; subscribe, unsubscribe and refresh are unavailable"
-            .to_string(),
-        LoadReason::Unreadable => "subscriptions file could not be read; subscribe, \
-             unsubscribe and refresh are unavailable"
-            .to_string(),
-        LoadReason::UnsupportedVersion { found } => format!(
-            "subscriptions file is schema version {found}, which this build does not \
-             support; subscribe, unsubscribe and refresh are unavailable"
-        ),
-        // Unreachable given the `writable` guard above: kept so this match
-        // stays exhaustive over every `LoadReason` rather than relying on a
-        // wildcard arm to paper over a future variant.
-        LoadReason::Loaded | LoadReason::Missing => {
-            "subscriptions file could not be prepared for writing".to_string()
-        }
-    };
-    Err(FeedError::SubscriptionsUnreadable { reason })
+    writable(
+        snapshot,
+        ok,
+        reason,
+        "subscriptions file",
+        "subscribe, unsubscribe and refresh are unavailable",
+    )
+    .map_err(|reason| FeedError::SubscriptionsUnreadable { reason })
 }
 
-/// [`load_mutating`]'s counterpart for stations (M7.1 §4). Every `LoadReason`
-/// but `Loaded` and `Missing` (both `writable`) becomes a visible
-/// [`FeedError::StationsUnreadable`], so a station mutation never overwrites
-/// a file the store chose to preserve — the exact failure this function
-/// exists to prevent: `StationStore::load` deliberately hands back an empty,
-/// non-writable snapshot for an unreadable or unsupported-version file, and
-/// saving that snapshot back would replace the preserved file with one
-/// holding only whatever this mutation just added.
+/// [`writable`] for `stations.json` (M7.1 §4).
 fn load_mutating_stations(stations: &StationStore) -> Result<StationSnapshot, FeedError> {
     let StationLoad {
         snapshot,
-        writable,
+        writable: ok,
         reason,
     } = stations.load();
-
-    if writable && matches!(reason, LoadReason::Loaded | LoadReason::Missing) {
-        return Ok(snapshot);
-    }
-
-    let reason = match reason {
-        LoadReason::Quarantined { moved_to } => format!(
-            "stations file was malformed and has been moved to {}",
-            moved_to.display()
-        ),
-        LoadReason::QuarantineFailed => "stations file is malformed and could not be moved \
-             aside; no station was changed"
-            .to_string(),
-        LoadReason::Unreadable => {
-            "stations file could not be read; no station was changed".to_string()
-        }
-        LoadReason::UnsupportedVersion { found } => format!(
-            "stations file is schema version {found}, which this build does not write; \
-             no station was changed"
-        ),
-        // Unreachable given the `writable` guard above: kept so this match
-        // stays exhaustive over every `LoadReason` rather than relying on a
-        // wildcard arm to paper over a future variant.
-        LoadReason::Loaded | LoadReason::Missing => "stations file is not writable".to_string(),
-    };
-    Err(FeedError::StationsUnreadable { reason })
+    writable(
+        snapshot,
+        ok,
+        reason,
+        "stations file",
+        "no station was changed",
+    )
+    .map_err(|reason| FeedError::StationsUnreadable { reason })
 }
 
 /// Parses `url` and validates it against the same public-source bar
@@ -1247,5 +1239,53 @@ pub async fn reprobe_station(
                 redact_url(url.as_str())
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use std::path::PathBuf;
+
+    use super::{LoadReason, writable};
+
+    const FILE: &str = "toy file";
+    const CONSEQUENCE: &str = "nothing was changed";
+
+    fn refusal(writable_flag: bool, reason: LoadReason) -> String {
+        writable((), writable_flag, reason, FILE, CONSEQUENCE).unwrap_err()
+    }
+
+    #[test]
+    fn only_a_writable_loaded_or_missing_file_lets_a_mutation_proceed() {
+        assert!(writable(7, true, LoadReason::Loaded, FILE, CONSEQUENCE) == Ok(7));
+        assert!(writable(7, true, LoadReason::Missing, FILE, CONSEQUENCE) == Ok(7));
+        // A quarantine that worked leaves the session writable, and still
+        // refuses this mutation.
+        let moved_to = PathBuf::from("/x/toy.json.rejected-19700101T000000Z");
+        assert_eq!(
+            refusal(true, LoadReason::Quarantined { moved_to }),
+            "toy file was malformed and has been moved aside to \
+             /x/toy.json.rejected-19700101T000000Z; nothing was changed"
+        );
+    }
+
+    #[test]
+    fn every_other_outcome_reads_from_one_template() {
+        assert_eq!(
+            refusal(false, LoadReason::QuarantineFailed),
+            "toy file is malformed and could not be moved aside; nothing was changed"
+        );
+        assert_eq!(
+            refusal(false, LoadReason::Unreadable),
+            "toy file could not be read; nothing was changed"
+        );
+        assert_eq!(
+            refusal(false, LoadReason::UnsupportedVersion { found: 9 }),
+            "toy file is schema version 9, which this build does not support; nothing was changed"
+        );
+        assert_eq!(
+            refusal(false, LoadReason::Loaded),
+            "toy file is not writable; nothing was changed"
+        );
     }
 }
