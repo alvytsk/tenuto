@@ -841,3 +841,74 @@ fn debug_logging_records_no_document_request_or_validator() -> Fallible {
     );
     Ok(())
 }
+
+/// Spec D §2: a malformed file's log line still says why — the sanitized
+/// category, line and column for a JSON error, the validation sentence for a
+/// bad record — under the default `tenuto=info` filter, and never the file's
+/// content.
+#[test]
+fn a_malformed_file_logs_why_without_its_content() -> Fallible {
+    let root = tempfile::tempdir()?;
+    let data = root.path().join("data").join("tenuto");
+    let state = root.path().join("state").join("tenuto");
+    std::fs::create_dir_all(&data)?;
+    std::fs::create_dir_all(&state)?;
+    let subscriptions = data.join("subscriptions.json");
+    let run = |args: &[&str]| -> std::io::Result<String> {
+        let output = process::command_in(root.path())
+            .args(args)
+            .env("TENUTO_AUDIO_OUTPUT", "null")
+            .output()?;
+        Ok(String::from_utf8_lossy(&output.stderr).into_owned())
+    };
+
+    std::fs::write(
+        &subscriptions,
+        br#"{"schema_version":1,"subscriptions":[{"fetch_url":"https://SECRETHOST/feed""#,
+    )?;
+    let syntax = run(&["unsubscribe", "radio-t"])?;
+
+    std::fs::write(
+        &subscriptions,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "subscriptions": [{
+                "feed_id": "9f3c1a7e42b58d0c6f19ab3e5d72c840",
+                "slug": "Not A Slug",
+                "title": null,
+                "fetch_url": "https://SECRETHOST/feed",
+                "added_at": "2026-09-11T09:14:22Z"
+            }]
+        }))?,
+    )?;
+    let invalid = run(&["unsubscribe", "radio-t"])?;
+
+    std::fs::write(
+        state.join("state.json"),
+        br#"{"schema_version":4,"checkpoints":{"url:https://SECRETHOST/a":"#,
+    )?;
+    let fixture = support::fixture_path("sine.wav");
+    let play = run(&["play", &fixture.display().to_string()])?;
+
+    for (name, log) in [("syntax", &syntax), ("state", &play)] {
+        assert!(
+            log.contains("the file is malformed")
+                && log.contains("category=")
+                && log.contains("line=")
+                && log.contains("column="),
+            "{name}: the position fields are missing: {log}"
+        );
+    }
+    assert!(
+        invalid.contains("the file is malformed")
+            && invalid.contains("reason=\"a slug is not valid\""),
+        "the validation reason is missing: {invalid}"
+    );
+    for log in [&syntax, &invalid, &play] {
+        assert!(
+            !log.contains("SECRETHOST"),
+            "file content reached the log: {log}"
+        );
+    }
+    Ok(())
+}
