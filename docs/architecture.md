@@ -34,7 +34,7 @@ Other fixed rules:
 - A partial success never exits zero.
 - Every URL in a message or a log line has passed `redact_url` first.
 - Runtime code forbids `unsafe` and denies `unwrap` and `expect`.
-- **A fresh load's starting point is a choice `resume_intent_for` makes per media kind, not a weakening of the position contract above.** Since M8, a local file's or a plain URL's *fresh load* always starts at position zero, whatever checkpoint is on record; a podcast episode still resumes it. The checkpoint is unaffected either way — it is still recorded and still read back — and the position contract still governs everything downstream of that starting point: once loaded, stop, pause and transport recreation continue to preserve it exactly as before. Pausing and pressing Stop then Play is not a fresh load and always continues mid-track.
+- **A fresh load's starting point is a choice `resume::resume_intent` makes per media kind, not a weakening of the position contract above.** Since M8, a local file's or a plain URL's *fresh load* always starts at position zero, whatever checkpoint is on record; a podcast episode still resumes it. The checkpoint is unaffected either way — it is still recorded and still read back — and the position contract still governs everything downstream of that starting point: once loaded, stop, pause and transport recreation continue to preserve it exactly as before. Pausing and pressing Stop then Play is not a fresh load and always continues mid-track.
 
 ## 2. System context
 
