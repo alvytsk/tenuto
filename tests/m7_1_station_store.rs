@@ -121,56 +121,45 @@ fn a_missing_file_is_an_empty_list_not_an_error() {
     assert!(read.stations.is_empty());
 }
 
+/// Wiring: the store hands the shared lifecycle its own file name and its
+/// one version. The lifecycle itself is tested in `persistence::json_file`.
 #[test]
-fn read_snapshot_reports_a_malformed_file_and_never_quarantines_it() {
+fn the_store_wires_its_file_name_and_version() {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let path = dir.path().join("stations.json");
-    std::fs::write(&path, b"{ not json").unwrap_or_else(|error| panic!("{error}"));
     let store = StationStore::new(path.clone(), clock());
 
-    assert!(
-        matches!(
-            store.read_snapshot(),
-            Err(FeedError::StationsUnreadable { .. })
-        ),
-        "a read-only command reports the problem",
-    );
-    assert!(path.exists(), "read_snapshot never moves the file");
-}
+    for version in [0u32, 2] {
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema_version":{version},"stations":[]}}"#),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let load = store.load();
+        assert!(
+            matches!(load.reason, LoadReason::UnsupportedVersion { found } if found == version),
+            "version {version}: {:?}",
+            load.reason
+        );
+    }
 
-#[test]
-fn load_quarantines_a_malformed_file_and_starts_empty() {
-    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
-    let path = dir.path().join("stations.json");
     std::fs::write(&path, b"{ not json").unwrap_or_else(|error| panic!("{error}"));
-    let store = StationStore::new(path.clone(), clock());
-
     let load = store.load();
-    assert!(
-        load.writable,
-        "a quarantined file leaves the session writable"
+    let LoadReason::Quarantined { moved_to } = load.reason else {
+        panic!("expected a quarantine, got {:?}", load.reason);
+    };
+    assert_eq!(
+        moved_to.file_name().and_then(|name| name.to_str()),
+        Some("stations.json.rejected-19700101T000000Z")
     );
     assert!(load.snapshot.stations.is_empty());
-    assert!(matches!(load.reason, LoadReason::Quarantined { .. }));
-    assert!(!path.exists(), "the malformed file moved aside");
-
-    let moved: Vec<_> = std::fs::read_dir(dir.path())
-        .unwrap_or_else(|error| panic!("{error}"))
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("stations.json.rejected-")
-        })
-        .collect();
-    assert_eq!(moved.len(), 1, "exactly one quarantine file");
+    assert!(load.writable);
 }
 
 /// §6: `media` is derived from `url`, never an independent field. A
 /// hand-edited `url` whose `media` was left stale (the record a user is
 /// most likely to touch by hand) must be quarantined exactly like any
-/// other malformed file, mirroring `load_quarantines_a_malformed_file_and_starts_empty`.
+/// other malformed file.
 #[test]
 fn a_media_that_disagrees_with_its_url_is_malformed() {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
@@ -319,5 +308,88 @@ fn is_station_answers_for_a_claimed_url_even_without_a_logo() {
     assert!(
         !store.is_station(&media_of("https://elsewhere.example/track.mp3")),
         "a URL no station claims is not a station"
+    );
+}
+
+/// Review Focus 3, for stations.
+#[test]
+fn read_errors_keep_their_text() {
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let path = dir.path().join("stations.json");
+    let reason = || match StationStore::new(path.clone(), clock()).read_snapshot() {
+        Err(FeedError::StationsUnreadable { reason }) => reason,
+        other => panic!("expected StationsUnreadable, got {other:?}"),
+    };
+
+    std::fs::create_dir(&path).unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        reason().starts_with("cannot read stations file: "),
+        "{}",
+        reason()
+    );
+    std::fs::remove_dir(&path).unwrap_or_else(|error| panic!("{error}"));
+
+    std::fs::write(&path, br#"{"schema_version":2,"stations":[]}"#)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        reason(),
+        "stations file is schema version 2, and this build supports 1"
+    );
+
+    std::fs::write(&path, b"broken").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        reason(),
+        "stations file is malformed (syntax error at line 1, column 1)"
+    );
+
+    let invalid = serde_json::json!({
+        "schema_version": 1,
+        "stations": [{
+            "slug": "Not A Slug",
+            "url": "https://radio.example/live",
+            "media": "remote:https://radio.example/live",
+            "added_at": "1970-01-01T00:00:00Z"
+        }]
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&invalid).unwrap_or_else(|error| panic!("{error}")),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(reason(), "a slug is not valid");
+}
+
+/// Spec §2, for stations.
+#[test]
+fn a_save_that_cannot_serialize_leaves_the_file_as_it_was() {
+    use tenuto::persistence::PersistenceError;
+
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let path = dir.path().join("stations.json");
+    let store = StationStore::new(path.clone(), clock());
+    let mut snapshot = StationSnapshot {
+        stations: vec![station("lofi", "https://radio.example/live", None)],
+    };
+    store
+        .save(&snapshot)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let before = std::fs::read(&path).unwrap_or_else(|error| panic!("{error}"));
+    snapshot.stations[0].added_at = time::Date::from_calendar_date(-1, time::Month::January, 1)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .midnight()
+        .assume_utc();
+
+    let result = store.save(&snapshot);
+
+    assert!(
+        matches!(
+            result,
+            Err(FeedError::Persistence(PersistenceError::Serialize { .. }))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap_or_else(|error| panic!("{error}")),
+        before
     );
 }

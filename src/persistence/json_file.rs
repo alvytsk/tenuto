@@ -62,6 +62,25 @@ pub enum Malformed {
         line: usize,
         column: usize,
     },
+    /// A record failed the store's own validation. The text is a fixed
+    /// sentence chosen by the store, never taken from the file.
+    Invalid(&'static str),
+}
+
+impl Malformed {
+    /// The sentence a store shows for this rejection: today's
+    /// `"<file> is malformed (<category> error at line L, column C)"`, or
+    /// the validation sentence as it stands.
+    pub fn reason(&self, file: &str) -> String {
+        match *self {
+            Self::Json {
+                category,
+                line,
+                column,
+            } => format!("{file} is malformed ({category} error at line {line}, column {column})"),
+            Self::Invalid(what) => what.to_string(),
+        }
+    }
 }
 
 /// What [`JsonFile::read`] reports for a file it cannot hand back.
@@ -70,6 +89,20 @@ pub enum Rejected {
     Unreadable(io::Error),
     UnsupportedVersion(u32),
     Malformed(Malformed),
+}
+
+impl Rejected {
+    /// The reason a read-only listing shows, worded as the subscription and
+    /// station stores always have.
+    pub fn reason(&self, file: &str, supported: u32) -> String {
+        match self {
+            Self::Unreadable(error) => format!("cannot read {file}: {error}"),
+            Self::UnsupportedVersion(found) => {
+                format!("{file} is schema version {found}, and this build supports {supported}")
+            }
+            Self::Malformed(malformed) => malformed.reason(file),
+        }
+    }
 }
 
 /// What [`JsonFile::load`] found, and whether the caller may write.
@@ -121,6 +154,10 @@ impl JsonFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn now(&self) -> OffsetDateTime {
+        self.clock.sample().wall
     }
 
     pub fn read<T>(
@@ -300,6 +337,9 @@ fn log_malformed(path: &Path, malformed: &Malformed) {
             line,
             column,
         } => tracing::warn!(path = ?path, category, line, column, "the file is malformed"),
+        Malformed::Invalid(reason) => {
+            tracing::warn!(path = ?path, reason, "the file is malformed");
+        }
     }
 }
 
@@ -372,6 +412,55 @@ mod tests {
     fn decode(version: u32, bytes: &[u8]) -> Result<(u32, Vec<u32>), Malformed> {
         let toy: Toy = serde_json::from_slice(bytes).map_err(|source| malformed(&source))?;
         Ok((version, toy.items))
+    }
+
+    /// Like `decode`, but a zero item fails validation.
+    fn decode_nonzero(version: u32, bytes: &[u8]) -> Result<(u32, Vec<u32>), Malformed> {
+        let (version, items) = decode(version, bytes)?;
+        if items.contains(&0) {
+            return Err(Malformed::Invalid("an item is zero"));
+        }
+        Ok((version, items))
+    }
+
+    #[test]
+    fn a_record_that_fails_validation_is_malformed_like_a_syntax_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("toy.json");
+        fs::write(&path, br#"{"schema_version":2,"items":[1,0]}"#).unwrap();
+        let file = file_in(dir.path());
+
+        assert!(matches!(
+            file.read(BAND, decode_nonzero),
+            Err(Rejected::Malformed(Malformed::Invalid("an item is zero")))
+        ));
+        assert!(path.exists(), "a read never moves the file");
+
+        let load = file.load(BAND, decode_nonzero);
+        assert!(matches!(load.reason, LoadReason::Quarantined { .. }));
+        assert!(load.writable);
+    }
+
+    #[test]
+    fn a_rejection_reads_as_the_stores_have_always_worded_it() {
+        let unsupported = Rejected::UnsupportedVersion(7);
+        assert_eq!(
+            unsupported.reason("toy file", 2),
+            "toy file is schema version 7, and this build supports 2"
+        );
+        let json = Rejected::Malformed(Malformed::Json {
+            category: "syntax",
+            line: 3,
+            column: 9,
+        });
+        assert_eq!(
+            json.reason("toy file", 2),
+            "toy file is malformed (syntax error at line 3, column 9)"
+        );
+        assert_eq!(
+            Rejected::Malformed(Malformed::Invalid("an item is zero")).reason("toy file", 2),
+            "an item is zero"
+        );
     }
 
     fn listing(dir: &Path) -> Vec<String> {

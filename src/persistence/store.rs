@@ -221,6 +221,16 @@ impl StateStore {
                 line,
                 column,
             }),
+            // State decode only ever builds `Malformed::Json`; this arm keeps
+            // the match exhaustive with static text, not a new variant.
+            Err(Rejected::Malformed(Malformed::Invalid(what))) => {
+                Err(PersistenceError::Deserialize {
+                    path: path.to_path_buf(),
+                    category: what,
+                    line: 0,
+                    column: 0,
+                })
+            }
         }
     }
 
