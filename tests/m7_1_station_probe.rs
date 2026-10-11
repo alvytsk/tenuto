@@ -17,6 +17,7 @@ use std::sync::Arc;
 use support::browse::{answer, wait_for_result};
 use support::server::{Script, TestServer};
 use tenuto::application::browse::{BrowseRequest, BrowseResult, BrowseWorker};
+use tenuto::application::feed_ops::FeedOp;
 use tenuto::application::runtime::LibraryStores;
 use tenuto::clock::SystemClock;
 use tenuto::feed::cache::CacheStore;
@@ -494,9 +495,9 @@ fn the_worker_answers_every_station_request() {
     let server = TestServer::start(Script::from_fixture("sine-noxing.mp3").icy_station());
     let worker = BrowseWorker::spawn(Some(stores(root.path())));
 
-    let add_request = BrowseRequest::AddStation {
+    let add_request = BrowseRequest::Op(FeedOp::AddStation {
         url: server.url("/radio"),
-    };
+    });
     let (echoed, outcome) = answer(&worker, add_request.clone());
     assert_eq!(echoed, add_request);
     let text = outcome.unwrap_or_else(|error| panic!("add failed: {error}"));
@@ -506,7 +507,7 @@ fn the_worker_answers_every_station_request() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     let slug = rows[0].slug.clone();
 
-    let remove_request = BrowseRequest::RemoveStation { slug: slug.clone() };
+    let remove_request = BrowseRequest::Op(FeedOp::RemoveStation { slug: slug.clone() });
     let (echoed, outcome) = answer(&worker, remove_request.clone());
     assert_eq!(echoed, remove_request);
     assert_eq!(outcome, Ok(format!("{slug}: removed")), "{outcome:?}");
@@ -544,7 +545,10 @@ fn listing_and_removing_stations_open_no_connection() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].slug, slug);
 
-    let (_, removed) = answer(&worker, BrowseRequest::RemoveStation { slug: slug.clone() });
+    let (_, removed) = answer(
+        &worker,
+        BrowseRequest::Op(FeedOp::RemoveStation { slug: slug.clone() }),
+    );
     assert_eq!(removed, Ok(format!("{slug}: removed")), "{removed:?}");
 
     assert_eq!(
@@ -572,9 +576,9 @@ fn every_station_mutation_echoes_the_request_it_answers() {
     );
     let worker = BrowseWorker::spawn(Some(stores(root.path())));
 
-    let add_request = BrowseRequest::AddStation {
+    let add_request = BrowseRequest::Op(FeedOp::AddStation {
         url: server.url("/radio"),
-    };
+    });
     let (echoed, outcome) = answer(&worker, add_request.clone());
     assert_eq!(echoed, add_request);
     outcome.unwrap_or_else(|error| panic!("add failed: {error}"));
@@ -582,12 +586,12 @@ fn every_station_mutation_echoes_the_request_it_answers() {
     let rows = list(&worker).unwrap_or_else(|error| panic!("list: {error}"));
     let slug = rows[0].slug.clone();
 
-    let reprobe_request = BrowseRequest::ReprobeStation { slug: slug.clone() };
+    let reprobe_request = BrowseRequest::Op(FeedOp::ReprobeStation { slug: slug.clone() });
     let (echoed, outcome) = answer(&worker, reprobe_request.clone());
     assert_eq!(echoed, reprobe_request);
     outcome.unwrap_or_else(|error| panic!("reprobe failed: {error}"));
 
-    let remove_request = BrowseRequest::RemoveStation { slug: slug.clone() };
+    let remove_request = BrowseRequest::Op(FeedOp::RemoveStation { slug: slug.clone() });
     let (echoed, outcome) = answer(&worker, remove_request.clone());
     assert_eq!(echoed, remove_request);
     outcome.unwrap_or_else(|error| panic!("remove failed: {error}"));

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use support::browse::answer;
 use support::server::{DocumentReply, Script, TestServer};
 use tenuto::application::browse::{BrowseRequest, BrowseResult, BrowseWorker};
+use tenuto::application::feed_ops::FeedOp;
 use tenuto::application::runtime::LibraryStores;
 use tenuto::clock::SystemClock;
 use tenuto::feed::cache::CacheStore;
@@ -70,9 +71,10 @@ fn subscribe_refresh_and_unsubscribe_answer_with_the_cli_wording() {
     ]));
     let worker = BrowseWorker::spawn(Some(stores(root.path())));
 
-    let request = BrowseRequest::Subscribe {
+    let request = BrowseRequest::Op(FeedOp::Subscribe {
         url: server.url("/a"),
-    };
+        slug: None,
+    });
     let (echoed, outcome) = answer(&worker, request.clone());
     assert_eq!(echoed, request);
     assert_eq!(
@@ -84,9 +86,10 @@ fn subscribe_refresh_and_unsubscribe_answer_with_the_cli_wording() {
 
     let (_, again) = answer(
         &worker,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: server.url("/a"),
-        },
+            slug: None,
+        }),
     );
     assert_eq!(
         again,
@@ -96,16 +99,18 @@ fn subscribe_refresh_and_unsubscribe_answer_with_the_cli_wording() {
 
     let (_, invalid) = answer(
         &worker,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: "not a url".into(),
-        },
+            slug: None,
+        }),
     );
     assert!(invalid.is_err(), "{invalid:?}");
     let (_, failing) = answer(
         &worker,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: server.url("/bad"),
-        },
+            slug: None,
+        }),
     );
     assert!(failing.is_err(), "{failing:?}");
     assert_eq!(
@@ -116,9 +121,9 @@ fn subscribe_refresh_and_unsubscribe_answer_with_the_cli_wording() {
 
     let (_, refreshed) = answer(
         &worker,
-        BrowseRequest::Refresh {
+        BrowseRequest::Op(FeedOp::Refresh {
             slug: Some("radio-t".into()),
-        },
+        }),
     );
     assert_eq!(
         refreshed.as_deref(),
@@ -128,9 +133,9 @@ fn subscribe_refresh_and_unsubscribe_answer_with_the_cli_wording() {
 
     let (_, removed) = answer(
         &worker,
-        BrowseRequest::Unsubscribe {
+        BrowseRequest::Op(FeedOp::Unsubscribe {
             slug: "radio-t".into(),
-        },
+        }),
     );
     assert_eq!(
         removed.as_deref(),
@@ -140,9 +145,9 @@ fn subscribe_refresh_and_unsubscribe_answer_with_the_cli_wording() {
     assert!(slugs(root.path()).is_empty());
     let (_, missing) = answer(
         &worker,
-        BrowseRequest::Unsubscribe {
+        BrowseRequest::Op(FeedOp::Unsubscribe {
             slug: "radio-t".into(),
-        },
+        }),
     );
     assert_eq!(
         missing,
@@ -162,20 +167,22 @@ fn refresh_all_reports_every_feed_then_the_batch_error() {
     let worker = BrowseWorker::spawn(Some(stores(root.path())));
     let _ = answer(
         &worker,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: alive.url("/a"),
-        },
+            slug: None,
+        }),
     );
     let _ = answer(
         &worker,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: doomed.url("/b"),
-        },
+            slug: None,
+        }),
     );
     assert_eq!(slugs(root.path()), ["radio-t", "other-show"]);
     doomed.shutdown();
 
-    let (_, outcome) = answer(&worker, BrowseRequest::Refresh { slug: None });
+    let (_, outcome) = answer(&worker, BrowseRequest::Op(FeedOp::Refresh { slug: None }));
     let text = outcome.expect_err("one feed failed");
     assert!(
         text.contains("radio-t: updated, 2 episodes retained, 0 skipped"),
@@ -200,9 +207,10 @@ fn unsubscribe_touches_no_server() {
     let seeding = BrowseWorker::spawn(Some(stores(root.path())));
     let _ = answer(
         &seeding,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: server.url("/a"),
-        },
+            slug: None,
+        }),
     );
     let seen = server.requests().len();
     drop(seeding);
@@ -210,9 +218,9 @@ fn unsubscribe_touches_no_server() {
     let worker = BrowseWorker::spawn(Some(stores(root.path())));
     let (_, removed) = answer(
         &worker,
-        BrowseRequest::Unsubscribe {
+        BrowseRequest::Op(FeedOp::Unsubscribe {
             slug: "radio-t".into(),
-        },
+        }),
     );
     assert_eq!(
         removed.as_deref(),
@@ -232,9 +240,10 @@ fn browsing_makes_no_request() {
     let worker = BrowseWorker::spawn(Some(stores(root.path())));
     let _ = answer(
         &worker,
-        BrowseRequest::Subscribe {
+        BrowseRequest::Op(FeedOp::Subscribe {
             url: server.url("/a"),
-        },
+            slug: None,
+        }),
     );
     let before = server.requests().len();
 

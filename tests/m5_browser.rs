@@ -11,6 +11,7 @@ use ratatui::style::Modifier;
 use tenuto::application::browse::{
     BrowseRequest, BrowseResult, BrowseWorker, DirEntry, EntryKind, list_directory,
 };
+use tenuto::application::feed_ops::FeedOp;
 use tenuto::application::runtime::EnqueueItem;
 use tenuto::application::source::resolve_source;
 use tenuto::application::view::QueueRow;
@@ -608,9 +609,10 @@ fn the_prompt_swallows_shortcuts_and_enter_subscribes() {
         press(&mut state, &[KeyCode::Char(c)]);
     }
     let effects = press(&mut state, &[KeyCode::Enter]);
-    let expected = BrowseRequest::Subscribe {
+    let expected = BrowseRequest::Op(FeedOp::Subscribe {
         url: "https://x.example/f".to_owned(),
-    };
+        slug: None,
+    });
     assert_eq!(requests(&effects), vec![expected.clone()]);
     assert_eq!(state.pending, Some(expected));
     assert_eq!(
@@ -631,9 +633,9 @@ fn refresh_and_remove_need_a_feed_and_no_pending_mutation() {
     let mut state = podcasts(vec![feed("one"), feed("two")]);
     press(&mut state, &[KeyCode::Down]);
     let effects = press(&mut state, &[KeyCode::Char('r')]);
-    let expected = BrowseRequest::Refresh {
+    let expected = BrowseRequest::Op(FeedOp::Refresh {
         slug: Some("two".to_owned()),
-    };
+    });
     assert_eq!(requests(&effects), vec![expected.clone()]);
     assert_eq!(state.pending, Some(expected.clone()));
 
@@ -651,7 +653,7 @@ fn refresh_and_remove_need_a_feed_and_no_pending_mutation() {
     let mut all = podcasts(vec![feed("one")]);
     assert_eq!(
         requests(&press(&mut all, &[KeyCode::Char('R')])),
-        [BrowseRequest::Refresh { slug: None }]
+        [BrowseRequest::Op(FeedOp::Refresh { slug: None })]
     );
 }
 
@@ -665,9 +667,9 @@ fn remove_asks_first_and_only_y_confirms() {
 
     press(&mut state, &[KeyCode::Char('d')]);
     let effects = press(&mut state, &[KeyCode::Char('y')]);
-    let expected = BrowseRequest::Unsubscribe {
+    let expected = BrowseRequest::Op(FeedOp::Unsubscribe {
         slug: "one".to_owned(),
-    };
+    });
     assert_eq!(requests(&effects), vec![expected.clone()]);
     assert_eq!(state.pending, Some(expected));
 }
@@ -682,14 +684,14 @@ fn r_and_d_inside_an_open_feed_act_on_that_feed() {
     });
     assert_eq!(
         requests(&press(&mut state, &[KeyCode::Char('r')])),
-        [BrowseRequest::Refresh {
+        [BrowseRequest::Op(FeedOp::Refresh {
             slug: Some("two".to_owned())
-        }]
+        })]
     );
     let follow_up = state.apply(mutation(
-        BrowseRequest::Refresh {
+        BrowseRequest::Op(FeedOp::Refresh {
             slug: Some("two".to_owned()),
-        },
+        }),
         Ok("two: updated"),
     ));
     assert_eq!(
@@ -730,13 +732,16 @@ fn back_re_reads_the_feed_list_while_keeping_the_cached_rows() {
 fn a_matching_answer_shows_the_notice_and_re_reads_the_list() {
     let mut state = podcasts(vec![feed("one")]);
     press(&mut state, &[KeyCode::Char('r')]);
-    let request = BrowseRequest::Refresh {
+    let request = BrowseRequest::Op(FeedOp::Refresh {
         slug: Some("one".to_owned()),
-    };
+    });
 
     // Someone else's answer, and a listing answer, leave `pending` alone.
     assert_eq!(
-        state.apply(mutation(BrowseRequest::Refresh { slug: None }, Ok("x"))),
+        state.apply(mutation(
+            BrowseRequest::Op(FeedOp::Refresh { slug: None }),
+            Ok("x")
+        )),
         None
     );
     assert!(state.pending.is_some());
@@ -766,7 +771,10 @@ fn a_matching_answer_shows_the_notice_and_re_reads_the_list() {
     // A fresh browser has nothing pending, so a late answer changes nothing.
     let mut fresh = podcasts(vec![feed("one")]);
     assert_eq!(
-        fresh.apply(mutation(BrowseRequest::Refresh { slug: None }, Ok("late"))),
+        fresh.apply(mutation(
+            BrowseRequest::Op(FeedOp::Refresh { slug: None }),
+            Ok("late")
+        )),
         None
     );
     assert!(fresh.notice.is_none());
@@ -787,9 +795,9 @@ fn removing_the_open_feed_returns_to_the_list_whatever_the_outcome() {
         });
         press(&mut state, &[KeyCode::Char('d'), KeyCode::Char('y')]);
         let follow_up = state.apply(mutation(
-            BrowseRequest::Unsubscribe {
+            BrowseRequest::Op(FeedOp::Unsubscribe {
                 slug: "two".to_owned(),
-            },
+            }),
             outcome,
         ));
         assert!(state.episodes.is_none(), "{outcome:?}");
@@ -805,7 +813,10 @@ fn an_answer_on_the_files_tab_shows_the_notice_and_requests_nothing() {
     press(&mut state, &[KeyCode::Tab, KeyCode::Tab]);
     assert_eq!(state.tab, BrowserTab::Files);
     assert!(state.pending.is_some(), "a tab switch keeps the mutation");
-    let follow_up = state.apply(mutation(BrowseRequest::Refresh { slug: None }, Ok("done")));
+    let follow_up = state.apply(mutation(
+        BrowseRequest::Op(FeedOp::Refresh { slug: None }),
+        Ok("done"),
+    ));
     assert_eq!(follow_up, None);
     assert_eq!(state.notice.as_ref().map(|n| n.text.as_str()), Some("done"));
 }
@@ -828,9 +839,9 @@ fn the_overlay_draws_the_prompt_the_question_and_the_notice_above_rows() {
     assert!(text.contains("Removing…"), "{text}");
 
     state.apply(mutation(
-        BrowseRequest::Unsubscribe {
+        BrowseRequest::Op(FeedOp::Unsubscribe {
             slug: "one".to_owned(),
-        },
+        }),
         Ok("one: unsubscribed"),
     ));
     state.apply(BrowseResult::Feeds(Ok(vec![feed("two")])));
@@ -857,7 +868,7 @@ fn a_long_notice_is_cut_to_a_third_of_the_list_with_a_marker() {
     press(&mut state, &[KeyCode::Char('R')]);
     let lines: Vec<String> = (1..=8).map(|n| format!("line{n}")).collect();
     state.apply(mutation(
-        BrowseRequest::Refresh { slug: None },
+        BrowseRequest::Op(FeedOp::Refresh { slug: None }),
         Err(&lines.join("\n")),
     ));
     state.apply(BrowseResult::Feeds(Ok(vec![feed("one")])));
@@ -875,7 +886,10 @@ fn a_long_notice_is_cut_to_a_third_of_the_list_with_a_marker() {
     let ok_state = {
         let mut s = podcasts(vec![feed("one")]);
         press(&mut s, &[KeyCode::Char('R')]);
-        s.apply(mutation(BrowseRequest::Refresh { slug: None }, Ok("fine")));
+        s.apply(mutation(
+            BrowseRequest::Op(FeedOp::Refresh { slug: None }),
+            Ok("fine"),
+        ));
         s
     };
     let (ok_text, ok_buffer) = screen(&ok_state);
@@ -1049,9 +1063,9 @@ fn a_on_the_radio_tab_opens_the_url_prompt_and_enter_sends_add_station() {
         press(&mut state, &[KeyCode::Char(c)]);
     }
     let effects = press(&mut state, &[KeyCode::Enter]);
-    let expected = BrowseRequest::AddStation {
+    let expected = BrowseRequest::Op(FeedOp::AddStation {
         url: "https://x.example/stream".to_owned(),
-    };
+    });
     assert_eq!(requests(&effects), vec![expected.clone()]);
     assert_eq!(state.pending, Some(expected));
     assert_eq!(
@@ -1068,9 +1082,9 @@ fn r_and_d_then_y_on_the_radio_tab_send_reprobe_and_remove() {
     ]);
     press(&mut state, &[KeyCode::Down]);
     let effects = press(&mut state, &[KeyCode::Char('r')]);
-    let expected = BrowseRequest::ReprobeStation {
+    let expected = BrowseRequest::Op(FeedOp::ReprobeStation {
         slug: "two".to_owned(),
-    };
+    });
     assert_eq!(requests(&effects), vec![expected.clone()]);
     assert_eq!(state.pending, Some(expected.clone()));
     assert_eq!(
@@ -1088,9 +1102,9 @@ fn r_and_d_then_y_on_the_radio_tab_send_reprobe_and_remove() {
     press(&mut state, &[KeyCode::Char('d')]);
     assert_eq!(state.confirm.as_deref(), Some("two"));
     let effects = press(&mut state, &[KeyCode::Char('y')]);
-    let expected = BrowseRequest::RemoveStation {
+    let expected = BrowseRequest::Op(FeedOp::RemoveStation {
         slug: "two".to_owned(),
-    };
+    });
     assert_eq!(requests(&effects), vec![expected.clone()]);
     assert_eq!(state.pending, Some(expected));
     assert_eq!(
@@ -1425,9 +1439,9 @@ fn a_station_mutation_re_requests_the_visible_list() {
     }
     press(&mut state, &[KeyCode::Enter]);
     let follow_up = state.apply(mutation(
-        BrowseRequest::AddStation {
+        BrowseRequest::Op(FeedOp::AddStation {
             url: "https://two.example/stream".to_owned(),
-        },
+        }),
         Ok("two: added"),
     ));
     assert_eq!(follow_up, Some(BrowseRequest::Stations));
@@ -1437,9 +1451,9 @@ fn a_station_mutation_re_requests_the_visible_list() {
     let mut state = radio(vec![station_row("one", "https://one.example/stream")]);
     press(&mut state, &[KeyCode::Char('r')]);
     let follow_up = state.apply(mutation(
-        BrowseRequest::ReprobeStation {
+        BrowseRequest::Op(FeedOp::ReprobeStation {
             slug: "one".to_owned(),
-        },
+        }),
         Ok("one: reprobed"),
     ));
     assert_eq!(follow_up, Some(BrowseRequest::Stations));
@@ -1449,9 +1463,9 @@ fn a_station_mutation_re_requests_the_visible_list() {
     let mut state = radio(vec![station_row("one", "https://one.example/stream")]);
     press(&mut state, &[KeyCode::Char('d'), KeyCode::Char('y')]);
     let follow_up = state.apply(mutation(
-        BrowseRequest::RemoveStation {
+        BrowseRequest::Op(FeedOp::RemoveStation {
             slug: "one".to_owned(),
-        },
+        }),
         Ok("one: removed"),
     ));
     assert_eq!(follow_up, Some(BrowseRequest::Stations));
@@ -1466,9 +1480,9 @@ fn a_station_mutation_answer_on_another_tab_re_requests_nothing() {
     assert_eq!(state.tab, BrowserTab::Files);
     assert!(state.pending.is_some(), "a tab switch keeps the mutation");
     let follow_up = state.apply(mutation(
-        BrowseRequest::RemoveStation {
+        BrowseRequest::Op(FeedOp::RemoveStation {
             slug: "one".to_owned(),
-        },
+        }),
         Ok("one: removed"),
     ));
     assert_eq!(follow_up, None);

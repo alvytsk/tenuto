@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::application::browse::{BrowseRequest, BrowseResult, DirEntry, EntryKind};
+use crate::application::feed_ops::FeedOp;
 use crate::application::runtime::EnqueueItem;
 use crate::application::view::QueueRow;
 use crate::library::{EpisodeCandidate, FeedSummary, StationRow};
@@ -236,7 +237,7 @@ impl BrowserState {
                     return None;
                 }
                 self.pending = None;
-                if let BrowseRequest::Unsubscribe { slug } = &request
+                if let BrowseRequest::Op(FeedOp::Unsubscribe { slug }) = &request
                     && matches!(&self.episodes, Some((open, _)) if open == slug)
                 {
                     // Removed before any cache cleanup could fail, and an
@@ -315,8 +316,8 @@ impl BrowserState {
         if let Some(slug) = self.confirm.take() {
             return if key.code == KeyCode::Char('y') && !blocks_ordinary_bindings(&key) {
                 let request = match self.tab {
-                    BrowserTab::Radio => BrowseRequest::RemoveStation { slug },
-                    _ => BrowseRequest::Unsubscribe { slug },
+                    BrowserTab::Radio => BrowseRequest::Op(FeedOp::RemoveStation { slug }),
+                    _ => BrowseRequest::Op(FeedOp::Unsubscribe { slug }),
                 };
                 self.submit(request)
             } else {
@@ -358,8 +359,8 @@ impl BrowserState {
             KeyCode::Char('r') if self.can_manage() => match self.target_slug() {
                 Some(slug) => {
                     let request = match self.tab {
-                        BrowserTab::Radio => BrowseRequest::ReprobeStation { slug },
-                        _ => BrowseRequest::Refresh { slug: Some(slug) },
+                        BrowserTab::Radio => BrowseRequest::Op(FeedOp::ReprobeStation { slug }),
+                        _ => BrowseRequest::Op(FeedOp::Refresh { slug: Some(slug) }),
                     };
                     self.submit(request)
                 }
@@ -370,7 +371,7 @@ impl BrowserState {
                     && self.tab == BrowserTab::Podcasts
                     && !self.feeds.is_empty() =>
             {
-                self.submit(BrowseRequest::Refresh { slug: None })
+                self.submit(BrowseRequest::Op(FeedOp::Refresh { slug: None }))
             }
             KeyCode::Char('d') if self.can_manage() => {
                 if let Some(slug) = self.target_slug() {
@@ -447,13 +448,13 @@ impl BrowserState {
     /// Sends a mutation and remembers it until its answer arrives.
     fn submit(&mut self, request: BrowseRequest) -> Vec<BrowserEffect> {
         let text = match &request {
-            BrowseRequest::Subscribe { .. } => "Subscribing…",
-            BrowseRequest::Refresh { .. } => "Refreshing…",
-            BrowseRequest::Unsubscribe { .. } => "Removing…",
+            BrowseRequest::Op(FeedOp::Subscribe { .. }) => "Subscribing…",
+            BrowseRequest::Op(FeedOp::Refresh { .. }) => "Refreshing…",
+            BrowseRequest::Op(FeedOp::Unsubscribe { .. }) => "Removing…",
             // Sent from the Radio tab's `a`, `r` and `d` (M7.1 §7).
-            BrowseRequest::AddStation { .. } => "Adding…",
-            BrowseRequest::RemoveStation { .. } => "Removing…",
-            BrowseRequest::ReprobeStation { .. } => "Re-probing…",
+            BrowseRequest::Op(FeedOp::AddStation { .. }) => "Adding…",
+            BrowseRequest::Op(FeedOp::RemoveStation { .. }) => "Removing…",
+            BrowseRequest::Op(FeedOp::ReprobeStation { .. }) => "Re-probing…",
             // Never actually reaches `submit`: `add_selection` (the Files-tab
             // `a` key, M8 §8) emits `CollectTree` straight through
             // `BrowserEffect::Request`, bypassing `submit`, because its
@@ -497,8 +498,8 @@ impl BrowserState {
                     Vec::new()
                 } else {
                     let request = match self.tab {
-                        BrowserTab::Radio => BrowseRequest::AddStation { url },
-                        _ => BrowseRequest::Subscribe { url },
+                        BrowserTab::Radio => BrowseRequest::Op(FeedOp::AddStation { url }),
+                        _ => BrowseRequest::Op(FeedOp::Subscribe { url, slug: None }),
                     };
                     self.submit(request)
                 }

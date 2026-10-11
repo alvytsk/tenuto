@@ -66,15 +66,7 @@ const NAMED_RULES: &[(&str, &str)] = &[
 
 /// `(file, target module)` pairs excused today. Delete an entry with the
 /// edge it excuses.
-const ALLOWED: &[(&str, &str)] = &[
-    // C: feed operations below `commands`.
-    ("src/application/browse.rs", "commands"),
-    ("src/application/runtime.rs", "commands"),
-    ("src/application/view.rs", "commands"),
-    ("src/lifecycle/panic.rs", "commands"),
-    ("src/tui/mod.rs", "commands"),
-    ("src/tui/render/browser.rs", "commands"),
-];
+const ALLOWED: &[(&str, &str)] = &[];
 
 fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
