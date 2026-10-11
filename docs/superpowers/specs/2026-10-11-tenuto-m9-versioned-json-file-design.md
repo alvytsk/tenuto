@@ -21,11 +21,12 @@ Unchanged, and verified (§7):
 - Mutation refusal: only a writable `Loaded` or `Missing` load lets a subscription or station mutation proceed. A successful quarantine still refuses the current mutation.
 - Read-only errors: `SubscriptionStore::read_snapshot` and `StationStore::read_snapshot` return the same `FeedError::{Subscriptions,Stations}Unreadable` reason text as today; `StateStore::read_snapshot` the same `PersistenceError` variants.
 - Resume: every `MediaId` × stored-entry combination yields the same `ResumeIntent` as today's `Session::resume_intent`. Completion still wins over an estimate: a completed entry gives `Candidate { completed: true, .. }` even with no established position. Only today's `None` paths become `StartAt(ZERO)`.
-- Logging: no log line carries file content or an unredacted URL (`tests/m4_diagnostics.rs`).
+- Logging: no log line carries file content or an unredacted URL (`tests/m4_diagnostics.rs`). A malformed file's log still explains why: the sanitized category, line and column for a JSON error, the static validation reason for a record (§3).
 
 Changed on purpose:
 - The mutation-refusal text for both files comes from one template (§4.3). Neither the old nor the new text is pinned by a test or `reference.md`.
-- A serialize failure in `SubscriptionStore::save` or `StationStore::save` arrives as `FeedError::Persistence(PersistenceError::Serialize { .. })` through the existing `#[from]`, not as an `…Unreadable` reason. Serializing these DTOs cannot fail in practice.
+- A serialize failure in `SubscriptionStore::save` or `StationStore::save` arrives as `FeedError::Persistence(PersistenceError::Serialize { .. })` through the existing `#[from]`, not as an `…Unreadable` reason. It is reachable: record validation does not check RFC3339 representability, so a public snapshot whose `added_at` (or a station's `probed_at`) has a negative year passes validation and fails the serializer. The destination file is left byte-identical (§6.2).
+- `StateStore::read_snapshot` no longer emits its own decode `warn!`; the same sanitized detail reaches its caller inside `PersistenceError::Deserialize`, as it does today.
 - The lifecycle's `tracing::warn!` lines move into `json_file` and name the file through a `file` field; their message text is shared across the three files.
 - Rust paths: `ResumeIntent` moves to `resume` (re-exported from `playback::command`); `session::resume_intent_for`, `resume::resume_candidate`, `resume::restart_preference` and `resume::RestartPreference` leave the public surface. `CHANGELOG.md` records the break under `### Internal` (§6).
 
@@ -71,7 +72,7 @@ Contract:
 - `keep_copy`: candidates `<file name>.<tag>-<stamp>[-n]` (n ≤ 100), each opened create-new through `atomic::create_private_new`; `AlreadyExists` moves to the next candidate. Then `atomic::set_private` explicitly (the umask can alter the create mode), `write_all`, `sync_all`, and `atomic::sync_parent_best_effort`. Returns `Some(path)` on success and `None` on any failure except the parent sync, which stays best-effort.
 - `malformed`: the one sanitizer. Keeps `classify()`'s category, line and column; drops the `Display` text, which can quote file content.
 - `stamp`: `20260908T143211Z`, moved from `store.rs`. `lifecycle::stderr` imports it from here; the copy in `subscription/store.rs` and `station/store.rs` is deleted.
-- Logging: `load` emits today's three `warn!`s (unreadable, unsupported, quarantined / quarantine failed) with `path` and `file` fields and no content.
+- Logging: `load` emits today's `warn!`s — unreadable (with the `io::Error`), unsupported (`found`, `supported`), malformed, and quarantined / quarantine failed (`moved_to`) — with a `path` field and no content. The malformed line carries the sanitized detail as fields: `category`, `line`, `column` for `Malformed::Json`, `reason` for `Malformed::Invalid`. `read` logs nothing: it returns the same detail in `Rejected`, and each caller surfaces it.
 
 `persistence::store` re-exports `LoadReason` and `MAX_QUARANTINE_CANDIDATES`, so `persistence::store::LoadReason` keeps working for `application::profile`, `library` and the two stores. `persistence::mod` declares `pub(crate) mod json_file`.
 
@@ -164,6 +165,7 @@ Record validation plus one wiring test each. The wiring test pins the quarantine
 - `m4_subscription_store`: keeps the feed id, slug, URL and timestamp validation tests, the round-trip and 513-entry tests, and `only_mutating_load_quarantines` as the wiring test. The collision, every-candidate-taken, unsupported-version, directory-at-path and missing-creates-no-directory tests move to §6.1.
 - `m7_1_station_store`: keeps the identity round-trips, media/url mismatch, duplicate slug, `logo_for`, `is_station` and slug derivation; `read_snapshot_reports_a_malformed_file…` and `load_quarantines_a_malformed_file…` become one wiring test.
 - `persistence_store`: keeps the v1 band and migration tests (`a_v1_file…`, `the_upgrade_cycle…`, `a_version_one_file_that_will_not_deserialize…`, `a_genuinely_unknown_version…`), the privacy tests, and one wiring test; the missing, quarantine, collision, quarantine-failure, unsupported and alien-newer tests move to §6.1.
+- `m4_subscription_store` and `m7_1_station_store` each gain one save test: a pre-existing valid file, then `save` of a snapshot whose `added_at` has year −1 returns `FeedError::Persistence(PersistenceError::Serialize { .. })`, and the file's bytes are unchanged.
 - `m5_state_recovery`, `m8_state_playlists` and the other queue-recovery suites stay unchanged: they pin `keep_copy`'s use and `writable = false` on a failed backup.
 
 ### 6.3 The resume suites
@@ -185,9 +187,13 @@ Split by what a test pins, so engine-decision tests never pick up the fresh-load
 
 - The full gate in `CLAUDE.md`: `fmt --check`, `clippy -D warnings`, `cargo test --locked --no-fail-fast`, `RUSTDOCFLAGS="-D warnings" cargo doc`.
 - `tests/m9_layering.rs` passes with `ALLOWED` empty and no new `NAMED_RULES` exception.
-- `tests/m4_diagnostics.rs` passes.
-- CLI parity against `main` with a scratch `XDG_*` profile: `feeds`, `episodes`, `subscribe` / `unsubscribe` against a malformed, an unsupported-version and a valid `subscriptions.json`; the same three `state.json` cases through `tenuto play` with `TENUTO_AUDIO_OUTPUT=null`. Stdout, exit status and resulting files match; only the refusal text in §4.3 differs.
-- A `grep` for `fn stamp`, `VersionEnvelope`, `MAX_QUARANTINE_CANDIDATES` definitions and `rejected-` format strings finds one each, in `json_file.rs`.
+- `tests/m4_diagnostics.rs` passes, and gains one subprocess test (default `tenuto=info` filter): `unsubscribe` against a `subscriptions.json` with a syntax error, then against one whose only fault is an invalid slug, then `play` against a `state.json` with a syntax error. stderr shows the `category`/`line`/`column` fields for the two syntax errors and the `reason` field for the slug, and never the seeded `https://SECRETHOST/…` URL the files carry.
+- CLI parity against `main`: a script builds both binaries and runs each over its own copy of the same seeded scratch `XDG_*` profile. Cases: `feeds`, `episodes`, `subscribe` / `unsubscribe` against a malformed, an unsupported-version, an unreadable (directory) and a valid `subscriptions.json`; `play` with `TENUTO_AUDIO_OUTPUT=null` against the same four `state.json` cases and a queue-repair one. Compared per case:
+  - exit status, exactly;
+  - stdout and stderr, after normalizing the scratch root to `<root>`, RFC3339 and log timestamps to `<ts>`, file-name stamps (`\d{8}T\d{6}Z`) to `<stamp>`, and generated feed IDs to `<feed-N>` in order of first appearance;
+  - the profile's resulting file tree: the same names after the same normalization; written JSON compared as parsed values after normalizing `feed_id`, `added_at` and `updated_at`; every preserved original — an unreadable or unsupported file left in place, a `*.rejected-*` quarantine, a `*.queue-recovery-*` copy — byte-identical to the seeded bytes.
+  - Allowed differences, and only these: the §4.3 refusal text on stderr; the lifecycle `warn!` message text (§3), provided each line keeps its fields. Any other diff fails the check.
+- Over `src/persistence/`, `src/subscription/store.rs` and `src/station/store.rs` — not `src/feed/cache.rs`, whose own `VersionEnvelope` (with `parser_version`) stays under §8 — a `grep` for `fn stamp`, `struct VersionEnvelope`, `MAX_QUARANTINE_CANDIDATES` definitions and `rejected-` format strings finds one each, all in `json_file.rs`.
 
 ## 8. Out of scope
 
