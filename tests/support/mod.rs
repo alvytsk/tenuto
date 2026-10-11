@@ -1610,3 +1610,35 @@ pub fn failed_device_session_with_play_loaded(
 
     (events, negotiations.load(Ordering::Relaxed))
 }
+
+/// A podcast episode, the one kind of media a fresh load resumes (M8 §7).
+pub fn podcast_media() -> MediaId {
+    let enclosure = match Url::parse("https://cdn.example/episode.mp3") {
+        Ok(url) => url,
+        Err(error) => panic!("a literal URL must parse: {error}"),
+    };
+    let feed = match tenuto::media::id::FeedId::new("subscription-1".into()) {
+        Ok(feed) => feed,
+        Err(error) => panic!("a literal feed id must parse: {error:?}"),
+    };
+    match tenuto::media::id::EpisodeKey::resolve(Some("guid"), Some(&enclosure), None) {
+        Ok(episode) => MediaId::PodcastEpisode { feed, episode },
+        Err(error) => panic!("a literal episode key must resolve: {error:?}"),
+    }
+}
+
+/// The candidate a stored, established entry hands the engine, built field
+/// by field. For tests of the engine's own resume decision: they bypass the
+/// fresh-load media policy (`resume::resume_intent`) on purpose, since their
+/// fixtures are local files and plain URLs that policy never resumes.
+pub fn established_candidate(
+    entry: &tenuto::persistence::model::PersistedCheckpoint,
+) -> tenuto::resume::ResumeCandidate {
+    match entry.position {
+        Some(position) => tenuto::resume::ResumeCandidate {
+            position,
+            completed: entry.completed,
+        },
+        None => panic!("the stored entry must carry an established position"),
+    }
+}

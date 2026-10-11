@@ -18,7 +18,6 @@ use tenuto::persistence::store::StateStore;
 use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, StartDisposition};
 use tenuto::playback::state::PlaybackState;
-use tenuto::resume::resume_candidate;
 use tenuto::session::{Action, LoadTarget, Session};
 
 use support::server::{Script, TestServer};
@@ -140,7 +139,7 @@ fn a_second_session_resumes_from_the_flushed_checkpoint() {
     // `ResumeIntent::Candidate` directly, and a redirect encountered on the
     // way does not change the identity the checkpoint is filed under.
     // Since Task 8, a real second process opening this same plain URL
-    // would start at zero instead — `resume_intent_for` no longer resumes
+    // would start at zero instead — `resume::resume_intent` never resumes
     // `MediaId::RemoteUrl` — so this pins the checkpoint/identity plumbing
     // itself, not what an actual relaunch decides today.
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
@@ -205,8 +204,10 @@ fn a_second_session_resumes_from_the_flushed_checkpoint() {
         request2,
         &url,
         ResumeIntent::Candidate(
-            resume_candidate(flushed.position, flushed.completed)
-                .expect("session 1's checkpoint must carry an established position"),
+            // The fixture is a local file or a plain URL, which a fresh load never
+            // resumes (`resume::resume_intent`); this hands the engine the stored
+            // candidate directly, to test the engine's own resume decision.
+            support::established_candidate(&flushed),
         ),
     );
     let mut rig2 = RemoteRig {
@@ -337,10 +338,7 @@ fn the_protection_survives_a_process_boundary() {
     engine2.load_remote_as(
         request2,
         &url,
-        ResumeIntent::Candidate(
-            resume_candidate(original.position, original.completed)
-                .expect("session 1's checkpoint must carry an established position"),
-        ),
+        ResumeIntent::Candidate(support::established_candidate(&original)),
     );
     let mut rig2 = RemoteRig {
         engine: engine2,
@@ -393,10 +391,7 @@ fn the_protection_survives_a_process_boundary() {
     engine3.load_remote_as(
         request3,
         &url,
-        ResumeIntent::Candidate(
-            resume_candidate(after_session_2.position, after_session_2.completed)
-                .expect("session 2's checkpoint must carry an established position"),
-        ),
+        ResumeIntent::Candidate(support::established_candidate(&after_session_2)),
     );
     let mut rig3 = RemoteRig {
         engine: engine3,

@@ -26,7 +26,7 @@ use crate::media::capabilities::{Continuity, MediaCapabilities};
 use crate::media::id::MediaId;
 use crate::media::metadata::MediaMetadata;
 use crate::media::provenance::PositionProvenance;
-use crate::persistence::model::{PersistedCheckpoint, PersistedState};
+use crate::persistence::model::PersistedState;
 use crate::persistence::writer::Urgency;
 use crate::playback::command::{LoadRequestId, ResumeIntent};
 use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
@@ -44,17 +44,18 @@ use url::Url;
 // so the playback worker could depend on them too (G3), without dragging
 // `crate::persistence` in behind them. The worker is `decide_resume`'s only
 // production caller now (Ruling 5). Converting a stored `PersistedCheckpoint`
-// into the persistence-free shape `decide_resume` reasons about is
-// `resume::resume_candidate`'s job, not this module's — there used to be a
+// into the persistence-free shape `resume` reasons about is
+// `Session::resume_intent`'s one line (`StoredProgress`), and the decision is
+// `resume::resume_intent`'s — there used to be a
 // second, infallible conversion here (`impl From<&PersistedCheckpoint> for
 // ResumeCandidate`), but it had no production caller (`app.rs` always used
-// `resume_candidate` instead) and its `Duration::ZERO` fallback for an
+// `resume::resume_candidate` instead) and its `Duration::ZERO` fallback for an
 // absent `position` was exactly the "resume at start" loss this amendment
 // exists to prevent, reachable by anyone who reached for the obvious `.into()`
 // instead. Deleted rather than fixed in place: a function that must not be
 // called with an unverified entry is safer removed than documented.
 pub use crate::resume::{ResumeDecision, decide_resume};
-use crate::resume::{restart_preference, resume_candidate};
+use crate::resume::{StoredProgress, resume_intent};
 
 /// The capture interval §6 requires while playing. With the writer's 2 s
 /// coalescing window it bounds worst-case loss at 7 s.
@@ -1530,12 +1531,18 @@ impl Session {
             .record_estimated(media, position, now.wall, completed);
     }
 
-    /// `resume_intent_for(media, self.state.entry_for(media))`, defaulting to
-    /// a start of zero for a media with no stored entry at all — no entry is
-    /// not itself a resume intent to resolve, it is the absence of one.
+    /// What a fresh load of `media` does with this state's stored entry
+    /// (`resume::resume_intent`): the conversion from `PersistedCheckpoint`
+    /// stops here, so `resume` never sees a persistence type.
     pub fn resume_intent(&self, media: &MediaId) -> ResumeIntent {
-        resume_intent_for(media, self.state.entry_for(media))
-            .unwrap_or(ResumeIntent::StartAt(Duration::ZERO))
+        resume_intent(
+            media,
+            self.state.entry_for(media).map(|entry| StoredProgress {
+                position: entry.position,
+                estimated: entry.estimated,
+                completed: entry.completed,
+            }),
+        )
     }
 
     fn submit(&self, urgency: Urgency) -> Action {
@@ -1543,56 +1550,5 @@ impl Session {
             state: self.state.clone(),
             urgency,
         }
-    }
-}
-
-/// Builds the worker-facing resume intent from a stored checkpoint entry,
-/// §4.3's estimated-preference rule folded in beside the established path
-/// left unchanged.
-///
-/// A completed entry never reaches `restart_preference` — its own doc says
-/// so: the caller's concern, and calling it anyway would let a stray
-/// estimate stored before completion redirect a replay that D1 already
-/// says starts over at zero regardless. So a completed entry always goes
-/// through `resume_candidate` exactly as it did before this function
-/// existed, and only a live, uncompleted entry's `estimated` field is ever
-/// consulted.
-///
-/// This is where §4.3 actually gets wired into the load path (Task 6's fix
-/// round 1): `restart_preference`'s pure preference decision — implemented
-/// and tested since Task 6 itself — had no production caller until this
-/// function. `decide_resume` is deliberately not consulted here for the
-/// estimate branch: §4.3 is a preference between two already-known
-/// locations, not a duration-validated choice, and running the estimate
-/// through duration validation would be inventing a rule the design doc
-/// does not state. `decide_resume` keeps governing the established
-/// position exactly as before wherever that path is actually taken — the
-/// `resume_candidate` branch below, reached whenever there is no estimate
-/// to prefer.
-///
-/// M8 §7 ("Start from zero"): a local file or a plain URL never resumes on a
-/// fresh load, whatever the checkpoint says — the checkpoint is still
-/// written (the queue's "played" marker depends on it), only what a fresh
-/// load does with it changes. A fresh-load policy only: pause and Stop →
-/// Play are engine commands that never reach this function, so the position
-/// contract (docs/architecture.md §1) holds unweakened for them. A podcast
-/// episode is unaffected — it still resumes exactly as before.
-pub fn resume_intent_for(
-    media: &MediaId,
-    entry: Option<&PersistedCheckpoint>,
-) -> Option<ResumeIntent> {
-    if matches!(media, MediaId::LocalFile(_) | MediaId::RemoteUrl(_)) {
-        return None;
-    }
-    let entry = entry?;
-    if entry.completed {
-        return resume_candidate(entry.position, entry.completed).map(ResumeIntent::Candidate);
-    }
-    match restart_preference(entry.position, entry.estimated) {
-        Some(preference) => Some(ResumeIntent::EstimatedCandidate {
-            target: preference.target,
-            established: preference.established,
-        }),
-        None => resume_candidate(entry.position, entry.completed).map(ResumeIntent::Candidate),
     }
 }

@@ -6,11 +6,11 @@
 //! `crate::playback` — the worker, resolving a candidate against the
 //! duration only its own decode probe can report — depend on this module
 //! without the playback engine ever learning that persistence exists (G3).
-//! `crate::session` depends on it too, but only to convert a stored entry
-//! into a `ResumeCandidate` and to re-export the type and the function so
-//! `app::run` and the tests that predate this split keep their import paths
-//! (Ruling 4); the decision itself is made wherever a duration actually is,
-//! which since Ruling 5 is the worker alone. Whoever calls `decide_resume`
+//! `crate::session` hands it a `StoredProgress` built from a stored entry and
+//! re-exports `decide_resume` and `ResumeDecision` so the tests that predate
+//! this split keep their import paths (Ruling 4); the decision itself is
+//! made wherever a duration actually is, which since Ruling 5 is the worker
+//! alone. Whoever calls `decide_resume`
 //! gets the same answer for the same inputs, which is what keeps a
 //! worker-resolved resume and an application-resolved one from ever landing
 //! somewhere the checkpoint never said.
@@ -59,13 +59,42 @@ impl From<Duration> for KnownDuration {
 }
 
 /// The two facts §11's table is a function of, however they were learned. A
-/// caller with a `PersistedCheckpoint` in hand converts it into one of these
-/// through [`resume_candidate`]; a caller with only a worker-reported target
-/// builds one directly.
+/// fresh load gets one from [`resume_intent`], built from stored progress; a
+/// caller with only a worker-reported target builds one directly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResumeCandidate {
     pub position: Duration,
     pub completed: bool,
+}
+
+/// How a load's start is decided. `Load` carries one of these rather than a
+/// bare `Duration` because a `Candidate` cannot be resolved into a position
+/// until a decoder has reported a duration to resolve it against — and only
+/// the worker has one (Ruling 5): hoisting the decision into `app::run` would
+/// mean opening the media twice, once to decide and once to play.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResumeIntent {
+    /// The application has already decided — there was no candidate to
+    /// resolve, or a test wants a known start. `Restart` is unaffected: it is
+    /// its own command, always to zero, and never goes through `Load`.
+    StartAt(Duration),
+    /// Resolved by the worker after its single probe, using the same rules the
+    /// application would apply if it had a duration to apply them to.
+    Candidate(ResumeCandidate),
+    /// §4.3: the stored checkpoint's `estimated` location won the preference
+    /// over `position` ([`resume_intent`]). `target` is the
+    /// estimate itself and is what the load seeks to, unconditionally —
+    /// §4.3 is a preference between two already-known locations, not a
+    /// duration-validated choice, so nothing resolves this the way
+    /// `Candidate` resolves against a decoded duration. `established` is the
+    /// stored `position` also on record beside the estimate, carried
+    /// straight through for `Loaded`'s `StartDisposition::ResumedEstimated`
+    /// to report — `None` for an entry that only ever held an estimate
+    /// (R8), never a fabricated zero.
+    EstimatedCandidate {
+        target: Duration,
+        established: Option<Duration>,
+    },
 }
 
 /// Builds the candidate `decide_resume` reasons about from a checkpoint's raw
@@ -99,7 +128,7 @@ pub struct ResumeCandidate {
 /// anchor, design doc §4.2): `decide_resume` decides `Completed` before it
 /// ever looks at `position` (see below), so the filler `Duration::ZERO` built
 /// here for that case is provably never read.
-pub fn resume_candidate(position: Option<Duration>, completed: bool) -> Option<ResumeCandidate> {
+fn resume_candidate(position: Option<Duration>, completed: bool) -> Option<ResumeCandidate> {
     if completed {
         return Some(ResumeCandidate {
             position: position.unwrap_or(Duration::ZERO),
@@ -116,15 +145,15 @@ pub fn resume_candidate(position: Option<Duration>, completed: bool) -> Option<R
 /// reserve, when the stored checkpoint carries an `estimated` location
 /// (design doc §4.3). Built by [`restart_preference`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RestartPreference {
+struct RestartPreference {
     /// The location to seek to: always the estimate, per the rule below.
-    pub target: Duration,
+    target: Duration,
     /// The established `position` also on record beside the estimate that
     /// won, when one exists. `None` for an entry that only ever carried an
     /// estimate (design doc §4.3's R8) — distinct from "established at the
     /// start", which this function never fabricates from an absent value,
     /// the same discipline [`resume_candidate`] already applies.
-    pub established: Option<Duration>,
+    established: Option<Duration>,
 }
 
 /// Resolves which of a checkpoint's two locations — `estimated` and
@@ -150,11 +179,11 @@ pub struct RestartPreference {
 /// This is deliberately a preference between two already-known durations,
 /// decided before either is ever handed to a decoder — distinct from
 /// `decide_resume`, which validates one chosen duration against the media's
-/// own length once that is known. `src/app.rs`'s `resume_intent_for` is the
+/// own length once that is known. [`resume_intent`] is its one
 /// production caller: it calls this function and builds exactly the
 /// `ResumeIntent::EstimatedCandidate` / `StartDisposition::ResumedEstimated`
 /// pair this result feeds.
-pub fn restart_preference(
+fn restart_preference(
     position: Option<Duration>,
     estimated: Option<Duration>,
 ) -> Option<RestartPreference> {
@@ -162,6 +191,55 @@ pub fn restart_preference(
         target: estimated,
         established: position,
     })
+}
+
+/// The three stored fields a fresh load's resume reads, without the
+/// persistence type that holds them: `resume` never imports `persistence`
+/// (G3, `tests/m9_layering.rs`'s `NAMED_RULES`). `session` builds it from a
+/// `PersistedCheckpoint`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredProgress {
+    pub position: Option<Duration>,
+    pub estimated: Option<Duration>,
+    pub completed: bool,
+}
+
+/// What a fresh load of `media` asks the worker to do with what is stored
+/// for it: §4.3's estimated preference folded in beside the established
+/// path, which is unchanged.
+///
+/// M8 §7 ("Start from zero"): a local file or a plain URL never resumes on a
+/// fresh load, whatever is stored — the checkpoint is still written (the
+/// queue's "played" marker depends on it), only what a fresh load does with
+/// it changes. A fresh-load policy only: pause and Stop → Play are engine
+/// commands that never reach this function, so the position contract
+/// (`docs/architecture.md` §1) holds unweakened for them. A podcast episode
+/// resumes.
+///
+/// A completed entry never consults the estimate: D1 replays it from zero,
+/// and a stray estimate stored before completion must not redirect that.
+/// `decide_resume` is not consulted for the estimate either: §4.3 is a
+/// preference between two already-known locations, not a duration-validated
+/// choice. Nothing stored, or nothing established and no estimate, is a
+/// start at zero.
+pub fn resume_intent(media: &MediaId, stored: Option<StoredProgress>) -> ResumeIntent {
+    let start = ResumeIntent::StartAt(Duration::ZERO);
+    if matches!(media, MediaId::LocalFile(_) | MediaId::RemoteUrl(_)) {
+        return start;
+    }
+    let Some(stored) = stored else {
+        return start;
+    };
+    if stored.completed {
+        return resume_candidate(stored.position, true).map_or(start, ResumeIntent::Candidate);
+    }
+    match restart_preference(stored.position, stored.estimated) {
+        Some(preference) => ResumeIntent::EstimatedCandidate {
+            target: preference.target,
+            established: preference.established,
+        },
+        None => resume_candidate(stored.position, false).map_or(start, ResumeIntent::Candidate),
+    }
 }
 
 /// What §11's table says about one resume candidate, and why.

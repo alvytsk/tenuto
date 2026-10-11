@@ -20,7 +20,6 @@ use tenuto::persistence::store::StateStore;
 use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, StartDisposition};
 use tenuto::playback::state::PlaybackState;
-use tenuto::resume::resume_candidate;
 use tenuto::session::{Action, LoadTarget, Session};
 
 use support::TestEngine;
@@ -340,8 +339,10 @@ fn a_range_less_server_plays_but_cannot_seek_or_resume() {
     engine2.load_remote_with_resume(
         &url,
         ResumeIntent::Candidate(
-            resume_candidate(before.position, before.completed)
-                .expect("session 1's checkpoint must carry an established position"),
+            // The fixture is a local file or a plain URL, which a fresh load never
+            // resumes (`resume::resume_intent`); this hands the engine the stored
+            // candidate directly, to test the engine's own resume decision.
+            support::established_candidate(&before),
         ),
     );
     let loaded = engine2.await_loaded();

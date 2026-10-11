@@ -23,7 +23,7 @@ use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
 use tenuto::resume::PlaybackCheckpoint;
-use tenuto::resume::{RestartPreference, decide_resume, restart_preference, resume_candidate};
+use tenuto::resume::decide_resume;
 use tenuto::session::{Action, CAPTURE_INTERVAL, LoadTarget, Session};
 use tenuto::volume::Volume;
 
@@ -205,7 +205,10 @@ fn a_stop_and_a_quit_resume_where_playback_reached() {
     let decision = decide_resume(
         state
             .entry_for(&track_id())
-            .and_then(|entry| resume_candidate(entry.position, entry.completed)),
+            // The fixture is a local file or a plain URL, which a fresh load never
+            // resumes (`resume::resume_intent`); this hands the engine the stored
+            // candidate directly, to test the engine's own resume decision.
+            .map(support::established_candidate),
         Some(TRACK_DURATION.into()),
     );
     assert!(decision.start_at() >= Duration::from_secs(2));
@@ -385,7 +388,7 @@ fn a_finished_track_is_completed_and_reopens_at_zero_with_its_position_kept() {
     let decision = decide_resume(
         state
             .entry_for(&track_id())
-            .and_then(|entry| resume_candidate(entry.position, entry.completed)),
+            .map(support::established_candidate),
         Some(TRACK_DURATION.into()),
     );
     assert_eq!(
@@ -440,7 +443,7 @@ fn a_position_past_the_end_survives_a_launch_whose_device_refuses_to_open() {
         .expect("the stale entry");
     assert_eq!(
         decide_resume(
-            resume_candidate(kept.position, kept.completed),
+            Some(support::established_candidate(&kept)),
             Some(TRACK_DURATION.into())
         )
         .start_at(),
@@ -525,7 +528,7 @@ fn a_position_past_the_end_is_refused_as_a_start() {
     let decision = decide_resume(
         reloaded
             .entry_for(&track_id())
-            .and_then(|entry| resume_candidate(entry.position, entry.completed)),
+            .map(support::established_candidate),
         Some(TRACK_DURATION.into()),
     );
     assert_eq!(decision.start_at(), Duration::ZERO);
@@ -539,7 +542,7 @@ fn a_position_past_the_end_is_refused_as_a_start() {
 // ------------------------------------------- restart preference (§4.3, R8)
 
 /// Both of a checkpoint's locations survive a real write-and-reload round
-/// trip and still compose the way `restart_preference` (Task 6) promises:
+/// trip and still compose the way `resume::resume_intent` (Task 6) promises:
 /// the estimate wins as the target, and the established position that was
 /// also on record comes back as the fallback — neither field clobbers the
 /// other on the way through the store, which is the concern this file's
@@ -572,11 +575,18 @@ fn a_stored_estimate_and_its_established_fallback_both_survive_a_reload() {
         None => panic!("the entry must survive the reload"),
     };
     assert_eq!(
-        restart_preference(entry.position, entry.estimated),
-        Some(RestartPreference {
+        tenuto::resume::resume_intent(
+            &support::podcast_media(),
+            Some(tenuto::resume::StoredProgress {
+                position: entry.position,
+                estimated: entry.estimated,
+                completed: entry.completed,
+            }),
+        ),
+        ResumeIntent::EstimatedCandidate {
             target: Duration::from_secs(97),
             established: Some(Duration::from_secs(40)),
-        })
+        }
     );
 }
 
@@ -606,11 +616,18 @@ fn a_stored_estimate_with_no_established_position_reports_none_for_it_after_a_re
         "no established position was ever recorded"
     );
     assert_eq!(
-        restart_preference(entry.position, entry.estimated),
-        Some(RestartPreference {
+        tenuto::resume::resume_intent(
+            &support::podcast_media(),
+            Some(tenuto::resume::StoredProgress {
+                position: entry.position,
+                estimated: entry.estimated,
+                completed: entry.completed,
+            }),
+        ),
+        ResumeIntent::EstimatedCandidate {
             target: Duration::from_secs(97),
             established: None,
-        })
+        }
     );
 }
 
