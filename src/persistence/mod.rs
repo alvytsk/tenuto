@@ -2,6 +2,7 @@
 //! writer thread that owns the disk.
 
 pub mod atomic;
+pub(crate) mod json_file;
 pub mod model;
 pub mod queue_codec;
 pub mod store;

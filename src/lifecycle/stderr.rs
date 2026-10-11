@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 
 use crate::persistence::PersistenceError;
 use crate::persistence::atomic::{prepare_directory, set_private};
-use crate::persistence::store::stamp;
+use crate::persistence::json_file::stamp;
 
 /// How many prior session logs `open_session_log` leaves in place besides
 /// the one it is about to create.
