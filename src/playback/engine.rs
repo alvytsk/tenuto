@@ -2849,10 +2849,10 @@ impl Worker {
             // §4.3 (Task 6 fix round 1): the estimate always wins as the
             // seek target, unconditionally — it is a preference between two
             // already-known locations decided upstream in
-            // `resume::restart_preference`, not a duration-validated choice,
+            // `resume::resume_intent`, not a duration-validated choice,
             // so nothing here re-runs `decide_resume` against the decoded
             // duration the way `Candidate` does. `established` is reported
-            // exactly as `restart_preference` computed it — R8's "never
+            // exactly as `resume::resume_intent` computed it — R8's "never
             // established" vs. "established at the start" distinction
             // already lives there, upstream of this call, so it is never
             // re-derived or re-validated here either.

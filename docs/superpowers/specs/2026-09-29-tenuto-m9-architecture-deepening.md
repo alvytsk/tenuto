@@ -33,10 +33,12 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 - Problem: `persistence/store.rs`, `subscription/store.rs` and `station/store.rs` each carry the same lifecycle: not found, unreadable, unsupported version, quarantine with up to 100 candidates, and `stamp()`. The subscription and station stores differ only in nouns. `m4_subscription_store` tests that lifecycle, and `m7_1_station_store` does not. `library::load_mutating` and `load_mutating_stations` are copies of each other.
 - Direction: one concrete module with a read-only snapshot, a load-for-mutation that refuses anything not writable, and a validated save. It takes a file name, a schema version and a decode function. Keep it a function or a generic helper, not a trait (§12).
 - Tests after: one lifecycle suite on a tempdir. The per-store suites keep only record validation.
+- Status: shipped through M9 PR D (`docs/m9-d-acceptance.md`). `persistence::json_file` holds the lifecycle; the three stores keep their record shape and validation.
 
 **Resume intent lives in `resume.rs`.**
 - Problem: `resume_intent_for` sits in `session.rs`. Both callers repeat the `None` → `StartAt(ZERO)` default (`session.rs:1613`, `app.rs:545`). `restart_preference` was tested for a milestone before it had a production caller.
 - Direction: move the function, return a plain `ResumeIntent`, make its helpers private.
+- Status: shipped through M9 PR D. `ResumeIntent` and `resume_intent` live in `resume.rs`, which takes a persistence-free `StoredProgress`; `resume_candidate` and `restart_preference` are private.
 
 ## 4. M9.2 — Application
 

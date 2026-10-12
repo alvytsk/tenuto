@@ -544,7 +544,7 @@ fn a_load_with_both_locations_resumes_at_the_estimate_and_reports_the_kept_fallb
 
 /// R8: an estimate-only entry (nothing ever established) must report
 /// `established: None`, never a fabricated fallback — and must still resume
-/// at the estimate. Ablation: a wrong `resume_intent_for` (or a wrong
+/// at the estimate. Ablation: a wrong `resume::resume_intent` (or a wrong
 /// engine-side pass-through) that substitutes `Duration::ZERO` for the
 /// absent established position would be indistinguishable from a genuine
 /// zero-established entry, which is exactly the "never established" vs.

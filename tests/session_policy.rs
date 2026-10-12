@@ -12,7 +12,6 @@ use tenuto::persistence::writer::Urgency;
 use tenuto::playback::event::{PlaybackEvent, Progress, StartDisposition};
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::PositionQuality;
-use tenuto::resume::resume_candidate;
 use tenuto::session::{
     Action, CAPTURE_INTERVAL, LoadTarget, ResumeDecision, Session, decide_resume,
 };
@@ -700,7 +699,10 @@ fn a_stopped_seek_clears_the_completion_its_target_supersedes() {
     // `completed: true` would have discarded.
     assert_eq!(
         decide_resume(
-            resume_candidate(entry.position, entry.completed),
+            // The fixture is a local file or a plain URL, which a fresh load never
+            // resumes (`resume::resume_intent`); this hands the engine the stored
+            // candidate directly, to test the engine's own resume decision.
+            Some(support::established_candidate(entry)),
             Some(Duration::from_secs(240).into())
         ),
         ResumeDecision::Resume(Duration::from_secs(30))

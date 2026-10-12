@@ -1,23 +1,19 @@
-//! The file on disk: read it, classify it, replace it atomically.
+//! The state file on disk: `state.json`'s decode, migration and queue
+//! recovery, over the shared versioned-file lifecycle in `json_file`.
 
-use std::fs;
-use std::io;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use serde::Deserialize;
-use time::OffsetDateTime;
 
 use crate::clock::Clock;
 use crate::media::id::MediaId;
 
 use super::PersistenceError;
-use super::atomic::replace_bytes;
+use super::json_file::{self, Found, JsonFile, Load, Malformed, Rejected};
 use super::model::{PersistedCheckpoint, PersistedState, RawState, SCHEMA_VERSION};
 use super::queue_codec::QueueReset;
 
-/// How many `-2`, `-3`, … candidates a quarantine will try before giving up.
-pub const MAX_QUARANTINE_CANDIDATES: u32 = 100;
+pub use super::json_file::{LoadReason, MAX_QUARANTINE_CANDIDATES};
 
 /// The oldest schema version `load` still knows how to bring forward to
 /// [`SCHEMA_VERSION`] (design doc §4.5). A version below this, like one
@@ -25,62 +21,33 @@ pub const MAX_QUARANTINE_CANDIDATES: u32 = 100;
 /// `UnsupportedVersion` and a preserved file either way.
 const OLDEST_MIGRATABLE_VERSION: u32 = 1;
 
-/// Only the field every future version is obliged to keep. Read before the
-/// model, so that a valid newer file is never misclassified as garbage (D3).
-#[derive(Deserialize)]
-struct VersionEnvelope {
-    schema_version: u32,
-}
+/// Every version `load` accepts. A file from a build that renumbered
+/// downward is as unreadable as one from a build ahead of this one; the band
+/// is widened by exactly the versions this build can bring forward.
+const VERSIONS: RangeInclusive<u32> = OLDEST_MIGRATABLE_VERSION..=SCHEMA_VERSION;
 
-/// The pure decode step shared by [`StateStore::load`] and
-/// [`StateStore::read_snapshot`] (design doc §5.5): read the version envelope
-/// first and reject an unsupported version before the full model is ever
-/// deserialised, so a valid newer file is never misclassified as garbage
-/// (D3). Every other outcome — an unreadable envelope, an unreadable model
-/// shape — is reported through the same sanitized [`PersistenceError::Deserialize`],
-/// since neither caller may repeat a `serde_json::Error`'s message verbatim: a
-/// checkpoint map key is a media identity that can carry a URL.
-///
-/// Does not touch the filesystem at all: no read, no quarantine, no write.
-/// What each caller does with a rejection — quarantine and keep writing,
-/// disable writing, or simply return `Err` — is entirely theirs.
+/// The decode step shared by [`StateStore::load`] and
+/// [`StateStore::read_snapshot`], after the shared version check (design
+/// doc §5.5). Touches no filesystem: what each caller does with a rejection
+/// is theirs.
 ///
 /// `accept_queue` gates whether the file's queue data — schema 4's
 /// `playlists`/`playing`, or schema 3's `queue`/`active_entry` — is decoded
 /// at all: [`StateStore::load`] passes `true`, and
 /// [`StateStore::read_snapshot`] passes `false`, since a listing never
-/// examines queue data (task brief recovery rules 1-2). The queue's own
-/// recovery outcome — `Some(QueueReset)` when the queue or active entry had
-/// to be reset — is returned alongside the state; [`StateStore::load`] uses
-/// it to back up the original file before writing resumes (§6), and
-/// [`StateStore::read_snapshot`] discards it, since a read never backs up or
-/// writes anything.
+/// examines queue data. The queue's own recovery outcome — `Some(QueueReset)`
+/// when the queue or active entry had to be reset — is returned alongside
+/// the state; [`StateStore::load`] uses it to keep the original bytes aside
+/// before writing resumes (§6), and [`StateStore::read_snapshot`] discards
+/// it, since a read never copies or writes anything.
 fn decode_state(
     path: &Path,
+    version: u32,
     bytes: &[u8],
     accept_queue: bool,
-) -> Result<(PersistedState, Option<QueueReset>), PersistenceError> {
-    let envelope = serde_json::from_slice::<VersionEnvelope>(bytes)
-        .map_err(|source| malformed(path, &source))?;
-
-    // Not `> SCHEMA_VERSION` alone: a file from a build that renumbered
-    // downward is just as unreadable as one from a build ahead of this one.
-    // `OLDEST_MIGRATABLE_VERSION` widens the accepted band by exactly the
-    // versions this build knows how to bring forward — today only v1 —
-    // everything else, above or below, is rejected the same way it always
-    // was.
-    if envelope.schema_version > SCHEMA_VERSION
-        || envelope.schema_version < OLDEST_MIGRATABLE_VERSION
-    {
-        return Err(PersistenceError::UnsupportedVersion {
-            path: path.to_path_buf(),
-            found: envelope.schema_version,
-            supported: SCHEMA_VERSION,
-        });
-    }
-
-    let raw =
-        serde_json::from_slice::<RawState>(bytes).map_err(|source| malformed(path, &source))?;
+) -> Result<(PersistedState, Option<QueueReset>), Malformed> {
+    let raw = serde_json::from_slice::<RawState>(bytes)
+        .map_err(|source| json_file::malformed(&source))?;
     let (mut state, queue_reset) = raw.into_state(accept_queue);
 
     // A v1 file's shape already deserialises cleanly into the current
@@ -89,63 +56,16 @@ fn decode_state(
     // this, the next write would serialise that v2-shaped data back out
     // under a v1 envelope, which the next v1 build would read and quietly
     // discard.
-    if envelope.schema_version != SCHEMA_VERSION {
+    if version != SCHEMA_VERSION {
         tracing::info!(
             path = ?path,
-            from = envelope.schema_version,
+            from = version,
             to = SCHEMA_VERSION,
             "migrating the state file to the current schema"
         );
         state.migrate_to_current_schema();
     }
     Ok((state, queue_reset))
-}
-
-/// Sanitizes a `serde_json::Error` into a category plus line/column,
-/// deliberately dropping its `Display` text (and any source), since that text
-/// can quote the file's raw content — including a checkpoint map key, which is
-/// a media identity that may carry a URL.
-fn malformed(path: &Path, source: &serde_json::Error) -> PersistenceError {
-    use serde_json::error::Category;
-
-    let category = match source.classify() {
-        Category::Io => "io",
-        Category::Syntax => "syntax",
-        Category::Data => "data",
-        Category::Eof => "eof",
-    };
-    tracing::warn!(
-        path = ?path,
-        category,
-        line = source.line(),
-        column = source.column(),
-        "the state file could not be decoded"
-    );
-    PersistenceError::Deserialize {
-        path: path.to_path_buf(),
-        category,
-        line: source.line(),
-        column: source.column(),
-    }
-}
-
-#[derive(Debug)]
-pub enum LoadReason {
-    Loaded,
-    Missing,
-    /// The file was garbage and has been moved aside; writing continues.
-    Quarantined {
-        moved_to: PathBuf,
-    },
-    /// The file was garbage and could not be moved aside; writing is disabled
-    /// so that the next checkpoint does not overwrite what §6 requires be kept.
-    QuarantineFailed,
-    /// A version this build does not support; preserved in place.
-    UnsupportedVersion {
-        found: u32,
-    },
-    /// Present but unreadable. Preserved in place for the same reason.
-    Unreadable,
 }
 
 /// Whether the exact original bytes were copied aside before a repaired
@@ -188,17 +108,18 @@ impl StateSnapshot {
 }
 
 pub struct StateStore {
-    path: PathBuf,
-    clock: Arc<dyn Clock>,
+    file: JsonFile,
 }
 
 impl StateStore {
     pub fn new(path: PathBuf, clock: Arc<dyn Clock>) -> Self {
-        Self { path, clock }
+        Self {
+            file: JsonFile::new(path, clock),
+        }
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.file.path()
     }
 
     /// The platform state path. Only `app` calls this, which is what keeps the
@@ -215,53 +136,53 @@ impl StateStore {
     }
 
     pub fn load(&self) -> LoadOutcome {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Self::fresh(true, LoadReason::Missing);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    path = ?self.path,
-                    %error,
-                    "cannot read the state file; leaving it in place and not writing this session"
-                );
-                return Self::fresh(false, LoadReason::Unreadable);
-            }
+        let path = self.file.path();
+        let Load {
+            found,
+            writable,
+            reason,
+        } = self.file.load(VERSIONS, |version, bytes| {
+            decode_state(path, version, bytes, true)
+        });
+
+        let Some(Found {
+            value: (state, queue_reset),
+            bytes,
+        }) = found
+        else {
+            return LoadOutcome {
+                state: PersistedState::default(),
+                writable,
+                reason,
+                queue_repair: None,
+            };
+        };
+        let Some(reset) = queue_reset else {
+            return LoadOutcome {
+                state,
+                writable,
+                reason,
+                queue_repair: None,
+            };
         };
 
-        match decode_state(&self.path, &bytes, true) {
-            Ok((state, None)) => LoadOutcome {
-                state,
-                writable: true,
-                reason: LoadReason::Loaded,
-                queue_repair: None,
-            },
-            Ok((state, Some(reset))) => {
-                let backup = self.back_up_original(&bytes);
-                let writable = matches!(backup, QueueBackup::Saved(_));
-                tracing::warn!(
-                    fields = reset.fields_reset(),
-                    writable,
-                    "queue data in the state file was reset"
-                );
-                LoadOutcome {
-                    state,
-                    writable,
-                    reason: LoadReason::Loaded,
-                    queue_repair: Some(QueueRepair { reset, backup }),
-                }
-            }
-            Err(PersistenceError::UnsupportedVersion { found, .. }) => {
-                tracing::warn!(
-                    path = ?self.path,
-                    found,
-                    supported = SCHEMA_VERSION,
-                    "unsupported state schema; preserving the file and not writing this session"
-                );
-                Self::fresh(false, LoadReason::UnsupportedVersion { found })
-            }
-            Err(_malformed) => self.reject_malformed(),
+        // §6: the exact bytes go aside before any writer can replace them,
+        // and a failed copy costs the session its writes.
+        let backup = match self.file.keep_copy(&bytes, "queue-recovery") {
+            Some(path) => QueueBackup::Saved(path),
+            None => QueueBackup::Failed,
+        };
+        let writable = writable && matches!(backup, QueueBackup::Saved(_));
+        tracing::warn!(
+            fields = reset.fields_reset(),
+            writable,
+            "queue data in the state file was reset"
+        );
+        LoadOutcome {
+            state,
+            writable,
+            reason,
+            queue_repair: Some(QueueRepair { reset, backup }),
         }
     }
 
@@ -274,21 +195,43 @@ impl StateStore {
     /// unreadable is, so a listing can never mistake "state could not be
     /// read" for "nothing has been played yet".
     pub fn read_snapshot(&self) -> Result<StateSnapshot, PersistenceError> {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(StateSnapshot(PersistedState::default()));
+        let path = self.file.path();
+        match self.file.read(VERSIONS, |version, bytes| {
+            decode_state(path, version, bytes, false)
+        }) {
+            Ok(Some((state, _))) => Ok(StateSnapshot(state)),
+            Ok(None) => Ok(StateSnapshot(PersistedState::default())),
+            Err(Rejected::Unreadable(source)) => Err(PersistenceError::Io {
+                path: path.to_path_buf(),
+                op: "read",
+                source,
+            }),
+            Err(Rejected::UnsupportedVersion(found)) => Err(PersistenceError::UnsupportedVersion {
+                path: path.to_path_buf(),
+                found,
+                supported: SCHEMA_VERSION,
+            }),
+            Err(Rejected::Malformed(Malformed::Json {
+                category,
+                line,
+                column,
+            })) => Err(PersistenceError::Deserialize {
+                path: path.to_path_buf(),
+                category,
+                line,
+                column,
+            }),
+            // State decode only ever builds `Malformed::Json`; this arm keeps
+            // the match exhaustive with static text, not a new variant.
+            Err(Rejected::Malformed(Malformed::Invalid(what))) => {
+                Err(PersistenceError::Deserialize {
+                    path: path.to_path_buf(),
+                    category: what,
+                    line: 0,
+                    column: 0,
+                })
             }
-            Err(source) => {
-                return Err(PersistenceError::Io {
-                    path: self.path.clone(),
-                    op: "read",
-                    source,
-                });
-            }
-        };
-
-        decode_state(&self.path, &bytes, false).map(|(state, _)| StateSnapshot(state))
+        }
     }
 
     pub fn write(&self, state: &PersistedState) -> Result<(), PersistenceError> {
@@ -304,119 +247,6 @@ impl StateStore {
             SCHEMA_VERSION,
             "only this build's schema version is ever written"
         );
-
-        let bytes =
-            serde_json::to_vec_pretty(state).map_err(|source| PersistenceError::Serialize {
-                path: self.path.clone(),
-                source,
-            })?;
-
-        replace_bytes(&self.path, &bytes)
+        self.file.save(state)
     }
-
-    fn parent(&self) -> &Path {
-        self.path.parent().unwrap_or_else(|| Path::new("."))
-    }
-
-    fn fresh(writable: bool, reason: LoadReason) -> LoadOutcome {
-        LoadOutcome {
-            state: PersistedState::default(),
-            writable,
-            reason,
-            queue_repair: None,
-        }
-    }
-
-    fn reject_malformed(&self) -> LoadOutcome {
-        match self.quarantine() {
-            Some(moved_to) => {
-                tracing::warn!(path = ?self.path, ?moved_to, "state file quarantined");
-                Self::fresh(true, LoadReason::Quarantined { moved_to })
-            }
-            None => {
-                tracing::warn!(
-                    path = ?self.path,
-                    "cannot quarantine the state file; not writing this session"
-                );
-                Self::fresh(false, LoadReason::QuarantineFailed)
-            }
-        }
-    }
-
-    /// Move the file aside under a timestamped name, never over one that
-    /// already exists. Single-user, single-process by design (§17), so the
-    /// exists-then-rename window is not a hazard worth more machinery.
-    fn quarantine(&self) -> Option<PathBuf> {
-        let stamp = stamp(self.clock.sample().wall);
-        let dir = self.parent();
-        for suffix in 1..=MAX_QUARANTINE_CANDIDATES {
-            let name = if suffix == 1 {
-                format!("state.json.rejected-{stamp}")
-            } else {
-                format!("state.json.rejected-{stamp}-{suffix}")
-            };
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                continue;
-            }
-            if fs::rename(&self.path, &candidate).is_ok() {
-                return Some(candidate);
-            }
-            return None;
-        }
-        None
-    }
-
-    /// §6: copy the exact bytes aside with create-new semantics before any
-    /// writer can replace them. Never renames or rewrites the original.
-    fn back_up_original(&self, bytes: &[u8]) -> QueueBackup {
-        use std::io::Write;
-        let stamp = stamp(self.clock.sample().wall);
-        let dir = self.parent();
-        for suffix in 1..=MAX_QUARANTINE_CANDIDATES {
-            let name = if suffix == 1 {
-                format!("state.json.queue-recovery-{stamp}")
-            } else {
-                format!("state.json.queue-recovery-{stamp}-{suffix}")
-            };
-            let candidate = dir.join(name);
-            let mut file = match super::atomic::create_private_new(&candidate) {
-                Ok(file) => file,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return QueueBackup::Failed,
-            };
-            // D12 (atomic.rs): the backup holds the user's full listening
-            // history, so its mode is asserted explicitly rather than left
-            // to the create-time mode, which the umask can alter.
-            if super::atomic::set_private(&candidate).is_err() {
-                return QueueBackup::Failed;
-            }
-            if file
-                .write_all(bytes)
-                .and_then(|()| file.sync_all())
-                .is_err()
-            {
-                return QueueBackup::Failed;
-            }
-            super::atomic::sync_parent_best_effort(dir);
-            return QueueBackup::Saved(candidate);
-        }
-        QueueBackup::Failed
-    }
-}
-
-/// `20260908T143211Z` — filesystem-safe, no colons (§13).
-///
-/// `pub(crate)` so `lifecycle::stderr` can reuse the exact same format for
-/// per-session TUI log filenames rather than duplicating it.
-pub(crate) fn stamp(at: OffsetDateTime) -> String {
-    format!(
-        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
-        at.year(),
-        u8::from(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second(),
-    )
 }

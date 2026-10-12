@@ -126,3 +126,25 @@ fn invalid_base_state_and_newer_versions_keep_their_existing_handling() {
     ));
     assert!(!outcome.writable);
 }
+
+/// Review Focus 2: a listing reads progress from a `state.json` whose queue
+/// the next `load` will repair. The read succeeds and leaves no recovery
+/// copy behind: only `load` keeps the original aside.
+#[test]
+fn a_read_never_makes_a_recovery_copy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_state(dir.path(), over_capacity());
+    let original = std::fs::read(&path).expect("read");
+
+    let snapshot = StateStore::new(path.clone(), Arc::new(FakeClock::new()))
+        .read_snapshot()
+        .expect("a repairable queue does not make the file unreadable");
+
+    assert!(snapshot.completed_for(&media("a")));
+    assert_eq!(std::fs::read(&path).expect("unchanged"), original);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("listing")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from("state.json")]);
+}

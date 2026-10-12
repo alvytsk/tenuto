@@ -8,15 +8,16 @@
 //! here uses a `tempfile::TempDir`, never the platform state path.
 //!
 //! `tests/estimated_seek.rs` and `tests/session_policy.rs` already prove the
-//! mechanism this file exercises end to end: `restart_preference` (Task 6)
+//! mechanism this file exercises end to end: `resume::resume_intent`'s
+//! estimated preference (Task 6)
 //! and `ResumeIntent::EstimatedCandidate` (`src/playback/engine.rs`) at
 //! their own boundaries. What none of them can show is that the whole
 //! chain survives an actual write-to-disk and reload — a real second
 //! process, not a value passed straight from one function to the next in
-//! the same test. Since Task 8, `resume_intent_for` no longer drives this
+//! the same test. Since Task 8, `resume::resume_intent` no longer drives this
 //! for this file's plain-URL fixture — a fresh load of a local file or
 //! plain URL starts from zero — so each "relaunch" below hands
-//! `restart_preference`'s own output to the engine directly, the way a
+//! the stored estimate to the engine directly, the way a
 //! real relaunch of a podcast episode still would.
 
 mod support;
@@ -37,7 +38,6 @@ use tenuto::playback::command::{Admission, PlaybackCommand, ResumeIntent};
 use tenuto::playback::event::{PlaybackEvent, StartDisposition};
 use tenuto::playback::state::PlaybackState;
 use tenuto::resume::PlaybackCheckpoint;
-use tenuto::resume::{restart_preference, resume_candidate};
 use tenuto::session::{Action, LoadTarget, Session};
 use url::Url;
 
@@ -161,7 +161,7 @@ fn reload(dir: &Path) -> PersistedState {
 /// estimate.
 ///
 /// Ablation: an `open_persistence`-equivalent that read `entry.position`
-/// instead of `restart_preference`'s output would make session 3 land at the
+/// instead of the stored estimate would make session 3 land at the
 /// established position instead of the estimate — the `loaded3.position`
 /// assertion would fail. An `engine.rs::load` that let a positive
 /// `EstimatedCandidate` write straight through `record_current` (ignoring
@@ -228,8 +228,10 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
         request2,
         &url,
         ResumeIntent::Candidate(
-            resume_candidate(established.position, established.completed)
-                .unwrap_or_else(|| panic!("session 1's checkpoint must carry a position")),
+            // The fixture is a local file or a plain URL, which a fresh load never
+            // resumes (`resume::resume_intent`); this hands the engine the stored
+            // candidate directly, to test the engine's own resume decision.
+            support::established_candidate(&established),
         ),
     );
     let mut rig2 = Rig {
@@ -279,15 +281,16 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
     );
     assert!(!after_session_2.completed);
 
-    // Session 3: hands the engine `restart_preference`'s own output
-    // directly. §4.3 prefers the estimate over the established fallback;
-    // since Task 8 a real relaunch of this file's plain-URL fixture would
-    // start at zero instead (`resume_intent_for` no longer resumes
+    // Session 3: hands the engine the stored estimate directly. §4.3
+    // prefers the estimate over the established fallback; since Task 8 a
+    // real relaunch of this file's plain-URL fixture would start at zero
+    // instead (`resume::resume_intent` never resumes
     // `MediaId::RemoteUrl`), so this pins the preference and its on-disk
     // survival directly rather than through a real relaunch.
-    let preference = restart_preference(after_session_2.position, after_session_2.estimated)
-        .unwrap_or_else(|| panic!("an entry carrying both fields must produce a preference"));
-    assert_eq!(preference.established, established.position);
+    let target = after_session_2
+        .estimated
+        .unwrap_or_else(|| panic!("session 2 must have left an estimate"));
+    assert_eq!(after_session_2.position, established.position);
 
     let (store3, clock3) = Rig::store_in(dir.path());
     let mut session3 = Session::new(reload(dir.path()));
@@ -299,8 +302,8 @@ fn a_relaunch_selects_the_estimate_and_leaves_the_established_checkpoint_on_disk
         request3,
         &url,
         ResumeIntent::EstimatedCandidate {
-            target: preference.target,
-            established: preference.established,
+            target,
+            established: after_session_2.position,
         },
     );
     let mut rig3 = Rig {
@@ -430,13 +433,14 @@ fn a_relaunch_resumes_an_estimate_only_entry_and_reports_no_established_fallback
     assert!(never_established.estimated.is_some());
     assert!(!never_established.completed);
 
-    // Session 2: hands the engine `restart_preference`'s own output for an
+    // Session 2: hands the engine the stored estimate directly, for an
     // entry with no established fallback at all — since Task 8, a real
     // relaunch of this plain-URL fixture would start at zero rather than
     // compute this preference at all.
-    let preference = restart_preference(never_established.position, never_established.estimated)
-        .unwrap_or_else(|| panic!("an entry carrying only an estimate must still produce one"));
-    assert_eq!(preference.established, None);
+    let target = never_established
+        .estimated
+        .unwrap_or_else(|| panic!("session 1 must have left an estimate"));
+    assert_eq!(never_established.position, None);
 
     let server2 = TestServer::start_on(port, Script::from_fixture(NOXING));
     let url2 = server2.url("/audio.mp3");
@@ -455,8 +459,8 @@ fn a_relaunch_resumes_an_estimate_only_entry_and_reports_no_established_fallback
         request2,
         &url2,
         ResumeIntent::EstimatedCandidate {
-            target: preference.target,
-            established: preference.established,
+            target,
+            established: never_established.position,
         },
     );
     let mut rig2 = Rig {
@@ -552,10 +556,7 @@ fn a_relaunch_refused_past_an_estimated_ceiling_leaves_the_stored_checkpoint_unt
         request,
         media: media.clone(),
         source: SourceLocation::Http(parsed),
-        resume: ResumeIntent::Candidate(
-            resume_candidate(before.position, before.completed)
-                .unwrap_or_else(|| panic!("the seeded checkpoint must carry a position")),
-        ),
+        resume: ResumeIntent::Candidate(support::established_candidate(&before)),
     });
     engine.await_state(PlaybackState::Failed);
     assert_eq!(

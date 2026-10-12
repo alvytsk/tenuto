@@ -5,10 +5,11 @@
 
 use std::time::Duration;
 
+use tenuto::media::id::{EpisodeKey, FeedId, MediaId};
 use tenuto::media::provenance::PositionProvenance;
 use tenuto::resume::{
-    KnownDuration, RestartPreference, ResumeCandidate, ResumeDecision, decide_resume,
-    restart_preference, resume_candidate,
+    KnownDuration, ResumeCandidate, ResumeDecision, ResumeIntent, StoredProgress, decide_resume,
+    resume_intent,
 };
 
 fn stored(secs: u64, completed: bool) -> ResumeCandidate {
@@ -16,6 +17,30 @@ fn stored(secs: u64, completed: bool) -> ResumeCandidate {
         position: Duration::from_secs(secs),
         completed,
     }
+}
+
+/// The one kind of media a fresh load resumes (M8 §7), so these tests see
+/// the stored-progress rules rather than the media policy.
+fn episode() -> MediaId {
+    let enclosure =
+        url::Url::parse("https://cdn.example/a.mp3").unwrap_or_else(|error| panic!("{error}"));
+    MediaId::PodcastEpisode {
+        feed: FeedId::new("subscription-1".into()).unwrap_or_else(|error| panic!("{error:?}")),
+        episode: EpisodeKey::resolve(Some("guid"), Some(&enclosure), None)
+            .unwrap_or_else(|error| panic!("{error:?}")),
+    }
+}
+
+fn progress(position: Option<u64>, estimated: Option<u64>, completed: bool) -> StoredProgress {
+    StoredProgress {
+        position: position.map(Duration::from_secs),
+        estimated: estimated.map(Duration::from_secs),
+        completed,
+    }
+}
+
+fn intent(stored: StoredProgress) -> ResumeIntent {
+    resume_intent(&episode(), Some(stored))
 }
 
 /// Every existing test in this file predates provenance and means an
@@ -164,107 +189,111 @@ fn a_checkpoint_past_an_established_duration_is_still_stale() {
     );
 }
 
-/// Persistence model §4.2: an entry can carry only an estimate, with nothing
-/// ever established for it. `resume_candidate` must answer `None` — no
-/// established candidate at all — rather than fabricating one at zero, which
-/// `decide_resume` would read as `AtStart` and could not tell apart from a
-/// position genuinely established at the start.
+// ------------------------------- resume intent for a fresh load (§4.3, M8 §7)
+
+/// §4.2: an entry carrying only an estimate has no established candidate;
+/// with no estimate either, nothing is stored to resume.
 #[test]
-fn resume_candidate_with_no_established_position_and_not_completed_is_no_candidate() {
-    assert_eq!(resume_candidate(None, false), None);
+fn resume_intent_with_nothing_established_and_no_estimate_starts_at_zero() {
     assert_eq!(
-        decide_resume(resume_candidate(None, false), secs(300)),
-        ResumeDecision::NoEntry
+        intent(progress(None, None, false)),
+        ResumeIntent::StartAt(Duration::ZERO)
+    );
+    assert_eq!(
+        resume_intent(&episode(), None),
+        ResumeIntent::StartAt(Duration::ZERO)
+    );
+}
+
+/// Review Focus 4: established at the start is a candidate, distinct from
+/// never established — `decide_resume` reads it as `AtStart`.
+#[test]
+fn resume_intent_keeps_a_position_established_at_zero_as_a_candidate() {
+    assert_eq!(
+        intent(progress(Some(0), None, false)),
+        ResumeIntent::Candidate(stored(0, false))
     );
 }
 
 /// §4.2: an estimated timeline can complete a track without ever
-/// establishing its anchor, so completion must still be reported even with
-/// no established position — `decide_resume` decides `Completed` before it
-/// ever looks at the position `resume_candidate` filled in for this case.
+/// establishing its anchor, so completion is still reported with no
+/// established position.
 #[test]
-fn resume_candidate_reports_completion_even_with_no_established_position() {
+fn resume_intent_reports_completion_even_with_no_established_position() {
     assert_eq!(
-        resume_candidate(None, true),
-        Some(ResumeCandidate {
-            position: Duration::ZERO,
-            completed: true,
-        })
+        intent(progress(None, None, true)),
+        ResumeIntent::Candidate(stored(0, true))
     );
     assert_eq!(
-        decide_resume(resume_candidate(None, true), secs(300)),
+        decide_resume(Some(stored(0, true)), secs(300)),
         ResumeDecision::Completed
     );
 }
 
-/// The ordinary case is unaffected: an established position still produces
-/// exactly the candidate it always did.
 #[test]
-fn resume_candidate_with_an_established_position_carries_it_through() {
+fn resume_intent_with_an_established_position_carries_it_through() {
     assert_eq!(
-        resume_candidate(Some(Duration::from_secs(93)), false),
-        Some(ResumeCandidate {
-            position: Duration::from_secs(93),
-            completed: false,
-        })
+        intent(progress(Some(93), None, false)),
+        ResumeIntent::Candidate(stored(93, false))
     );
 }
-
-// ------------------------------------------- restart preference (§4.3, R8)
 
 /// §4.3: `estimated` is the listener's most recent expressed intent and
-/// must win over an older established point, never be averaged with it or
-/// discarded in its favour. A wrong implementation that prefers `position`
-/// instead — or that returns the established value as the target — fails
-/// this on the `target` field alone.
+/// wins over an older established point, which is kept as the fallback.
 #[test]
-fn restart_preference_prefers_the_estimate_and_keeps_the_established_fallback() {
-    let position = Some(Duration::from_secs(40));
-    let estimated = Some(Duration::from_secs(97));
+fn resume_intent_prefers_the_estimate_and_keeps_the_established_fallback() {
     assert_eq!(
-        restart_preference(position, estimated),
-        Some(RestartPreference {
+        intent(progress(Some(40), Some(97), false)),
+        ResumeIntent::EstimatedCandidate {
             target: Duration::from_secs(97),
             established: Some(Duration::from_secs(40)),
-        })
+        }
     );
 }
 
-/// R8: an entry that only ever carried an estimate must report `None` for
-/// `established`, never `Some(Duration::ZERO)` — "never established" and
-/// "established at the start" are different facts, and conflating them is
-/// exactly the loss `resume_candidate` was already written to avoid for the
-/// position side of this same rule. A wrong implementation that defaults
-/// the absent position to zero, or that reads it through
-/// `.unwrap_or_default()`, fails this on the `established` field alone
-/// while `restart_preference_prefers_the_estimate_and_keeps_the_established_fallback`
-/// above still passes — which is why this is its own test.
+/// R8 / Review Focus 4: an entry that only ever carried an estimate reports
+/// `established: None`, never a fabricated zero.
 #[test]
-fn restart_preference_with_no_established_fallback_reports_none_for_it() {
-    let estimated = Some(Duration::from_secs(97));
+fn resume_intent_with_no_established_fallback_reports_none_for_it() {
     assert_eq!(
-        restart_preference(None, estimated),
-        Some(RestartPreference {
+        intent(progress(None, Some(97), false)),
+        ResumeIntent::EstimatedCandidate {
             target: Duration::from_secs(97),
             established: None,
-        })
+        }
     );
 }
 
-/// No estimate at all: this function must add nothing, leaving the
-/// established path (`resume_candidate` / `decide_resume`) completely
-/// unchanged and in charge. A wrong implementation that falls back to
-/// `position` as the target here would make `ResumedEstimated` reachable
-/// for an entry that never held an estimate, which #4.3 does not allow.
+/// Review Focus 5: D1 replays a completed entry from zero, so a stray
+/// estimate stored before completion never redirects it.
 #[test]
-fn restart_preference_with_no_estimate_falls_through_to_the_established_path() {
+fn resume_intent_completion_beats_an_estimate() {
     assert_eq!(
-        restart_preference(Some(Duration::from_secs(40)), None),
-        None
+        intent(progress(Some(280), Some(97), true)),
+        ResumeIntent::Candidate(stored(280, true))
     );
 }
 
+/// Review Focus 5, M8 §7: a local file or a plain URL never resumes on a
+/// fresh load, whatever is stored — finished, part-way or estimated.
 #[test]
-fn restart_preference_with_neither_location_is_none() {
-    assert_eq!(restart_preference(None, None), None);
+fn resume_intent_never_resumes_a_local_file_or_url() {
+    let local =
+        MediaId::LocalFile(tenuto::media::id::AbsolutePath::new("/music/a.flac".into()).unwrap());
+    let url = MediaId::RemoteUrl(
+        tenuto::media::id::NormalizedUrl::parse("https://radio.example/a.mp3").unwrap(),
+    );
+    for media in [local, url] {
+        for stored in [
+            progress(Some(93), None, false),
+            progress(Some(280), None, true),
+            progress(Some(40), Some(97), false),
+        ] {
+            assert_eq!(
+                resume_intent(&media, Some(stored)),
+                ResumeIntent::StartAt(Duration::ZERO),
+                "{media:?} {stored:?}"
+            );
+        }
+    }
 }
