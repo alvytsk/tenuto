@@ -697,14 +697,8 @@ fn draw_progress(
         line.render(bar, buffer);
         take_left(&mut bar, used);
     } else {
-        let green = Style::new().fg(theme.green);
-        let glyph = match view.phase {
-            PlaybackPhase::Playing | PlaybackPhase::Reconnecting => Span::styled("▶ ", green),
-            PlaybackPhase::Paused => Span::styled("‖ ", green.add_modifier(Modifier::BOLD)),
-            _ => Span::raw(""),
-        };
         Line::from(vec![
-            glyph,
+            phase_glyph(view, theme),
             Span::styled(label, Style::new().fg(theme.green)),
         ])
         .render(regions.time, buffer);
@@ -751,9 +745,24 @@ fn draw_live_progress(
         spans.push(Span::styled(label, Style::new().fg(theme.text)));
         Line::from(spans).render(regions.progress, buffer);
     } else {
-        Line::styled(label, Style::new().fg(theme.green)).render(regions.time, buffer);
+        Line::from(vec![
+            phase_glyph(view, theme),
+            Span::styled(label, Style::new().fg(theme.green)),
+        ])
+        .render(regions.time, buffer);
     }
     regions.progress
+}
+
+/// `▶ ` or `‖ ` before the time on its own row: the transport button shows
+/// the action, so this is what says whether the entry is playing.
+fn phase_glyph(view: &PlayerView, theme: &Theme) -> Span<'static> {
+    let green = Style::new().fg(theme.green);
+    match view.phase {
+        PlaybackPhase::Playing | PlaybackPhase::Reconnecting => Span::styled("▶ ", green),
+        PlaybackPhase::Paused => Span::styled("‖ ", green.add_modifier(Modifier::BOLD)),
+        _ => Span::raw(""),
+    }
 }
 
 /// The time label and how much of the bar it fills. Only a loaded entry with

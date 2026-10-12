@@ -125,6 +125,21 @@ fn regions_are_valid_for_zero_and_tiny_areas() {
 }
 
 #[test]
+fn a_station_time_row_carries_the_phase_glyph_as_an_episode_does() {
+    // The transport button shows the action (‖ while playing), so the time
+    // row's glyph is what says the station is playing.
+    for (phase, glyph) in [
+        (PlaybackPhase::Playing, "▶ LIVE  01:02"),
+        (PlaybackPhase::Paused, "‖ LIVE  01:02"),
+    ] {
+        let mut v = view(phase, Some(playing(ids()[0], true, None, false)));
+        v.live = true;
+        let screen = text(&v, &UiState::new(true), 100, 30);
+        assert!(screen.contains(glyph), "{phase:?}\n{screen}");
+    }
+}
+
+#[test]
 fn normal_layout_shows_cover_metadata_and_distinct_playing_and_selected_rows() {
     let mut now = playing(ids()[0], true, Some(decoded(185)), false);
     now.year = Some("1998".into());

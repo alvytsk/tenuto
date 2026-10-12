@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A playing radio station no longer looks paused: its time row now starts
+  with ▶ (or ‖ while paused), as an episode's does, so the ‖ on the
+  Play/Pause button is no longer the only glyph on screen.
 - `tenuto play` no longer loses your place in the player: it plays the file
   or URL on its own and leaves your playlists, their cursors and the playing
   playlist as they were. Its resume position and the volume are still
