@@ -23,6 +23,7 @@ Unchanged:
 - Command admission closes while any event is pending. `command_waiting` in `service_reconnect` and `FAULT_EVENT_BUDGET` (8) read the same count as today.
 - The aggregated diagnostics `Warning`: its counters, its 2 s interval, and the rule that it goes out only into a free ordinary slot with nothing pending.
 - Shutdown: every accepted but undispatched `Load` gets `LoadCancelled`, and `run` returns whatever is still queued as the shutdown report.
+- No event reaches the application before the progress state it was emitted in. Today pass order guarantees this: step 2 refreshes `SessionFacts` and publishes progress before step 4 flushes. Once the hook flushes too, §4.3 guarantees it.
 
 Changed on purpose (§5): the four behavior changes listed there, and the crate-internal signatures in §3 and §4.
 
@@ -67,7 +68,11 @@ impl Outbox {
     /// disconnected receiver latches `disconnected`.
     pub fn offer(&self, event: PlaybackEvent) -> bool;
 
-    pub fn len(&self) -> usize;
+    /// Whether nothing is pending: command admission and `command_waiting`.
+    pub fn is_empty(&self) -> bool;
+    /// Whether `extra` more events fit under `PENDING_CAP`: the fault
+    /// budget's check, so the cap stays private.
+    pub fn fits(&self, extra: usize) -> bool;
     pub fn dropped(&self) -> u64;
     pub fn disconnected(&self) -> bool;
 
@@ -76,7 +81,7 @@ impl Outbox {
 }
 ```
 
-`len` is the single "is anything pending" reading for admission, `command_waiting` and the fault budget. Nothing else is needed: there is no `is_empty` alongside it.
+There is no `len`: every reader needs only one of the two questions above. A public `len` without `is_empty` would also fail `clippy::len_without_is_empty` under the gate.
 
 **Moved in from `engine.rs`:** `EVENT_CAPACITY`, `RESERVED_EVENT_SLOTS` and `PENDING_CAP`, now private to the module; the reserve-budget comment that derives 9; `displacement_victim` and its two unit tests. The `pub(crate)` exports that Ruling 7 added for `wait.rs` go. `EngineHandle::spawn*` builds the channel with `outbox::channel()` instead of `crossbeam_channel::bounded(EVENT_CAPACITY)`. The `bounded(1)` channel in the handle's test-only constructor is not an engine channel and stays.
 
@@ -89,11 +94,11 @@ impl Outbox {
 ### 4.1 Worker
 
 - `Worker` loses `pending_events`, `events: Sender<PlaybackEvent>`, `dropped_events` and `backlog_empty`, and gains `outbox: Arc<Outbox>`.
-- `emit` keeps its name and becomes `self.outbox.emit(event)`. `cancel_load`, `warn` and every other emitter are unchanged.
+- `emit` keeps its name and becomes `self.sync_facts(); self.outbox.emit(event)` (§4.3). `cancel_load`, `warn` and every other emitter are unchanged.
 - `flush_events` becomes `self.outbox.flush()` followed by the disconnect check below. `free_event_slots`, `note_backlog` and `drain_outbox` are deleted.
 - `emit_aggregated_warning_if_slot_free` keeps its counters and `DIAGNOSTIC_INTERVAL` gate. Its total reads `self.outbox.dropped()` in place of `dropped_events`. It sends through `self.outbox.offer(..)`, and updates `reported_diagnostics` and `last_diagnostic` only when the offer returns `true`. This matches today: the worker checks for room before it sends, and the application thread can only free slots in between, so the `Full` result today's code ignores never occurs.
 - `run` step 0 and its comment go, along with the drains in `check_end_of_track` and `shutdown` and their comments. With one queue, nothing can reorder ahead of the hook's events.
-- `admit`, `command_waiting` and the fault budget read `self.outbox.len()`.
+- `admit` and `command_waiting` read `self.outbox.is_empty()`. The fault budget defers when `!self.outbox.fits(Self::FAULT_EVENT_BUDGET)`, and `FAULT_EVENT_BUDGET` stays the worker's: it is the worker's own count of what a fault emits.
 - `receivers_gone` stays the worker's own flag, set as today by the liveness `select!` and by `RecvError`. It is also set from `self.outbox.disconnected()` after each `flush` and `offer`. That covers a disconnect the hook latched (§4.2), because the worker flushes every pass.
 - Every `return Vec::from(self.pending_events)` becomes `return self.outbox.take_remaining()`.
 
@@ -102,6 +107,19 @@ impl Outbox {
 - `WaitService` loses `events`, `outbox` and `backlog_empty`, and gains `outbox: Arc<Outbox>`. `WaitService::new` takes that one argument in their place, which brings it from eight arguments to six, so its `too_many_arguments` allowance and that comment go. `take_outbox` is deleted.
 - `announce` keeps its name, so the freeze arm reads as before, and becomes `self.outbox.emit(event)`. The ordering check, the room check and the direct `try_send` go.
 - `service_as` ends, after `publish_progress`, with `self.outbox.flush()` when `servicing == Servicing::BlockedRead`. So a blocked read flushes on every slice. A `WorkerLoop` pass does not flush, because the worker's step 4 does right after it.
+
+### 4.3 Progress before delivery
+
+The hook's `publish_progress` builds `Progress` from `SessionFacts`, and only the worker writes the fields it mirrors there. Until now that was safe because only the worker delivered worker events, and it refreshed the facts first (step 2 before step 4). Once a blocked read can flush the worker's events, a read that blocks *during* a command would deliver them against facts from before the command.
+
+The case that breaks: a finite remote track is stopped, a seek target is stored, and Play runs `restore()`. `restore` keeps `session_rev`, lands at the target and queues `StateChanged{Playing}` and `SeekCompleted`. Then step 7's `pump_audio` blocks. The hook would flush both events while the facts still describe the stopped position. `Session` arms `pending_force` on `SeekCompleted` and checkpoints the next progress sample of that revision, which would be the stopped position, written over the seek the listener made.
+
+The invariant: **`SessionFacts` are never older than the newest event in the outbox.**
+
+- The half of `Worker::publish_progress` that copies the worker's fields into `SessionFacts` (`session_rev`, `media`, `position`, `degraded`, `playing`, `provenance`, `load`) becomes `Worker::sync_facts`. `publish_progress` calls it and then `service_as(WorkerLoop)` as today.
+- `Worker::emit` calls `sync_facts` before `outbox.emit`. Emit is the one point every event passes through, whereas a blocked read can happen in many places during a command (`land`'s seek, an open and its probe, priming, the pump). So one call covers reads during command execution as well as the loop's own.
+- In `service_as(BlockedRead)` the order is: freeze arm, then `publish_progress`, then `flush`. Whatever the hook delivers was emitted no later than the facts its progress was built from.
+- Cost: one uncontended facts lock and one `MediaId` clone per event. Events are per command, not per sample.
 
 ## 5. Behavior changes
 
@@ -122,7 +140,8 @@ Built from `channel()`, with the receiver held and drained only when a test says
 - `flush` holds an ordinary event once only `RESERVED_EVENT_SLOTS` slots are free, lets a terminal or protected event into them, and never sends past a held event (FIFO).
 - `offer` returns `false` and sends nothing while anything is pending, or while only reserved slots are free; it returns `true` and sends otherwise.
 - With the receiver dropped, `flush` latches `disconnected()` and the unsent event is still first in `take_remaining()`.
-- `take_remaining` returns events in emission order and leaves `len() == 0`.
+- `take_remaining` returns events in emission order and leaves `is_empty()` true.
+- `fits(n)` is true up to `PENDING_CAP - pending` and false past it.
 
 ### 6.2 `tests/wait_service.rs`
 
@@ -137,6 +156,14 @@ No new tests. These pin the end-to-end rules and must pass unchanged:
 - `engine_contract`: `stop_travels_out_of_band_past_a_pending_backlog`, `a_backlog_closes_command_admission_until_it_drains`, `diagnostics_aggregate_rather_than_accumulating_events`, `a_disconnected_event_receiver_terminates_the_worker`, and #47's `a_play_dispatched_before_its_thaw_is_not_parked_again`.
 - `engine_shutdown`.
 
+One new engine regression, in `tests/engine_remote.rs`: `a_stored_seek_delivered_during_a_held_read_reports_the_target_not_the_stopped_position`. Steps:
+1. The server script serves the load, then `.then(..)` a reopen whose body stalls (`stall_body_after(N)`). N is chosen so the reopen's priming completes and the read that blocks is the loop's own pump after `restore` has queued its events. The plan fixes N against the fixture.
+2. Load, play for a moment, `Stop`, and `SeekTo` a target past the stopped position. Await `SeekTargetStored`, then submit `Play`.
+3. `wait_until_stalled`, then await `SeekCompleted` while the read is still held. Only hook-side flushing can deliver it then.
+4. Assert that the published `Progress` with the event's `session_rev` is at the target, not the stopped position. Then `release`.
+
+Against hook flushing without §4.3 it fails on that assertion; before hook flushing it cannot reach step 3. The plan orders the work so the test is seen to fail before `sync_facts` lands.
+
 ### 6.4 Documentation
 
 - `docs/architecture.md` §7.1: the event paragraph names `Outbox` (`playback::outbox`) as the one queue both emission paths share, replaces "wait in `pending_events`" accordingly, and states that its lock is a leaf.
@@ -149,8 +176,8 @@ No new tests. These pin the end-to-end rules and must pass unchanged:
 
 - The full gate in `CLAUDE.md`: `fmt --check`, `clippy -D warnings`, `cargo test --locked --no-fail-fast`, `RUSTDOCFLAGS="-D warnings" cargo doc`.
 - `tests/m9_layering.rs` passes. `outbox` is inside `playback`, so it adds no edge between layers.
-- A `grep` over `src/` finds no `backlog_empty`, `take_outbox`, `drain_outbox`, `note_backlog` or `pending_events`, and finds `RESERVED_EVENT_SLOTS`, `EVENT_CAPACITY` and `PENDING_CAP` defined only in `outbox.rs` and used nowhere else.
-- The engine suites under the load recipe in `CLAUDE.md` (the test binary pinned with `taskset -c 0-1` beside about 8 `yes` loops): `engine_contract` and `wait_service`, 10 runs each, all green.
+- A `grep` over `src/` finds no `backlog_empty`, `take_outbox`, `drain_outbox`, `note_backlog` or `pending_events`, and finds `RESERVED_EVENT_SLOTS`, `EVENT_CAPACITY` and `PENDING_CAP` defined only in `outbox.rs` and used nowhere else. `FAULT_EVENT_BUDGET` stays in `engine.rs` and reaches the cap only through `fits`.
+- The engine suites under the load recipe in `CLAUDE.md` (the test binary pinned with `taskset -c 0-1` beside about 8 `yes` loops): `engine_contract`, `wait_service` and `engine_remote`'s new regression, 10 runs each, all green.
 - Lock cost is not measured. One uncontended mutex per emit and per slice replaces an atomic plus, on the hook path, a mutex. Measure only if a representative probe shows it.
 
 ## 8. Out of scope
