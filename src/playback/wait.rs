@@ -43,12 +43,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// Distinguishes why `service_as` is running.
-///
-/// Nothing branches on it yet: a later task sets a `buffering` flag only for
-/// `BlockedRead`, once the worker's own loop pass is *not* the thing keeping
-/// progress alive. The two call sites already pass distinct values so that
-/// addition needs no further plumbing (Ruling 4).
+/// Distinguishes why `service_as` is running: only a `BlockedRead` reports
+/// `buffering` (Ruling 4) and acts on the freeze level.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Servicing {
     /// `WaitHook::service`, called from inside a blocked decoder read.
@@ -284,14 +280,22 @@ impl WaitService {
     /// delegates here with `Servicing::BlockedRead`, and
     /// `Worker::publish_progress` calls this directly with
     /// `Servicing::WorkerLoop` — which is what makes "the hook does exactly
-    /// what the loop does" a fact rather than a comment, including the
-    /// freeze arm below, so a pause that arrives while the worker is *not*
-    /// blocked is handled by the same code.
+    /// what the loop does" a fact rather than a comment for the progress
+    /// snapshot.
+    ///
+    /// The freeze arm is the exception: it runs for a blocked read only. The
+    /// level exists to reach a read the worker is stuck in (G2); a worker that
+    /// is not stuck dispatches the `Pause` or `Play` queued beside the level
+    /// itself. Acting on the level from the loop as well raced that dispatch:
+    /// `submit_play` sends `Play` before it lowers the level, so a `Play`
+    /// dispatched in between had its transport parked again by the next pass,
+    /// with a stray `Paused`.
     pub(crate) fn service_as(&self, servicing: Servicing) {
         tracing::trace!(?servicing, "servicing the transport");
+        let blocked = servicing == Servicing::BlockedRead;
         let frozen = self.interrupt.is_frozen();
         let mut facts = lock(&self.facts);
-        if frozen && !facts.frozen_by_hook {
+        if blocked && frozen && !facts.frozen_by_hook {
             // Park the callback. Everything else — the ring, the decoder, the
             // pending read — is left exactly as it is, which is what makes
             // resuming a single release (§9).
@@ -312,7 +316,7 @@ impl WaitService {
                     request: None,
                 });
             }
-        } else if !frozen && facts.frozen_by_hook {
+        } else if blocked && !frozen && facts.frozen_by_hook {
             self.release();
             facts.frozen_by_hook = false;
             self.announce(PlaybackEvent::StateChanged {

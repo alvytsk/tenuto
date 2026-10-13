@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resuming after a pause no longer sometimes pauses again for a moment on a
+  busy machine: a short gap in the audio and a flash of ‖ before playback
+  carried on.
 - Cover art now fills its area on high-density screens (4K and the like):
   the built-in covers and any small artwork are scaled up to fit, instead of
   drawing at their own pixel size in a corner of the cover area.

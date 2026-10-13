@@ -140,6 +140,30 @@ fn pause_holds_the_position_still_and_resume_continues_from_it() {
     );
 }
 
+fn announced(engine: &mut TestEngine, state: PlaybackState) -> usize {
+    engine
+        .count_events(|e| matches!(e, PlaybackEvent::StateChanged { state: s, .. } if *s == state))
+}
+
+#[test]
+fn a_play_dispatched_before_its_thaw_is_not_parked_again() {
+    // `submit_play` sends `Play` and then lowers the freeze level, so the
+    // worker can resume before the level drops. The raw `send` holds it at
+    // that moment: the level still up must not park the transport again.
+    let mut engine = TestEngine::start(TRACK);
+    engine.play_for(Duration::from_millis(200));
+    engine.handle().submit(PlaybackCommand::Pause);
+    engine.await_state(PlaybackState::Paused);
+    engine.send(PlaybackCommand::Play);
+    engine.await_state(PlaybackState::Playing);
+    engine.let_time_pass(Duration::from_millis(50));
+    engine.handle().source_interrupt().thaw();
+    engine.let_time_pass(Duration::from_millis(50));
+    assert_eq!(announced(&mut engine, PlaybackState::Paused), 1);
+    assert_eq!(announced(&mut engine, PlaybackState::Playing), 1);
+    assert_eq!(engine.state(), PlaybackState::Playing);
+}
+
 #[test]
 fn transport_recreation_preserves_position() {
     let mut engine = TestEngine::start(TRACK);
