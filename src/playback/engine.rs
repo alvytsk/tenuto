@@ -3186,17 +3186,13 @@ impl Worker {
             }
             return;
         }
-        // `submit_pause` sets the freeze level on the same `source_interrupt`
-        // this parked for, out of band, and the two can land in either order:
-        // if `freeze()` reaches `service_as` (run every pass via
-        // `publish_progress`, not only from inside a blocked read) before
-        // this dispatch of the queued `Pause` does, the early return above
-        // already handles it. If this dispatch runs first instead, nothing
-        // has told the hook yet - and without reconciling here, `service_as`
-        // would see `frozen && !frozen_by_hook` on the very next pass and
-        // park an already-parked transport a second time, which the
-        // handshake has no acknowledgment for. `play`'s resume branch
-        // already clears this same flag; this is its missing counterpart.
+        // `submit_pause` leaves the freeze level up for as long as the pause
+        // lasts. If the hook parked first, inside a blocked read, the early
+        // return above already handles it. If this dispatch parked instead,
+        // nothing has told the hook - and a read that blocks while paused (a
+        // seek's priming read) would see `frozen && !frozen_by_hook`, park
+        // the transport again and announce `Paused` a second time. `play`'s
+        // resume branch clears this same flag; this is its counterpart.
         self.reconcile_frozen_by_hook();
         self.set_state(PlaybackState::Paused);
     }
@@ -3246,18 +3242,16 @@ impl Worker {
     }
 
     /// Set `frozen_by_hook` to match reality after this dispatch parked the
-    /// transport on its own, so `service_as` does not act on a stale
-    /// mismatch on its very next pass.
+    /// transport on its own, so the next blocked read does not act on a
+    /// stale mismatch.
     ///
     /// Conditional on the freeze level actually being active
     /// (`source_interrupt.is_frozen()`), not unconditional: a local pause
     /// dispatched the ordinary way, with no `submit_pause` and so no freeze
     /// level ever raised, must leave this exactly as it was. Setting it
     /// unconditionally trips `service_as`'s *other* branch instead -
-    /// `!frozen && frozen_by_hook` reads as "release" - undoing the pause on
-    /// the very next loop pass, which is what broke
-    /// `pause_holds_the_position_still_and_resume_continues_from_it` the
-    /// first time this was tried.
+    /// `!frozen && frozen_by_hook` reads as "release" - undoing the pause in
+    /// the next blocked read.
     fn reconcile_frozen_by_hook(&mut self) {
         if self.source_interrupt.is_frozen() {
             lock(&self.facts).frozen_by_hook = true;
