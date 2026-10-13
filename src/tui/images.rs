@@ -19,7 +19,7 @@ use ratatui::widgets::Widget;
 use ratatui_image::picker::Picker;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::protocol::Protocol;
-use ratatui_image::{Image, Resize};
+use ratatui_image::{FilterType, Image, Resize};
 
 use crate::artwork::decode::ArtworkError;
 use crate::artwork::default::{CoverKind, default_cover};
@@ -216,11 +216,14 @@ pub struct CoverKey {
 }
 
 /// Resizes and encodes `image` for `picker`'s protocol to fit `size`.
+/// Smaller images scale up too: on a high-density screen the cover area
+/// is far more pixels than the 256 px built-in covers, and `Fit` would
+/// leave them a postage stamp in its corner.
 type Encoder = fn(&Picker, DynamicImage, Size) -> Result<Protocol, ArtworkError>;
 
 fn encode(picker: &Picker, image: DynamicImage, size: Size) -> Result<Protocol, ArtworkError> {
     picker
-        .new_protocol(image, size, Resize::Fit(None))
+        .new_protocol(image, size, Resize::Scale(Some(FilterType::Triangle)))
         .map_err(|_| ArtworkError::Encoding)
 }
 
@@ -446,6 +449,14 @@ mod tests {
                 Some(None) | None => Err(std::io::ErrorKind::WouldBlock.into()),
             }
         }
+    }
+
+    #[test]
+    fn a_small_cover_is_scaled_up_to_fill_a_large_area() {
+        // 256 px, the built-in covers' size, in 600 × 600 px of 10 × 20 px cells.
+        let image = DynamicImage::new_rgb8(256, 256);
+        let protocol = encode(&Picker::halfblocks(), image, Size::new(60, 30)).unwrap();
+        assert_eq!(protocol.size(), Size::new(60, 30));
     }
 
     #[test]

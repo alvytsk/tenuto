@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cover art now fills its area on high-density screens (4K and the like):
+  the built-in covers and any small artwork are scaled up to fit, instead of
+  drawing at their own pixel size in a corner of the cover area.
 - A playing radio station no longer looks paused: its time row now starts
   with ▶ (or ‖ while paused), as an episode's does, so the ‖ on the
   Play/Pause button is no longer the only glyph on screen.
