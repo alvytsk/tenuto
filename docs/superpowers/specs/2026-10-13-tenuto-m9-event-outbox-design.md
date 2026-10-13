@@ -21,7 +21,7 @@ Unchanged:
 - The `PlaybackEvent` and `PlaybackCommand` types, `EngineHandle`'s public surface, and `Admission`.
 - The delivery rules: `EVENT_CAPACITY` (64), `RESERVED_EVENT_SLOTS` (9), `PENDING_CAP` (128); protected events are never dropped or displaced and may use the reserve; a terminal event may use the reserve and, at the cap, displaces the oldest event that is neither terminal nor protected; an ordinary event never occupies the reserve; FIFO order within the queue.
 - Command admission closes while any event is pending. `command_waiting` in `service_reconnect` and `FAULT_EVENT_BUDGET` (8) read the same count as today.
-- The aggregated diagnostics `Warning`: its counters, its 2 s interval, and the rule that it goes out only into a free ordinary slot with nothing pending.
+- The aggregated diagnostics `Warning`: its counters, its interval (`DIAGNOSTIC_INTERVAL`, 500 ms), and the rule that it goes out only into a free ordinary slot with nothing pending.
 - Shutdown: every accepted but undispatched `Load` gets `LoadCancelled`, and `run` returns whatever is still queued as the shutdown report.
 - No event reaches the application before the progress state it was emitted in. Today pass order guarantees this: step 2 refreshes `SessionFacts` and publishes progress before step 4 flushes. Once the hook flushes too, §4.3 guarantees it.
 
@@ -156,13 +156,16 @@ No new tests. These pin the end-to-end rules and must pass unchanged:
 - `engine_contract`: `stop_travels_out_of_band_past_a_pending_backlog`, `a_backlog_closes_command_admission_until_it_drains`, `diagnostics_aggregate_rather_than_accumulating_events`, `a_disconnected_event_receiver_terminates_the_worker`, and #47's `a_play_dispatched_before_its_thaw_is_not_parked_again`.
 - `engine_shutdown`.
 
-One new engine regression, in `tests/engine_remote.rs`: `a_stored_seek_delivered_during_a_held_read_reports_the_target_not_the_stopped_position`. Steps:
-1. The server script serves the load, then `.then(..)` a reopen whose body stalls (`stall_body_after(N)`). N is chosen so the reopen's priming completes and the read that blocks is the loop's own pump after `restore` has queued its events. The plan fixes N against the fixture.
-2. Load, play for a moment, `Stop`, and `SeekTo` a target past the stopped position. Await `SeekTargetStored`, then submit `Play`.
-3. `wait_until_stalled`, then await `SeekCompleted` while the read is still held. Only hook-side flushing can deliver it then.
-4. Assert that the published `Progress` with the event's `session_rev` is at the target, not the stopped position. Then `release`.
+One new regression, a unit test in `engine.rs`'s own `tests` module: `an_event_flushed_by_a_blocked_read_carries_progress_from_its_emission`. It pins §4.3 where the invariant lives: `Worker::emit` and the hook's `service_as(BlockedRead)`.
 
-Against hook flushing without §4.3 it fails on that assertion; before hook flushing it cannot reach step 3. The plan orders the work so the test is seen to fail before `sync_facts` lands.
+1. Build a `Worker` over `NullOutput` and run `publish_progress` with the state §4.3's case starts from: `Stopped`, position 1 s, `session_rev` 7. `SessionFacts` now describe the stopped position.
+2. Move the worker as `restore` leaves it, without a loop pass: `state = Playing`, `position = 3 s`, provenance `Established`, the same `session_rev`.
+3. `emit(SeekCompleted { session_rev: 7, requested: 3 s, actual: 3 s, .. })`, then `service.service_as(Servicing::BlockedRead)`. That is what a read blocking in step 7 runs.
+4. Assert the receiver yields that `SeekCompleted`, and that the published `Progress` has `session_rev` 7 and position 3 s.
+
+Against hook flushing without §4.3 it fails on the position, which is still 1 s. The plan runs it before `sync_facts` lands, to see it fail.
+
+Why not an end-to-end `TestEngine` test of the same case: `restore` primes the ring before `start_running`, and `pump_audio` returns while staging still holds samples with the ring full. So step 7's pump reads only if the device has consumed more than that leftover in the microseconds after `start_running`. That can happen on a real device, but the harness's virtual clock cannot advance inside that window, and a free-running device would make the test pass or fail on scheduling.
 
 ### 6.4 Documentation
 
@@ -177,7 +180,7 @@ Against hook flushing without §4.3 it fails on that assertion; before hook flus
 - The full gate in `CLAUDE.md`: `fmt --check`, `clippy -D warnings`, `cargo test --locked --no-fail-fast`, `RUSTDOCFLAGS="-D warnings" cargo doc`.
 - `tests/m9_layering.rs` passes. `outbox` is inside `playback`, so it adds no edge between layers.
 - A `grep` over `src/` finds no `backlog_empty`, `take_outbox`, `drain_outbox`, `note_backlog` or `pending_events`, and finds `RESERVED_EVENT_SLOTS`, `EVENT_CAPACITY` and `PENDING_CAP` defined only in `outbox.rs` and used nowhere else. `FAULT_EVENT_BUDGET` stays in `engine.rs` and reaches the cap only through `fits`.
-- The engine suites under the load recipe in `CLAUDE.md` (the test binary pinned with `taskset -c 0-1` beside about 8 `yes` loops): `engine_contract`, `wait_service` and `engine_remote`'s new regression, 10 runs each, all green.
+- The engine suites under the load recipe in `CLAUDE.md` (the test binary pinned with `taskset -c 0-1` beside about 8 `yes` loops): `engine_contract` and `wait_service`, 10 runs each, all green.
 - Lock cost is not measured. One uncontended mutex per emit and per slice replaces an atomic plus, on the hook path, a mutex. Measure only if a representative probe shows it.
 
 ## 8. Out of scope
