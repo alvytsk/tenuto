@@ -1083,6 +1083,9 @@ impl Worker {
     // ----------------------------------------------------------------- events
 
     fn emit(&mut self, event: PlaybackEvent) {
+        // Facts first (outbox spec §4.3): the hook may flush this event from
+        // a read that blocks before the next loop pass.
+        self.sync_facts();
         self.outbox.emit(event);
     }
 
@@ -1283,6 +1286,38 @@ impl Worker {
 
     // --------------------------------------------------------------- progress
 
+    /// Copy the fields `SessionFacts` mirror from the worker. Runs on every
+    /// `publish_progress` and before every `emit` (outbox spec §4.3): a read
+    /// that blocks later in the same command flushes the event from the
+    /// hook, and the progress the hook publishes first must not be older
+    /// than that event. `frozen_by_hook` is the hook's own and stays as it
+    /// is.
+    fn sync_facts(&self) {
+        let mut facts = lock(&self.facts);
+        facts.session_rev = self.session_rev;
+        facts.media = self.media.clone();
+        facts.position = self.position;
+        facts.degraded = self.degraded;
+        // Mirrored, never derived from `degraded` or `playing` (§3.1's
+        // stickiness): playing on from an estimated landing must keep
+        // reporting it estimated for as long as the landing stands.
+        facts.provenance = self.position_provenance;
+        // Paused counts as well as Playing: parking silences the
+        // callback, but the frames it already handed to the device still
+        // play out, so the position goes on rising for one output
+        // latency after the park and only then settles. Freezing the
+        // number at the instant of the park would report a position
+        // slightly behind what the listener actually heard.
+        // `Reconnecting` too (M7 §7): the transport is left running so
+        // the ring plays out after a disconnect, and that audio is heard,
+        // so it must be counted.
+        facts.playing = matches!(
+            self.state,
+            PlaybackState::Playing | PlaybackState::Paused | PlaybackState::Reconnecting
+        );
+        facts.load = self.adopted_load;
+    }
+
     /// Mirror the worker's own truth into `SessionFacts`, then run the same
     /// `service` the hook does (Ruling 4) — which is what actually recomputes
     /// the live position from the transport while playing, publishes the
@@ -1322,34 +1357,7 @@ impl Worker {
     fn publish_progress(&mut self) {
         self.device_clock
             .fetch_max(self.output.now().0, Ordering::Relaxed);
-        {
-            let mut facts = lock(&self.facts);
-            facts.session_rev = self.session_rev;
-            facts.media = self.media.clone();
-            facts.position = self.position;
-            facts.degraded = self.degraded;
-            // Mirrored, never derived from `degraded` or `playing` (§3.1's
-            // stickiness): playing on from an estimated landing must keep
-            // reporting it estimated for as long as the landing stands.
-            facts.provenance = self.position_provenance;
-            // Paused counts as well as Playing: parking silences the
-            // callback, but the frames it already handed to the device still
-            // play out, so the position goes on rising for one output
-            // latency after the park and only then settles. Freezing the
-            // number at the instant of the park would report a position
-            // slightly behind what the listener actually heard.
-            // `Reconnecting` too (M7 §7): the transport is left running so
-            // the ring plays out after a disconnect, and that audio is heard,
-            // so it must be counted.
-            facts.playing = matches!(
-                self.state,
-                PlaybackState::Playing | PlaybackState::Paused | PlaybackState::Reconnecting
-            );
-            // `frozen_by_hook` is deliberately left untouched here: it is the
-            // hook's own bookkeeping (Ruling 1's `SessionFacts` lives in
-            // `wait.rs`), and this pass has nothing new to tell it.
-            facts.load = self.adopted_load;
-        }
+        self.sync_facts();
         self.service.service_as(Servicing::WorkerLoop);
         // Read back whatever the shared recompute settled on, so
         // `self.position` - the field every command (`SeekBy` among them)
@@ -3954,6 +3962,47 @@ mod tests {
             port,
         );
         (worker, progress, events)
+    }
+
+    /// Outbox spec §4.3. A read that blocks after a command emitted must not
+    /// deliver that event against facts from before the command: here a
+    /// stored seek's `SeekCompleted` would reach the application with the
+    /// stopped position still published under the same revision, and the
+    /// session would checkpoint that position over the seek.
+    #[test]
+    fn an_event_flushed_by_a_blocked_read_carries_progress_from_its_emission() {
+        let (mut worker, progress, events) = idle_worker();
+        worker.state = PlaybackState::Stopped;
+        worker.session_rev = 7;
+        worker.position = Duration::from_secs(1);
+        worker.publish_progress();
+
+        // As `restore` leaves the worker: same revision, landed and playing,
+        // with no loop pass since.
+        worker.state = PlaybackState::Playing;
+        worker.position = Duration::from_secs(3);
+        worker.position_provenance = PositionProvenance::Established;
+        worker.emit(PlaybackEvent::SeekCompleted {
+            session_rev: 7,
+            requested: Duration::from_secs(3),
+            actual: Duration::from_secs(3),
+            refinement_truncated: false,
+            provenance: PositionProvenance::Established,
+        });
+
+        // What a read blocking in step 7 runs.
+        worker.service.service_as(Servicing::BlockedRead);
+
+        assert!(
+            matches!(
+                events.try_recv(),
+                Ok(PlaybackEvent::SeekCompleted { session_rev: 7, .. })
+            ),
+            "the blocked read did not deliver the event"
+        );
+        let published = lock(&progress).clone();
+        assert_eq!(published.session_rev, 7);
+        assert_eq!(published.position, Duration::from_secs(3));
     }
 
     /// Review focus 3: a warning `offer` refuses is not counted as reported,
