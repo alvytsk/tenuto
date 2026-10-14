@@ -8,7 +8,6 @@
 //! stopping, a device disappearing, a handshake timing out — preserves it.
 
 use std::any::Any;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -37,6 +36,7 @@ use super::error::PlaybackError;
 use super::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
 use super::handshake::Handshake;
 use super::link::OutputLink;
+use super::outbox::{self, Outbox};
 use super::output::cpal_output::{CpalOutput, OutputFault};
 use super::output::null_output::NullOutput;
 use super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
@@ -68,65 +68,7 @@ pub(crate) const DEADLINE: Duration = Duration::from_millis(250);
 /// `pub(crate)`, shared with `wait.rs`, so the hook's `park`/`release` calls
 /// pump the wait exactly as the worker's own do.
 pub(crate) const PUMP_NAP: Duration = Duration::from_micros(250);
-/// Ordinary events may not occupy these; terminal outcomes may.
-///
-/// `pub(crate)` (Ruling 7) so `wait.rs`'s `announce` — the hook's own event
-/// path — respects the same reserve `flush_events` does; the hook is a second
-/// emitter and must never occupy the reserved tail.
-pub(crate) const RESERVED_EVENT_SLOTS: usize = 9;
-pub(crate) const EVENT_CAPACITY: usize = 64;
-const PENDING_CAP: usize = 128;
 
-// Reserve budget. Terminal or protected outcomes may occupy the reserved
-// tail; ordinary events may not. The worst case is one loop iteration
-// emitting, at most:
-//
-//   stop interrupt        1  StateChanged{Stopped}
-//   a serviced fault      2  Failed + StateChanged, or DeviceRecovered + StateChanged
-//   a dispatched command  5  Load is the widest: StateChanged{Loading},
-//                            CapabilitiesChanged, Loaded, then either
-//                            StateChanged{Paused} (`open_transport` succeeds)
-//                            or Failed + StateChanged{Failed} (it does not) -
-//                            the failure tail is one event wider than the
-//                            success one, so 5 is this row's true worst case
-//                            (fix round 2, MINOR: this used to read 4).
-//   end of track          2  EndOfTrack + StateChanged{Ended}
-//                        --
-//                        10 (naive union)
-//
-// 10 looks like it breaks `RESERVED_EVENT_SLOTS == 9`, but the reserve only
-// has to be as large as the TERMINAL-OR-PROTECTED share of that union: an
-// ordinary event that cannot flush is merely held in `pending_events`
-// (bounded separately, by `PENDING_CAP`) until the reserve clears - never
-// lost, and so never in need of reservation. Only a terminal or protected
-// outcome, which the reserved tail exists to guarantee delivery for even
-// under a full ordinary backlog, must actually fit (Decision 4, Decision 5).
-// Row by row:
-//
-//   stop interrupt        1  StateChanged{Stopped} (terminal)
-//   a fatal fault          2  Failed + StateChanged{Failed} (both terminal)
-//   a dispatched load      3  Loaded (protected, M5 §6) + Failed +
-//                             StateChanged{Failed} (both terminal) - `Loaded`
-//                             itself is not terminal but must still fit, so
-//                             this row's share is now one wider than a
-//                             fault's.
-//   end of track           2  EndOfTrack + StateChanged{Ended} (both terminal)
-//                        --
-//                         8 <= RESERVED_EVENT_SLOTS (9)
-//
-// A cancelled load - a stop or shutdown landing during the open - emits only
-// `LoadCancelled` (1, protected), well under the dispatched-load row's own
-// share, so it never raises the bound. These four rows are still not
-// mutually exclusive in a single pass, so the union is the bound rather than
-// the maximum of them; command admission closes while a backlog exists, and
-// `service_faults` defers a fault whose events would not fit, so neither
-// source can outrun the drain.
-//
-// `RestartEstablished` and `SeekCancelled` both belong to commands narrower
-// than `Load` (their own event plus a `StateChanged`, at most 2, and neither
-// terminal), so neither raises the bound. The resume-unavailable warning does
-// not add a sixth to the dispatched-command row either: it rides on
-// `Loaded.disposition` rather than an event of its own.
 const COMMAND_CAPACITY: usize = 1024;
 const SPAN_CAPACITY: usize = 64;
 /// How much audio the PCM ring holds. Large enough that one loop iteration
@@ -283,7 +225,7 @@ impl EngineHandle {
         clock: Arc<dyn Clock>,
     ) -> Self {
         let (commands_tx, commands_rx) = crossbeam_channel::bounded(COMMAND_CAPACITY);
-        let (events_tx, events_rx) = crossbeam_channel::bounded(EVENT_CAPACITY);
+        let (events_out, events_rx) = outbox::channel();
         let (liveness_tx, liveness_rx) = crossbeam_channel::bounded(0);
         let progress = Arc::new(Mutex::new(Progress {
             session_rev: 0,
@@ -314,7 +256,7 @@ impl EngineHandle {
             faults,
             Arc::clone(&progress),
             commands_rx,
-            events_tx,
+            events_out,
             liveness_tx,
             wake_rx,
             Arc::clone(&interrupt),
@@ -871,15 +813,15 @@ struct Worker {
     attempt_failure: Option<PlaybackError>,
     shutting_down: bool,
     receivers_gone: bool,
-    pending_events: VecDeque<PlaybackEvent>,
     commands: Receiver<PlaybackCommand>,
-    events: Sender<PlaybackEvent>,
+    /// The engine's one event queue and its delivery rules, shared with the
+    /// wait hook (`playback::outbox`).
+    outbox: Arc<Outbox>,
     liveness: Sender<()>,
     wake: Receiver<()>,
     interrupt: Arc<AtomicU8>,
     xruns: u64,
     lost_spans: u64,
-    dropped_events: u64,
     /// A collapsed fault held back because the event backlog had no room for
     /// the events acting on it would produce.
     deferred_fault: Option<OutputFault>,
@@ -935,10 +877,6 @@ struct Worker {
     /// `publish_progress`'s, `CallbackCore::fill`'s and `WaitService`'s own
     /// `clock` field's doc comments.
     device_clock: Arc<AtomicU64>,
-    /// Mirrors whether `pending_events` is empty, so `WaitService::announce`
-    /// can tell whether jumping the worker's own backlog would misreport
-    /// event order. Maintained after every mutation of `pending_events`.
-    backlog_empty: Arc<AtomicBool>,
     /// Builds each transport's spectrum tap and holds the registry its
     /// mappings are published to.
     spectrum: SpectrumPort,
@@ -951,7 +889,7 @@ impl Worker {
         faults: Receiver<OutputFault>,
         progress: Arc<Mutex<Progress>>,
         commands: Receiver<PlaybackCommand>,
-        events: Sender<PlaybackEvent>,
+        outbox: Arc<Outbox>,
         liveness: Sender<()>,
         wake: Receiver<()>,
         interrupt: Arc<AtomicU8>,
@@ -973,8 +911,6 @@ impl Worker {
             frozen_by_hook: false,
             load: None,
         }));
-        let backlog_empty = Arc::new(AtomicBool::new(true));
-        let outbox = Arc::new(Mutex::new(VecDeque::new()));
         let clock: Arc<dyn Fn() -> Nanos + Send + Sync> = {
             let device_clock = Arc::clone(&device_clock);
             Arc::new(move || Nanos(device_clock.load(Ordering::Relaxed)))
@@ -988,9 +924,7 @@ impl Worker {
             Arc::clone(&progress),
             Arc::clone(&facts),
             Arc::clone(&source_interrupt),
-            events.clone(),
-            outbox,
-            Arc::clone(&backlog_empty),
+            Arc::clone(&outbox),
             clock,
         );
         Self {
@@ -1028,15 +962,13 @@ impl Worker {
             attempt_failure: None,
             shutting_down: false,
             receivers_gone: false,
-            pending_events: VecDeque::new(),
             commands,
-            events,
+            outbox,
             liveness,
             wake,
             interrupt,
             xruns: 0,
             lost_spans: 0,
-            dropped_events: 0,
             deferred_fault: None,
             device_warnings: 0,
             reported_diagnostics: 0,
@@ -1052,7 +984,6 @@ impl Worker {
             outage: None,
             heard_mark: None,
             device_clock,
-            backlog_empty,
             spectrum,
         }
     }
@@ -1062,26 +993,11 @@ impl Worker {
         let wake = self.wake.clone();
         let liveness = self.liveness.clone();
         loop {
-            // 0. Drain whatever the hook announced while a read was blocked,
-            //    onto the BACK of pending_events, before anything else can
-            //    emit (Ruling 5). Two reasons this has to be first, ahead of
-            //    even step 1's interrupt handling:
-            //    - Step 1's stop branch calls `do_stop`, which emits
-            //      `StateChanged{Stopped}`. Draining after it would put a
-            //      `Paused` the hook announced *earlier* behind it.
-            //    - Step 1's shutdown branch returns `pending_events`
-            //      immediately. Anything still in the outbox at that point
-            //      would never reach the shutdown report, breaking D19's
-            //      losslessness for exactly the events a stalled read
-            //      produced. `shutdown()` also drains it, as its own first
-            //      action, so every exit out of this loop carries it.
-            self.drain_outbox();
-
             // 1. Out-of-band interrupts. Shutdown dominates stop.
             let flags = self.interrupt.swap(0, Ordering::Acquire);
             if flags & SHUTDOWN != 0 {
                 self.shutdown();
-                return Vec::from(self.pending_events);
+                return self.outbox.take_remaining();
             }
             if flags & STOP != 0 {
                 self.do_stop();
@@ -1107,11 +1023,11 @@ impl Worker {
             //    non-empty, which bounds further command-driven generation.
             self.flush_events();
 
-            // 5. Diagnostics coalesce; they never enter pending_events.
+            // 5. Diagnostics coalesce; they never enter the outbox's queue.
             self.emit_aggregated_warning_if_slot_free();
 
             // 6. Wait. Never a bare sleep - stop and shutdown must wake it.
-            let admit = self.pending_events.is_empty();
+            let admit = self.outbox.is_empty();
             let mut received: Option<Result<PlaybackCommand, RecvError>> = None;
             let mut disconnected = false;
             if admit {
@@ -1134,13 +1050,13 @@ impl Worker {
                 // Nobody can drive this engine any more.
                 Some(Err(_)) => {
                     self.shutdown();
-                    return Vec::from(self.pending_events);
+                    return self.outbox.take_remaining();
                 }
                 None => {}
             }
             if self.shutting_down {
                 self.shutdown();
-                return Vec::from(self.pending_events);
+                return self.outbox.take_remaining();
             }
 
             // 7. Reconnect timing first - it is what turns `Reconnecting`
@@ -1153,12 +1069,13 @@ impl Worker {
             self.check_end_of_track();
 
             // A disconnected event receiver is shutdown. Detected from the
-            // channel's own errors - `SendError` when flushing events, and
-            // `RecvError` above when the command sender is gone - never from
-            // channel occupancy, which says nothing about connectedness.
+            // channel's own errors - a disconnect the outbox latched when
+            // flushing or offering events, and `RecvError` above when the
+            // command sender is gone - never from channel occupancy, which
+            // says nothing about connectedness.
             if self.receivers_gone {
                 self.shutdown();
-                return Vec::from(self.pending_events);
+                return self.outbox.take_remaining();
             }
         }
     }
@@ -1166,29 +1083,7 @@ impl Worker {
     // ----------------------------------------------------------------- events
 
     fn emit(&mut self, event: PlaybackEvent) {
-        // Protected events — load outcomes — bypass `PENDING_CAP` entirely
-        // (Decision 4): correlation cannot be inferred from anything later,
-        // so one is always pushed, never dropped or counted as such.
-        if self.pending_events.len() >= PENDING_CAP && !event.is_protected() {
-            if !event.is_terminal() {
-                self.dropped_events += 1;
-                return;
-            }
-            // A terminal outcome displaces the oldest ordinary event rather
-            // than being dropped: nothing that follows implies it.
-            match displacement_victim(&self.pending_events) {
-                Some(index) => {
-                    self.pending_events.remove(index);
-                    self.dropped_events += 1;
-                }
-                None => {
-                    self.dropped_events += 1;
-                    return;
-                }
-            }
-        }
-        self.pending_events.push_back(event);
-        self.note_backlog();
+        self.outbox.emit(event);
     }
 
     /// Emits `LoadCancelled` for the load still in flight, if any — the one
@@ -1205,91 +1100,38 @@ impl Worker {
         }
     }
 
-    /// Drain `WaitService`'s outbox onto the back of `pending_events`. Called
-    /// at the very top of every loop pass, before step 1's interrupt
-    /// handling, again in `check_end_of_track` before it can emit
-    /// `EndOfTrack`/`StateChanged{Ended}` in the same pass a blocked read
-    /// returned in, and again as `shutdown`'s own first action (Ruling 5) -
-    /// see `run`'s step 0 comment for why the first and last are needed and
-    /// why it must be the back, never the front.
-    ///
-    /// Routed through `emit` rather than pushing directly: the hook is a
-    /// second emitter, and its events must answer to the same `PENDING_CAP`
-    /// and terminal-displaces-oldest drop policy as the worker's own, or a
-    /// source that freeze/thaws repeatedly during one long block could grow
-    /// `pending_events` without limit and without `dropped_events` ever
-    /// reflecting it.
-    fn drain_outbox(&mut self) {
-        for event in self.service.take_outbox() {
-            self.emit(event);
-        }
-    }
-
-    /// Mirrors whether `pending_events` is empty into `backlog_empty`, so
-    /// `WaitService::announce` can tell whether jumping the worker's own
-    /// backlog would misreport event order. Called after every mutation of
-    /// `pending_events`.
-    fn note_backlog(&self) {
-        self.backlog_empty
-            .store(self.pending_events.is_empty(), Ordering::Release);
-    }
-
-    fn free_event_slots(&self) -> usize {
-        EVENT_CAPACITY.saturating_sub(self.events.len())
-    }
-
     fn flush_events(&mut self) {
-        while let Some(front) = self.pending_events.front() {
-            let free = self.free_event_slots();
-            let may_use_reserve = front.is_terminal() || front.is_protected();
-            if free == 0 || (!may_use_reserve && free <= RESERVED_EVENT_SLOTS) {
-                break;
-            }
-            let Some(event) = self.pending_events.pop_front() else {
-                break;
-            };
-            match self.events.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(event)) => {
-                    self.pending_events.push_front(event);
-                    break;
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    self.receivers_gone = true;
-                    self.note_backlog();
-                    return;
-                }
-            }
-        }
-        self.note_backlog();
+        self.outbox.flush();
+        self.receivers_gone |= self.outbox.disconnected();
     }
 
     /// Counters, not a queue: an aggregated warning goes out only when an
-    /// ordinary slot is free, and it reports the running totals. A receiver
-    /// that stays connected without draining therefore bounds diagnostics by
-    /// the channel itself, not by a rate limit alone.
+    /// ordinary slot is free and nothing is pending (`Outbox::offer`), and
+    /// it reports the running totals. A receiver that stays connected
+    /// without draining therefore bounds diagnostics by the channel itself,
+    /// not by a rate limit alone. A refused offer leaves the totals
+    /// unreported, so the next interval offers them again.
     fn emit_aggregated_warning_if_slot_free(&mut self) {
-        let total = self.xruns + self.lost_spans + self.dropped_events + self.device_warnings;
+        let dropped = self.outbox.dropped();
+        let total = self.xruns + self.lost_spans + dropped + self.device_warnings;
         if total == self.reported_diagnostics
-            || !self.pending_events.is_empty()
-            || self.free_event_slots() <= RESERVED_EVENT_SLOTS
             || self.last_diagnostic.elapsed() < DIAGNOSTIC_INTERVAL
         {
             return;
         }
         let message = format!(
             "audio glitches: {} underruns, {} lost spans, {} dropped events, {} device warnings",
-            self.xruns, self.lost_spans, self.dropped_events, self.device_warnings
+            self.xruns, self.lost_spans, dropped, self.device_warnings
         );
-        self.reported_diagnostics = total;
-        self.last_diagnostic = Instant::now();
         let event = PlaybackEvent::Warning {
             session_rev: self.session_rev,
             message,
         };
-        if let Err(TrySendError::Disconnected(_)) = self.events.try_send(event) {
-            self.receivers_gone = true;
+        if self.outbox.offer(event) {
+            self.reported_diagnostics = total;
+            self.last_diagnostic = Instant::now();
         }
+        self.receivers_gone |= self.outbox.disconnected();
     }
 
     fn warn(&mut self, message: String) {
@@ -1555,7 +1397,7 @@ impl Worker {
     /// pass is four (`StateChanged{Loading}`, `Loaded`, `CapabilitiesChanged`,
     /// `StateChanged{Paused}`) now that a load whose initial seek proves a
     /// remote source's previously-unknown demuxer support emits
-    /// `CapabilitiesChanged` on top of `Loaded` (`RESERVED_EVENT_SLOTS`'s own
+    /// `CapabilitiesChanged` on top of `Loaded` (the outbox's reserve-budget
     /// comment already carries this same four). Reserving only its own pair
     /// let a fault land at 126 pending, leaving no room for the EOF that
     /// followed - which then evicted a lifecycle event.
@@ -1579,7 +1421,7 @@ impl Worker {
         // they drain. Faults arrive asynchronously and answer to no such gate,
         // so apply the same rule here: hold the fault until its events fit,
         // rather than acting now and dropping the report at the cap.
-        if self.pending_events.len() + Self::FAULT_EVENT_BUDGET > PENDING_CAP {
+        if !self.outbox.fits(Self::FAULT_EVENT_BUDGET) {
             self.deferred_fault = Some(fault);
             self.device_warnings += seen;
             return;
@@ -2170,13 +2012,6 @@ impl Worker {
     }
 
     fn shutdown(&mut self) {
-        // Ruling 5: drained here too, as this method's own first action, so
-        // every exit out of `run()` carries whatever the hook announced while
-        // a read was blocked - see `run`'s step 0 comment. `capture_position`
-        // and `teardown` below can only emit through `pending_events`
-        // (neither calls `self.emit` directly), so nothing between here and
-        // `publish_progress` can reorder ahead of what was just drained.
-        self.drain_outbox();
         self.outage = None;
         // Accepted but never dispatched: each still owes its caller an
         // outcome. Every other undelivered command is simply discarded -
@@ -2492,7 +2327,7 @@ impl Worker {
                 // pass, never dropped. Commands are only taken while nothing
                 // is backed up, so a blocked outbox must not be allowed to
                 // stall recovery indefinitely - hence the backlog test.
-                let command_waiting = self.pending_events.is_empty() && !self.commands.is_empty();
+                let command_waiting = self.outbox.is_empty() && !self.commands.is_empty();
                 if self.interrupted() || command_waiting {
                     return;
                 }
@@ -2550,14 +2385,6 @@ impl Worker {
     /// the timeline reports only after the final span's predicted play time
     /// has passed - not when the ring merely empties.
     fn check_end_of_track(&mut self) {
-        // Symmetric with `shutdown()`: this is the one place besides `run()`'s
-        // own step 0 that can emit in the same pass a blocked read returned
-        // in — `pump_audio`, called just before this, is where that read
-        // lives. Draining first, before the early returns below, closes the
-        // window step 0 does not cover: a `EndOfTrack`/`StateChanged{Ended}`
-        // this call is about to emit must not land ahead of a `Paused` the
-        // hook announced earlier in the very same pass.
-        self.drain_outbox();
         // M7 §3.3: a station has no end.
         if self.is_indefinite() {
             return;
@@ -4066,16 +3893,6 @@ fn adopt_preserved(promised: Duration, actual: Duration) -> Duration {
     }
 }
 
-/// The oldest event `Worker::emit` may displace to make room for a terminal
-/// arrival at `PENDING_CAP`: neither terminal (already guaranteed delivery
-/// some other way) nor protected (never displaced — Decision 4). A free
-/// function so the unit test below can exercise it directly.
-fn displacement_victim(pending: &VecDeque<PlaybackEvent>) -> Option<usize> {
-    pending
-        .iter()
-        .position(|event| !event.is_terminal() && !event.is_protected())
-}
-
 /// An estimated duration is not a ceiling (§5.5): `clamp_target` must treat
 /// it exactly like an absent one, the same shape `decide_resume` uses for
 /// `KnownDuration`. Clamping to an estimate would silently relocate a seek
@@ -4099,29 +3916,78 @@ fn established_duration(metadata: &MediaMetadata) -> Option<Duration> {
 mod tests {
     use super::*;
 
-    /// A terminal, non-protected event may be displaced to make room for
-    /// another terminal event at `PENDING_CAP`; a protected one — a load
-    /// outcome — never may, since correlation cannot be inferred from
-    /// anything later (Decision 4).
-    #[test]
-    fn a_terminal_event_never_displaces_a_protected_one() {
-        let mut pending = VecDeque::new();
-        pending.push_back(PlaybackEvent::LoadCancelled {
-            session_rev: 1,
-            request: LoadRequestId::from_raw(1),
-        });
-        pending.push_back(PlaybackEvent::EndOfTrack {
-            session_rev: 1,
+    /// A worker over `NullOutput` whose loop never runs, the progress slot
+    /// its hook publishes to, and the receiver its events reach. The spectrum
+    /// thread is stopped at once: the worker only needs the port.
+    fn idle_worker() -> (Worker, Arc<Mutex<Progress>>, Receiver<PlaybackEvent>) {
+        let (events_out, events) = outbox::channel();
+        let progress = Arc::new(Mutex::new(Progress {
+            session_rev: 0,
+            media: None,
             position: Duration::ZERO,
+            quality: PositionQuality::Exact,
             provenance: PositionProvenance::Established,
-        });
-        pending.push_back(PlaybackEvent::Warning {
-            session_rev: 1,
-            message: String::new(),
-        });
-        assert_eq!(displacement_victim(&pending), Some(2));
-        pending.pop_back();
-        assert_eq!(displacement_victim(&pending), None);
+            buffering: false,
+            load: None,
+        }));
+        let (_faults_tx, faults) = crossbeam_channel::unbounded();
+        let (_commands_tx, commands) = crossbeam_channel::bounded(1);
+        let (liveness, _liveness_rx) = crossbeam_channel::bounded(0);
+        let (_wake_tx, wake) = crossbeam_channel::bounded(1);
+        let device_clock = Arc::new(AtomicU64::new(0));
+        let (_spectrum, port, mut thread) = spectrum_worker::spawn(Arc::clone(&device_clock));
+        thread.stop();
+        let worker = Worker::new(
+            Box::new(NullOutput::new()),
+            faults,
+            Arc::clone(&progress),
+            commands,
+            events_out,
+            liveness,
+            wake,
+            Arc::new(AtomicU8::new(0)),
+            SourceInterrupt::new(1024),
+            Arc::new(SourceTraits::default()),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(ReconnectPolicy::default())),
+            device_clock,
+            port,
+        );
+        (worker, progress, events)
+    }
+
+    /// Review focus 3: a warning `offer` refuses is not counted as reported,
+    /// so the next interval offers the same totals again.
+    #[test]
+    fn a_refused_warning_is_offered_again_at_the_next_interval() {
+        let (mut worker, _progress, events) = idle_worker();
+        // Fill the channel to its ordinary limit (64 - 9 reserved = 55).
+        for n in 0..55 {
+            worker.outbox.emit(PlaybackEvent::Warning {
+                session_rev: 0,
+                message: n.to_string(),
+            });
+        }
+        worker.outbox.flush();
+        worker.xruns = 1;
+        let long_ago = Instant::now().checked_sub(DIAGNOSTIC_INTERVAL).unwrap();
+        worker.last_diagnostic = long_ago;
+
+        worker.emit_aggregated_warning_if_slot_free();
+        assert_eq!(
+            worker.reported_diagnostics, 0,
+            "a refused warning counted as reported"
+        );
+        assert_eq!(events.len(), 55);
+
+        let _ = events.try_recv();
+        worker.emit_aggregated_warning_if_slot_free();
+        assert_eq!(worker.reported_diagnostics, 1);
+        let last = events.try_iter().last();
+        assert!(
+            matches!(&last, Some(PlaybackEvent::Warning { message, .. }) if message.starts_with("audio glitches: 1 underruns")),
+            "{last:?}"
+        );
     }
 
     /// Fix round 2: proves the exact `store`/`fetch_max` composition
