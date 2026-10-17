@@ -1002,3 +1002,31 @@ fn an_earlier_remote_seek_landing_does_not_pull_the_display_back() {
     );
 }
 
+#[test]
+fn the_entry_being_loaded_is_named_until_its_load_lands() {
+    // The TUI fetches this entry's cover ahead, so switching shows the new
+    // cover when `Loaded` arrives rather than a stand-in while it downloads.
+    let (_media, root) = media_dir(&["a.flac"]);
+    let server = delayed_fixture("/b.flac", Duration::from_millis(400));
+    let mut rig = rig_with(PersistedState::default());
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Path(root.join("a.flac")),
+            EnqueueItem::Url(server.url("/b.flac")),
+        ],
+    );
+    let ids = row_ids(&rig.runtime);
+    rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
+    pump_until(&mut rig, "A playing", |view| is_playing(view, ids[0]));
+    assert_eq!(rig.runtime.loading_entry(), None, "A is already active");
+    assert!(
+        rig.runtime.cover_of(ids[0]).is_some(),
+        "a local file's cover"
+    );
+
+    rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
+    assert_eq!(rig.runtime.loading_entry(), Some(ids[1]));
+    pump_until(&mut rig, "B playing", |view| is_playing(view, ids[1]));
+    assert_eq!(rig.runtime.loading_entry(), None, "B is active now");
+}

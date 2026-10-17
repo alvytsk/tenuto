@@ -554,7 +554,24 @@ impl PlayerRuntime {
     /// are read straight from the store, which is authoritative for them.
     /// Both refresh on add or re-probe/feed refresh, never mid-playback.
     pub fn active_cover(&self) -> Option<(MediaId, CoverSource)> {
-        let entry = self.active_entry()?;
+        self.cover_for(self.active_entry()?)
+    }
+
+    /// The entry the pending load is for, while it is not yet the active
+    /// one: the front end fetches its cover ahead, so the cover is ready
+    /// when `Loaded` makes it active rather than starting only then.
+    pub fn loading_entry(&self) -> Option<QueueEntryId> {
+        let id = self.last_requested?;
+        let active = self.active_entry().map(QueueEntry::id);
+        (self.session.pending_load_count() > 0 && active != Some(id)).then_some(id)
+    }
+
+    /// [`Self::active_cover`] for any entry still in a playlist.
+    pub fn cover_of(&self, id: QueueEntryId) -> Option<(MediaId, CoverSource)> {
+        self.cover_for(self.session.state().playlists().find_entry(id)?)
+    }
+
+    fn cover_for(&self, entry: &QueueEntry) -> Option<(MediaId, CoverSource)> {
         let embedded = || {
             let mirror = self
                 .mirror
