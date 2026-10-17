@@ -1167,6 +1167,12 @@ impl PlayerRuntime {
         }
         if let Some(mirror) = &mut self.mirror {
             mirror.apply(event);
+            // An older seek's landing must not overwrite a newer target still
+            // on display.
+            if let Some(target) = self.router.displayed_target() {
+                mirror.position = target;
+                mirror.provenance = PositionProvenance::Estimated;
+            }
         }
     }
 

@@ -60,6 +60,11 @@ pub struct KeyRouter {
     /// burst accumulates from it, not from a mirror that progress has put
     /// back at the heard position.
     stored: Option<Duration>,
+    /// Seeks submitted and not yet answered. A burst can be submitted while
+    /// an earlier one is still in flight - a remote reopen easily outlasts
+    /// the quiet window - and the earlier one's outcome must not release the
+    /// later one's target, or the display jumps back to the stale landing.
+    in_flight: usize,
 }
 
 impl KeyRouter {
@@ -89,7 +94,7 @@ impl KeyRouter {
 
     /// The target the display is currently showing, if it is showing one
     /// rather than the worker's own position.
-    fn displayed_target(&self) -> Option<Duration> {
+    pub(crate) fn displayed_target(&self) -> Option<Duration> {
         self.burst.target().or(self.submitted).or(self.stored)
     }
 
@@ -97,6 +102,7 @@ impl KeyRouter {
     fn take_due(&mut self, now: Instant) -> Option<Duration> {
         let target = self.burst.due(now)?;
         self.submitted = Some(target);
+        self.in_flight += 1;
         Some(target)
     }
 
@@ -113,19 +119,32 @@ impl KeyRouter {
         match event {
             // Stored, not run: hold the worker's own (clamped) target.
             PlaybackEvent::SeekTargetStored { target, .. } => {
-                self.submitted = None;
                 self.stored = Some(*target);
+                if self.answered() {
+                    self.submitted = None;
+                }
             }
             PlaybackEvent::SeekCompleted { .. }
             | PlaybackEvent::SeekRejected { .. }
-            | PlaybackEvent::SeekCancelled { .. }
-            | PlaybackEvent::RestartEstablished { .. }
-            | PlaybackEvent::EndOfTrack { .. } => self.release(),
+            | PlaybackEvent::SeekCancelled { .. } => {
+                if self.answered() {
+                    self.release();
+                }
+            }
+            PlaybackEvent::RestartEstablished { .. } | PlaybackEvent::EndOfTrack { .. } => {
+                self.release()
+            }
             PlaybackEvent::Loaded { .. }
             | PlaybackEvent::LoadCancelled { .. }
             | PlaybackEvent::Failed { .. } => self.cancel(),
             _ => {}
         }
+    }
+
+    /// Counts one seek outcome; true once every submitted seek is answered.
+    fn answered(&mut self) -> bool {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        self.in_flight == 0
     }
 
     /// Drops an accumulated seek and the display hold together, for a
@@ -139,6 +158,7 @@ impl KeyRouter {
     fn release(&mut self) {
         self.submitted = None;
         self.stored = None;
+        self.in_flight = 0;
     }
 
     /// Drops an unsubmitted burst and the wait for a submitted one, keeping a
@@ -147,6 +167,7 @@ impl KeyRouter {
     fn drop_burst(&mut self) {
         self.burst.cancel();
         self.submitted = None;
+        self.in_flight = 0;
     }
 
     /// Routes one command. Returns the position the display should adopt
@@ -187,9 +208,11 @@ impl KeyRouter {
         if let Some(target) = self.take_due(now) {
             // A seek the queue refuses will never report a landing, so the
             // hold has to end here rather than wait for an event that is not
-            // coming.
+            // coming - unless an earlier seek is still in flight, whose
+            // outcome ends it instead.
             if report_admission(engine.submit(PlaybackCommand::SeekTo(target)))
                 != Admission::Accepted
+                && self.answered()
             {
                 self.release();
             }
@@ -519,6 +542,35 @@ mod tests {
         router.observe(&PlaybackEvent::SeekRejected {
             session_rev: 0,
             reason: "cannot seek to 110s".to_string(),
+        });
+        assert!(!router.is_seeking());
+    }
+
+    #[test]
+    fn an_earlier_seeks_outcome_keeps_the_later_target_on_display() {
+        // A remote reopen outlasts the quiet window, so a second burst can be
+        // submitted before the first lands. The first's landing (or its
+        // cancellation by the second) must not hand the display back.
+        let now = Instant::now();
+        let later = now + SEEK_COALESCE_WINDOW;
+        let mut router = KeyRouter::new();
+        router.press(Duration::from_secs(100), SEEK_STEP_SECS, now, None);
+        assert!(router.take_due(later).is_some());
+        router.press(Duration::from_secs(100), SEEK_STEP_SECS, later, None);
+        assert!(router.take_due(later + SEEK_COALESCE_WINDOW).is_some());
+
+        router.observe(&PlaybackEvent::SeekCancelled {
+            session_rev: 0,
+            requested: Duration::from_secs(110),
+        });
+        assert_eq!(router.displayed_target(), Some(Duration::from_secs(120)));
+
+        router.observe(&PlaybackEvent::SeekCompleted {
+            session_rev: 0,
+            requested: Duration::from_secs(120),
+            actual: Duration::from_secs(120),
+            refinement_truncated: false,
+            provenance: PositionProvenance::Established,
         });
         assert!(!router.is_seeking());
     }

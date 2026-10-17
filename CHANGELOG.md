@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pressing → (or ←) again while an episode is still seeking no longer makes
+  the progress line jump back to the previous target until the new one
+  lands.
 - Resuming after a pause no longer sometimes pauses again for a moment on a
   busy machine: a short gap in the audio and a flash of ‖ before playback
   carried on.
