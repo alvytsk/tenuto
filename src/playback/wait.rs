@@ -15,19 +15,16 @@
 //! hook call for exactly this reason. Nothing in this module takes
 //! `TransportCore` before `SessionFacts`.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-
-use crossbeam_channel::{Sender, TrySendError};
 
 use crate::http::channel::{SourceInterrupt, WaitHook};
 use crate::media::id::MediaId;
 
 use super::command::LoadRequestId;
-use super::engine::{DEADLINE, EVENT_CAPACITY, PUMP_NAP, RESERVED_EVENT_SLOTS, TransportCore};
+use super::engine::{DEADLINE, PUMP_NAP, TransportCore};
 use super::event::{PlaybackEvent, Progress};
+use super::outbox::Outbox;
 use super::output::Nanos;
 use super::state::PlaybackState;
 use super::timeline::PositionQuality;
@@ -82,18 +79,18 @@ pub struct SessionFacts {
 
 /// What a blocked source read services on the worker's behalf.
 ///
-/// Three jobs, and no others: drain spans into the timeline, publish the
-/// keep-latest progress snapshot, and act on the freeze level — park the
-/// output when a pause arrives, release it when a play does, and announce
-/// each.
+/// Four jobs, and no others: drain spans into the timeline, publish the
+/// keep-latest progress snapshot, act on the freeze level — park the output
+/// when a pause arrives, release it when a play does, and announce each —
+/// and, while the worker is stuck in the read, deliver what the outbox
+/// holds.
 pub struct WaitService {
     transport: Arc<Mutex<Option<TransportCore>>>,
     progress: Arc<Mutex<Progress>>,
     facts: Arc<Mutex<SessionFacts>>,
     interrupt: Arc<SourceInterrupt>,
-    events: Sender<PlaybackEvent>,
-    outbox: Arc<Mutex<VecDeque<PlaybackEvent>>>,
-    backlog_empty: Arc<AtomicBool>,
+    /// The engine's one event queue, shared with the worker.
+    outbox: Arc<Outbox>,
     /// `AudioOutput::now()` needs `&self.output`, which the hook cannot
     /// reach — it runs from inside `next_planar()`, deep under
     /// `&mut self.source`, structurally unable to borrow the rest of
@@ -107,15 +104,12 @@ pub struct WaitService {
 }
 
 impl WaitService {
-    #[allow(clippy::too_many_arguments)] // one field per constructor argument, exactly `Worker::new`'s own precedent for a struct this shape; a config struct would only rename these nine fields, not reduce them.
     pub fn new(
         transport: Arc<Mutex<Option<TransportCore>>>,
         progress: Arc<Mutex<Progress>>,
         facts: Arc<Mutex<SessionFacts>>,
         interrupt: Arc<SourceInterrupt>,
-        events: Sender<PlaybackEvent>,
-        outbox: Arc<Mutex<VecDeque<PlaybackEvent>>>,
-        backlog_empty: Arc<AtomicBool>,
+        outbox: Arc<Outbox>,
         clock: Arc<dyn Fn() -> Nanos + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -123,17 +117,9 @@ impl WaitService {
             progress,
             facts,
             interrupt,
-            events,
             outbox,
-            backlog_empty,
             clock,
         })
-    }
-
-    /// Drained by the worker at the top of every loop pass, into
-    /// `pending_events`, before anything else can emit (Ruling 5).
-    pub fn take_outbox(&self) -> Vec<PlaybackEvent> {
-        lock(&self.outbox).drain(..).collect()
     }
 
     /// Park the callback for a freeze. Returns whether the park is considered
@@ -167,37 +153,10 @@ impl WaitService {
         }
     }
 
-    /// Announce one event, respecting the worker's own event ordering.
-    ///
-    /// `try_send` may not simply run first: the worker's `pending_events`
-    /// backlog might be non-empty, and jumping it would deliver this event
-    /// ahead of ones emitted before it. `backlog_empty` is the worker's own
-    /// signal of that — set whenever `pending_events` is empty, cleared
-    /// whenever it is not.
+    /// Queue one event behind everything the worker emitted before it. The
+    /// slice's own flush, at the end of `service_as`, delivers it.
     fn announce(&self, event: PlaybackEvent) {
-        // `EVENT_CAPACITY` and `RESERVED_EVENT_SLOTS` are `pub(crate)` in
-        // `engine.rs` for this line (Ruling 7): the hook is a second emitter,
-        // and the reserve exists so a terminal outcome always has room. It
-        // never occupies it.
-        let ordered = self.backlog_empty.load(Ordering::Acquire) && lock(&self.outbox).is_empty();
-        let room = self.events.len() + RESERVED_EVENT_SLOTS < EVENT_CAPACITY;
-        if !ordered || !room {
-            lock(&self.outbox).push_back(event);
-            return;
-        }
-        // `try_send` moves the event, and hands it back inside
-        // `TrySendError::Full` — the only way to keep it after a failed send.
-        // Writing this as `if try_send(event).is_ok() { return } ...
-        // push_back(event)` does not compile: E0382, use of moved value
-        // (Ruling 6).
-        match self.events.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(event)) => lock(&self.outbox).push_back(event),
-            // The application is gone. The worker learns this from its own
-            // send and shuts down; dropping it here is not this function's
-            // decision to report, and the outbox would never be drained.
-            Err(TrySendError::Disconnected(_)) => {}
-        }
+        self.outbox.emit(event);
     }
 
     /// Update the keep-latest `Progress` snapshot from `SessionFacts`,
@@ -330,6 +289,12 @@ impl WaitService {
         // this across the call deadlocks on the very first pass.
         drop(facts);
         self.publish_progress(servicing);
+        // Progress first, then the events: whatever goes out from here was
+        // emitted no later than the facts that progress was built from
+        // (outbox spec §4.3). A worker pass flushes at its own step 4.
+        if blocked {
+            self.outbox.flush();
+        }
     }
 }
 
@@ -343,12 +308,11 @@ impl WaitHook for WaitService {
 mod tests {
     use super::*;
 
-    /// An inert `WaitService`: no transport, an empty backlog, a channel
-    /// nobody reads. Enough to exercise `service_as` without a real decoder
+    /// An inert `WaitService`: no transport, nothing queued, and a receiver
+    /// nobody holds. Enough to exercise `service_as` without a real decoder
     /// or a real network read anywhere behind it.
     fn inert_service() -> Arc<WaitService> {
-        let (tx, rx) = crossbeam_channel::bounded(64);
-        drop(rx);
+        let (outbox, _events) = crate::playback::outbox::channel();
         WaitService::new(
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(Progress {
@@ -371,9 +335,7 @@ mod tests {
                 load: None,
             })),
             SourceInterrupt::new(1024),
-            tx,
-            Arc::new(Mutex::new(VecDeque::new())),
-            Arc::new(AtomicBool::new(true)),
+            outbox,
             Arc::new(|| Nanos(0)),
         )
     }

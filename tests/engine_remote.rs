@@ -363,6 +363,35 @@ fn pause_during_a_stalled_read_freezes_output_and_resume_continues() {
 }
 
 #[test]
+fn a_receiver_dropped_during_a_held_read_still_ends_the_worker() {
+    // The hook flushes from inside a blocked read now, so it may be the one
+    // that meets the disconnect. Whoever meets it, the worker must end once
+    // the read returns rather than keep pumping for nobody.
+    let server = TestServer::start(Script::from_fixture("sine-5s.flac").stall_body_after(32 << 10));
+    let mut engine = TestEngine::start_idle();
+    engine.load_remote(&server.url("/audio.flac"));
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
+    engine.await_state(PlaybackState::Playing);
+    engine.play_for(Duration::from_millis(100));
+    assert!(
+        server.wait_until_stalled(Duration::from_secs(5)),
+        "the read never blocked"
+    );
+
+    engine.drop_event_receiver();
+    assert!(server.release());
+
+    assert!(
+        engine.join_within(Duration::from_secs(5)),
+        "the worker outlived its event receiver"
+    );
+    server.shutdown();
+}
+
+#[test]
 fn quit_while_paused_wakes_every_source_wait() {
     // H10's other half: a shutdown must reach a read blocked inside the byte
     // channel, not only one waiting on the command queue or the tick.

@@ -92,10 +92,12 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 **Transport owns park.** Worth exploring.
 - Problem: pause has two writers, `Worker::pause` and the hook's freeze. They coordinate through `SessionFacts.frozen_by_hook` and `reconcile_frozen_by_hook` (`engine.rs:2940`). Reading a position crosses the worker, `WaitService`, `TransportCore`, `Handshake` and `Timeline`.
 - Direction: one transport module owns the ring, link, handshake, timeline, generation, anchor and park state, and park is idempotent. `AudioOutput` stays the device seam, so no backend trait is needed (§12).
+- Status: dropped (M9 PR E). `TransportCore` already owns the transport state (handshake, timeline, anchor, tap); `Phase::Park` is acknowledged on every callback fill and `release` republishes `Run` with a valid tap mapping, so both are idempotent where it matters. `frozen_by_hook` is announcement and thaw policy, not transport state, so a `parked` bit would have no reader. The spike found a send-then-thaw race instead, fixed in #47: the freeze arm runs only for a blocked read.
 
 **Event outbox.** Speculative.
 - Problem: the worker and `wait.rs` both emit events, and they keep ordering through a mirrored `backlog_empty` flag.
 - Direction: one outbox owns the bounded sender, the pending queue and the reserve policy.
+- Status: shipped (M9 PR E, `docs/m9-e-acceptance.md`). `playback::outbox::Outbox` owns the sender, the queue, the reserve, displacement and the dropped count; the worker and the wait hook emit into it, and a blocked read flushes it on every slice. `Worker::emit` syncs `SessionFacts` first, so the hook never delivers an event ahead of the progress it was emitted with.
 
 ## 7. M9.5 — Sources and tests
 

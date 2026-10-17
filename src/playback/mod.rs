@@ -6,6 +6,7 @@ pub mod error;
 pub mod event;
 pub mod handshake;
 pub mod link;
+pub mod outbox;
 pub mod output;
 pub mod prepare;
 pub mod reconnect;

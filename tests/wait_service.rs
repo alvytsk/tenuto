@@ -16,38 +16,19 @@ use tenuto::playback::engine::TransportCore;
 use tenuto::playback::event::{PlaybackEvent, Progress};
 use tenuto::playback::handshake::Handshake;
 use tenuto::playback::link::OutputLink;
+use tenuto::playback::outbox::{self, Outbox};
 use tenuto::playback::output::{Nanos, SpanRecord};
 use tenuto::playback::state::PlaybackState;
 use tenuto::playback::timeline::{PositionQuality, Timeline};
 use tenuto::playback::wait::{SessionFacts, WaitService};
 
-/// The four wiring arguments that only the freeze tests care about, in the
-/// inert configuration: nothing frozen, an empty backlog, a channel nobody
-/// reads. A bare helper, so it handles its own error rather than unwrapping.
-///
-/// `type_complexity` is silenced rather than factored into a `type` alias:
-/// this is a test-only tuple used at exactly two call sites, and a named
-/// alias would only hide the same four `WaitService::new` arguments this is
-/// wiring, not simplify them.
-#[allow(clippy::type_complexity)]
-fn inert() -> (
-    Arc<SourceInterrupt>,
-    crossbeam_channel::Sender<PlaybackEvent>,
-    Arc<Mutex<std::collections::VecDeque<PlaybackEvent>>>,
-    Arc<std::sync::atomic::AtomicBool>,
-) {
-    let (tx, rx) = crossbeam_channel::bounded(64);
-    // Leak the receiver into the returned sender's lifetime by keeping it
-    // alive here would be wrong; instead the caller keeps it. These tests do
-    // not read events, so a disconnected channel is fine and try_send simply
-    // fails, which `announce` already handles by using the outbox.
-    drop(rx);
-    (
-        SourceInterrupt::new(1024),
-        tx,
-        Arc::new(Mutex::new(std::collections::VecDeque::new())),
-        Arc::new(std::sync::atomic::AtomicBool::new(true)),
-    )
+/// The wiring only the freeze tests care about, in the inert configuration:
+/// nothing frozen, nothing queued, and nobody reading. The receiver is
+/// dropped, so a flush latches a disconnect and keeps its events queued,
+/// which these tests never look at.
+fn inert() -> (Arc<SourceInterrupt>, Arc<Outbox>) {
+    let (outbox, _events) = outbox::channel();
+    (SourceInterrupt::new(1024), outbox)
 }
 
 #[test]
@@ -72,15 +53,13 @@ fn servicing_publishes_the_position_the_timeline_reports() {
         frozen_by_hook: false,
         load: None,
     }));
-    let (interrupt, events, outbox, backlog_empty) = inert();
+    let (interrupt, outbox) = inert();
     let service = WaitService::new(
         Arc::clone(&transport),
         Arc::clone(&progress),
         Arc::clone(&facts),
         interrupt,
-        events,
         outbox,
-        backlog_empty,
         Arc::new(|| Nanos(0)),
     );
 
@@ -128,15 +107,13 @@ fn a_degraded_quality_does_not_imply_estimated_provenance() {
         frozen_by_hook: false,
         load: None,
     }));
-    let (interrupt, events, outbox, backlog_empty) = inert();
+    let (interrupt, outbox) = inert();
     let service = WaitService::new(
         Arc::clone(&transport),
         Arc::clone(&progress),
         Arc::clone(&facts),
         interrupt,
-        events,
         outbox,
-        backlog_empty,
         Arc::new(|| Nanos(0)),
     );
 
@@ -160,10 +137,8 @@ fn servicing_a_freeze_parks_the_output_and_announces_paused() {
     // pump_audio and will not reach its command loop until the read returns,
     // so if the hook does not do this, nothing does - the output keeps
     // draining and Paused is never emitted.
-    let (events_tx, events_rx) = crossbeam_channel::bounded(64);
+    let (outbox, events_rx) = outbox::channel();
     let interrupt = SourceInterrupt::new(1024);
-    let outbox = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    let backlog_empty = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let facts = Arc::new(Mutex::new(SessionFacts {
         session_rev: 3,
         media: None,
@@ -187,9 +162,7 @@ fn servicing_a_freeze_parks_the_output_and_announces_paused() {
         })),
         Arc::clone(&facts),
         Arc::clone(&interrupt),
-        events_tx,
         Arc::clone(&outbox),
-        Arc::clone(&backlog_empty),
         Arc::new(|| Nanos(0)),
     );
 
@@ -222,60 +195,103 @@ fn servicing_a_freeze_parks_the_output_and_announces_paused() {
     }
 }
 
+fn quiet_progress() -> Arc<Mutex<Progress>> {
+    Arc::new(Mutex::new(Progress {
+        session_rev: 1,
+        media: None,
+        position: Duration::ZERO,
+        quality: PositionQuality::Exact,
+        provenance: PositionProvenance::Established,
+        buffering: false,
+        load: None,
+    }))
+}
+
+fn playing_facts() -> Arc<Mutex<SessionFacts>> {
+    Arc::new(Mutex::new(SessionFacts {
+        session_rev: 1,
+        media: None,
+        position: Duration::ZERO,
+        degraded: false,
+        playing: true,
+        provenance: PositionProvenance::Established,
+        frozen_by_hook: false,
+        load: None,
+    }))
+}
+
+fn warning(message: &str) -> PlaybackEvent {
+    PlaybackEvent::Warning {
+        session_rev: 1,
+        message: message.into(),
+    }
+}
+
 #[test]
-fn a_hook_announcement_goes_to_the_outbox_when_the_workers_backlog_is_not_empty() {
-    // Jumping a non-empty backlog would deliver Paused ahead of events emitted
-    // before it. The outbox is drained into pending_events at the top of the
-    // worker's next pass, so nothing is lost - only ordered.
-    let (events_tx, events_rx) = crossbeam_channel::bounded(64);
+fn a_hook_announcement_queues_behind_the_workers_backlog_and_a_blocked_read_delivers_both_in_order()
+{
+    // One queue: what the worker emitted before its read blocked goes out
+    // first, and the hook's Paused after it, from the same slice's flush.
+    let (outbox, events_rx) = outbox::channel();
     let interrupt = SourceInterrupt::new(1024);
-    let outbox = Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    let backlog_empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let service = WaitService::new(
         Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(Progress {
-            session_rev: 1,
-            media: None,
-            position: Duration::ZERO,
-            quality: PositionQuality::Exact,
-            provenance: PositionProvenance::Established,
-            buffering: false,
-            load: None,
-        })),
-        Arc::new(Mutex::new(SessionFacts {
-            session_rev: 1,
-            media: None,
-            position: Duration::ZERO,
-            degraded: false,
-            playing: true,
-            provenance: PositionProvenance::Established,
-            frozen_by_hook: false,
-            load: None,
-        })),
+        quiet_progress(),
+        playing_facts(),
         Arc::clone(&interrupt),
-        events_tx,
         Arc::clone(&outbox),
-        backlog_empty,
         Arc::new(|| Nanos(0)),
     );
+    outbox.emit(warning("first"));
+    outbox.emit(warning("second"));
 
     interrupt.freeze();
     service.service();
-    assert!(
-        events_rx.try_recv().is_err(),
-        "the hook jumped a non-empty backlog"
-    );
-    let drained = service.take_outbox();
+
+    let received: Vec<PlaybackEvent> = events_rx.try_iter().collect();
     assert!(
         matches!(
-            drained.as_slice(),
-            [PlaybackEvent::StateChanged {
-                state: PlaybackState::Paused,
-                ..
-            }]
+            received.as_slice(),
+            [
+                PlaybackEvent::Warning { message: first, .. },
+                PlaybackEvent::Warning { message: second, .. },
+                PlaybackEvent::StateChanged {
+                    state: PlaybackState::Paused,
+                    ..
+                },
+            ] if first == "first" && second == "second"
         ),
-        "{drained:?}"
+        "{received:?}"
     );
+}
+
+#[test]
+fn a_blocked_read_flushes_a_backlog_the_worker_left() {
+    // The worker queued more than the channel's ordinary slots hold (64,
+    // less the 9 reserved for terminal and protected outcomes: 55), then
+    // blocked in a read. As the application drains, each slice of that read
+    // sends what now fits, instead of waiting for the read to return.
+    let (outbox, events_rx) = outbox::channel();
+    let service = WaitService::new(
+        Arc::new(Mutex::new(None)),
+        quiet_progress(),
+        playing_facts(),
+        SourceInterrupt::new(1024),
+        Arc::clone(&outbox),
+        Arc::new(|| Nanos(0)),
+    );
+    for n in 0..56 {
+        outbox.emit(warning(&n.to_string()));
+    }
+    outbox.flush();
+    assert_eq!(events_rx.len(), 55);
+    assert!(!outbox.is_empty());
+
+    let _ = events_rx.try_recv();
+    service.service();
+
+    assert_eq!(events_rx.len(), 55);
+    assert!(outbox.is_empty(), "the held event was not sent");
 }
 
 #[test]
@@ -300,15 +316,13 @@ fn servicing_with_no_transport_is_harmless_and_repeatable() {
         frozen_by_hook: false,
         load: None,
     }));
-    let (interrupt, events, outbox, backlog_empty) = inert();
+    let (interrupt, outbox) = inert();
     let service = WaitService::new(
         transport,
         Arc::clone(&progress),
         facts,
         interrupt,
-        events,
         outbox,
-        backlog_empty,
         Arc::new(|| Nanos(0)),
     );
     for _ in 0..100 {
@@ -370,7 +384,7 @@ fn servicing_a_blocked_read_advances_the_position_as_the_clock_advances() {
         frozen_by_hook: false,
         load: None,
     }));
-    let (interrupt, events, outbox, backlog_empty) = inert();
+    let (interrupt, outbox) = inert();
     let now = Arc::new(AtomicU64::new(100_000_000)); // 100ms into the span
     let clock = {
         let now = Arc::clone(&now);
@@ -381,9 +395,7 @@ fn servicing_a_blocked_read_advances_the_position_as_the_clock_advances() {
         Arc::clone(&progress),
         facts,
         interrupt,
-        events,
         outbox,
-        backlog_empty,
         clock,
     );
 

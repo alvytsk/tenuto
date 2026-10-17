@@ -93,6 +93,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `playback::command`); `session::resume_intent_for`,
   `resume::resume_candidate`, `resume::restart_preference` and
   `RestartPreference` leave the library's public surface.
+- The playback engine's events leave through one queue that the engine and
+  a read stalled on the network share. Events held back while the
+  application was not reading now go out during a long network read instead
+  of after it. Library API: `WaitService::new` takes one
+  `playback::outbox::Outbox` in place of its sender, queue and backlog flag,
+  and `WaitService::take_outbox` is gone.
 
 ## [0.2.0] - 2026-09-23
 
