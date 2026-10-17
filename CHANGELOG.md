@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is malformed, unreadable or from a newer build, the message now reads the
   same way for both files.
 
+### Security
+
+- Updated `rustls` to 0.23.46 and `quinn-proto` to 0.11.19 for
+  RUSTSEC-2026-0338, -0340, -0343 and -0346 to -0349.
+
 ### Internal
 
 - The playlist rules live in one module, `PlaylistSet`: IDs, cursors,
