@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
 ### Added
 
 - A podcast episode that loses its connection mid-play (a VPN switch, a Wi-Fi
@@ -61,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When `subscriptions.json` or `stations.json` cannot be written because it
   is malformed, unreadable or from a newer build, the message now reads the
   same way for both files.
+
+### Security
+
+- Updated `rustls` to 0.23.46 and `quinn-proto` to 0.11.19 for
+  RUSTSEC-2026-0338, -0340, -0343 and -0346 to -0349.
 
 ### Internal
 
@@ -251,7 +258,8 @@ First release. Published to crates.io as `tenuto`.
 - Feed management from the player: subscribe, refresh and unsubscribe.
 - A bare `tenuto` opens the player.
 
-[Unreleased]: https://github.com/alvytsk/tenuto/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/alvytsk/tenuto/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alvytsk/tenuto/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/alvytsk/tenuto/compare/855fcb5...v0.2.0
 [0.1.2]: https://github.com/alvytsk/tenuto/compare/29da62c...855fcb5
 [0.1.1]: https://github.com/alvytsk/tenuto/compare/2167690b3e89979eb61b05b3b3b9af6f69057eb2...29da62c
