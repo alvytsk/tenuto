@@ -44,6 +44,7 @@ use crossterm::cursor::Hide;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use image::DynamicImage;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -70,6 +71,7 @@ use crate::lifecycle::terminal::KITTY_DELETE_ALL;
 use crate::media::id::MediaId;
 use crate::persistence::store::{LoadOutcome, QueueBackup, StateStore};
 use crate::playback::engine::EngineHandle;
+use crate::queue::QueueEntryId;
 use crate::tui::browser::{BrowserEffect, BrowserState};
 use crate::tui::images::{ArtworkMode, CoverCache, failure_status, picker_for, query_terminal};
 use crate::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
@@ -467,7 +469,19 @@ struct Artwork {
     /// The `cover_key` last seen; the cover is resolved only when it moves,
     /// because resolving a podcast's cover reads the feed cache from disk.
     key: Option<CoverKey>,
+    /// The entry being loaded, whose cover is fetched before its `Loaded`
+    /// makes it active (see `PlayerRuntime::loading_entry`).
+    loading: Option<QueueEntryId>,
+    /// That cover's request, and the cover once it arrives. One slot: a
+    /// decoded cover can run to tens of megabytes.
+    ahead: Option<Ahead>,
     covers: CoverCache,
+}
+
+struct Ahead {
+    media: MediaId,
+    source: CoverSource,
+    image: Option<Arc<DynamicImage>>,
 }
 
 impl Artwork {
@@ -479,6 +493,8 @@ impl Artwork {
             worker: None,
             requested: None,
             key: None,
+            loading: None,
+            ahead: None,
             covers: CoverCache::new(hook),
         }
     }
@@ -505,12 +521,18 @@ impl Artwork {
                 Some((media, source))
                     if self.requested.as_ref() == Some(&(media.clone(), source.clone())) => {}
                 Some((media, source)) => {
+                    let ahead = self
+                        .ahead
+                        .take()
+                        .filter(|ahead| ahead.media == media && ahead.source == source);
+                    // Fetched ahead: installed at once, or still on its way
+                    // and installed by the result loop below.
+                    let image = ahead.as_ref().and_then(|ahead| ahead.image.clone());
                     self.covers
-                        .set_image(media.clone(), runtime.active_cover_kind(), None);
-                    let hook = self.hook;
-                    self.worker
-                        .get_or_insert_with(|| ArtworkWorker::spawn(default_loader(hook)))
-                        .request(media.clone(), source.clone());
+                        .set_image(media.clone(), runtime.active_cover_kind(), image);
+                    if ahead.is_none() {
+                        self.request(media.clone(), source.clone());
+                    }
                     self.requested = Some((media, source));
                 }
                 None => {
@@ -521,11 +543,33 @@ impl Artwork {
                 }
             }
         }
+        let loading = runtime.loading_entry();
+        if loading != self.loading {
+            self.loading = loading;
+            self.ahead = None;
+            if let Some((media, source)) = loading.and_then(|id| runtime.cover_of(id)) {
+                self.request(media.clone(), source.clone());
+                self.ahead = Some(Ahead {
+                    media,
+                    source,
+                    image: None,
+                });
+            }
+        }
         let Some(worker) = &self.worker else {
             return;
         };
         while let Some(result) = worker.try_result() {
             if self.requested.as_ref().map(|(media, _)| media) != Some(&result.media) {
+                if let Some(ahead) = &mut self.ahead
+                    && ahead.media == result.media
+                {
+                    match result.image {
+                        Ok(image) => ahead.image = Some(image),
+                        // Requested again once active, to report the failure.
+                        Err(_) => self.ahead = None,
+                    }
+                }
                 continue;
             }
             let image = match result.image {
@@ -541,6 +585,13 @@ impl Artwork {
             self.covers
                 .set_image(result.media, runtime.active_cover_kind(), image);
         }
+    }
+
+    fn request(&mut self, media: MediaId, source: CoverSource) {
+        let hook = self.hook;
+        self.worker
+            .get_or_insert_with(|| ArtworkWorker::spawn(default_loader(hook)))
+            .request(media, source);
     }
 
     /// Prepares the cover for this frame's cover region, then clears the

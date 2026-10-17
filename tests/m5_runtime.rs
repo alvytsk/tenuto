@@ -949,3 +949,84 @@ fn the_spectrum_exists_once_the_engine_does_and_labels_the_adopted_revision() {
     assert!(spectrum.latest().is_none());
     assert!(matches!(rig.runtime.shutdown(), FlushReport::Written));
 }
+
+#[test]
+fn an_earlier_remote_seek_landing_does_not_pull_the_display_back() {
+    // Paced so each seek's reopen outlasts the 250ms quiet window: every
+    // press after the first is submitted while its predecessor is still in
+    // flight, and that predecessor's outcome used to put the display back
+    // on the older target.
+    let server = TestServer::start(
+        Script::from_fixture("sine-long-noxing.mp3").trickle(8 << 10, Duration::from_millis(20)),
+    );
+    let mut rig = rig_with(PersistedState::default());
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Url(server.url("/episode.mp3"))],
+    );
+    let ids = row_ids(&rig.runtime);
+    rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
+    pump_until(&mut rig, "playing with a duration", |view| {
+        is_playing(view, ids[0])
+            && view
+                .now_playing
+                .as_ref()
+                .is_some_and(|n| n.duration.is_some())
+    });
+
+    // Each press steps 10s from the target already shown, and a landing
+    // only ever corrects that by a frame or so: any larger drop is the
+    // display falling back to an older target.
+    let mut last = now_playing(&rig.runtime.view()).position;
+    let start = last;
+    // Four presses, then three more windows for the last seek to land.
+    for round in 0..7 {
+        if round < 4 {
+            rig.runtime.handle(AppCommand::SeekBy(10));
+        }
+        // Past the quiet window, so this burst is submitted - checked on
+        // every period along the way.
+        for _ in 0..130 {
+            step(&mut rig);
+            let position = now_playing(&rig.runtime.view()).position;
+            assert!(
+                position + Duration::from_millis(500) >= last,
+                "the display fell back to {position:?} from {last:?}"
+            );
+            last = position;
+        }
+    }
+    assert!(
+        last > start + Duration::from_secs(40),
+        "the last seek landed: {last:?}"
+    );
+}
+
+#[test]
+fn the_entry_being_loaded_is_named_until_its_load_lands() {
+    // The TUI fetches this entry's cover ahead, so switching shows the new
+    // cover when `Loaded` arrives rather than a stand-in while it downloads.
+    let (_media, root) = media_dir(&["a.flac"]);
+    let server = delayed_fixture("/b.flac", Duration::from_millis(400));
+    let mut rig = rig_with(PersistedState::default());
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Path(root.join("a.flac")),
+            EnqueueItem::Url(server.url("/b.flac")),
+        ],
+    );
+    let ids = row_ids(&rig.runtime);
+    rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
+    pump_until(&mut rig, "A playing", |view| is_playing(view, ids[0]));
+    assert_eq!(rig.runtime.loading_entry(), None, "A is already active");
+    assert!(
+        rig.runtime.cover_of(ids[0]).is_some(),
+        "a local file's cover"
+    );
+
+    rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
+    assert_eq!(rig.runtime.loading_entry(), Some(ids[1]));
+    pump_until(&mut rig, "B playing", |view| is_playing(view, ids[1]));
+    assert_eq!(rig.runtime.loading_entry(), None, "B is active now");
+}
