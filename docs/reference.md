@@ -292,7 +292,9 @@ a desktop widget or media keys can see what plays. The widget shows:
 The length shows for finite media with a known duration. Only play, pause,
 play/pause, stop and volume work; next, previous and seek are not offered.
 The widget entry goes away when tenuto quits. A missing or unresponsive bus
-never delays startup: `play` stays silent and `tui` logs one warning.
+never delays startup. A missing bus, or one that refuses the connection,
+makes `tui` log one warning (`play` stays silent); a hung bus logs nothing
+and the media-controls thread just waits.
 
 `TENUTO_MPRIS=off` turns media controls off. Other systems have none.
 

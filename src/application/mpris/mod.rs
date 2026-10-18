@@ -10,7 +10,7 @@ use tokio::sync::watch;
 
 use crate::application::runtime::AppCommand;
 use crate::application::transport::PlaybackPhase;
-use crate::application::view::PlayerView;
+use crate::application::view::{PlayerView, filled};
 use crate::media::id::MediaId;
 use crate::volume::Volume;
 
@@ -53,7 +53,7 @@ pub fn snapshot(view: &PlayerView, media: Option<&MediaId>, podcast: Option<&str
         (Some(now), Some(media)) => Some(Track {
             media: media.clone(),
             title: clean(&now.title),
-            artist: podcast.or(now.artist.as_deref()).map(clean),
+            artist: filled(podcast.or(now.artist.as_deref())).map(clean),
             length: if view.live {
                 None
             } else {
@@ -206,6 +206,11 @@ impl MediaControls {
         self.requests.try_recv().ok()
     }
 
+    /// The D-Bus thread has gone: nobody reads snapshots any more.
+    pub fn is_closed(&self) -> bool {
+        self.snapshots.is_closed()
+    }
+
     pub fn publish(&self, snapshot: Snapshot) {
         self.snapshots.send_replace(Some(snapshot));
     }
@@ -351,6 +356,17 @@ mod tests {
         let t = snapshot(&v, Some(&media("a")), None).track.unwrap();
         assert_eq!(t.title, "ab");
         assert_eq!(t.artist.as_deref(), Some("cd"));
+    }
+
+    #[test]
+    fn snapshot_omits_an_empty_or_blank_artist() {
+        for blank in ["", "  "] {
+            let mut n = now("t");
+            n.artist = Some(blank.into());
+            let v = view(PlaybackPhase::Playing, Some(n));
+            let t = snapshot(&v, Some(&media("a")), None).track.unwrap();
+            assert_eq!(t.artist, None, "{blank:?}");
+        }
     }
 
     #[test]

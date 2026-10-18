@@ -61,7 +61,9 @@ fn play_runs_and_exits_with_an_unresponsive_bus() {
     let mut child = play(&profile, false, socket.to_str().expect("utf8"))
         .spawn()
         .expect("spawn");
-    let status = wait_exit(&mut child, Duration::from_secs(20));
+    // The fixture plays for 0.5 s; the margin is for process start-up, so a
+    // blocking enable call would show.
+    let status = wait_exit(&mut child, Duration::from_secs(6));
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().expect("stderr"), &mut stderr)
         .expect("read");

@@ -25,7 +25,7 @@ use crate::application::transport::{
     PlaybackPhase, TransportDecision, TransportInput, TransportSituation, decide, decide_detached,
 };
 use crate::application::view::{
-    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, playlist_tabs,
+    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, filled, playlist_tabs,
     queue_rows, saved_history,
 };
 use crate::artwork::default::CoverKind;
@@ -729,7 +729,13 @@ impl PlayerRuntime {
     }
 
     fn publish_snapshot(&mut self) {
-        if self.media_controls.is_none() {
+        if self
+            .media_controls
+            .as_ref()
+            .is_none_or(MediaControls::is_closed)
+        {
+            // Dropped once the bus thread has exited (no bus, lost connection).
+            self.media_controls = None;
             return;
         }
         let media = match &self.detached {
@@ -1652,15 +1658,12 @@ impl PlayerRuntime {
             MediaId::PodcastEpisode { .. } => {
                 episode_name(mirror.and_then(|mirror| mirror.title.as_deref()))
             }
-            other => mirror
-                .and_then(|mirror| mirror.title.clone())
-                .unwrap_or_else(|| display_name(other)),
+            other => filled(mirror.and_then(|mirror| mirror.title.as_deref()))
+                .map_or_else(|| display_name(other), str::to_owned),
         };
         let unloaded = NowPlaying {
             title: displayable(&title),
-            artist: mirror
-                .and_then(|mirror| mirror.artist.as_deref())
-                .map(displayable),
+            artist: filled(mirror.and_then(|mirror| mirror.artist.as_deref())).map(displayable),
             saved: saved_history(self.session.state().entry_for(media)),
             ..NowPlaying::unloaded()
         };

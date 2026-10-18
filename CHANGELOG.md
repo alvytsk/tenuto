@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `tenuto play` shows a local file's title tag (and its artist) instead of
-  the file name.
+- `tenuto play` shows a title tag, when the file or stream has one, instead
+  of the file name, for local files and remote non-podcast media. The
+  artist tag reaches only the desktop media widget; `play`'s status row
+  shows the title alone.
 
 ## [0.3.0] - 2026-10-17
 

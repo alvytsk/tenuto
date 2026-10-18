@@ -236,13 +236,14 @@ Each thread has strict ownership. The names below are the OS thread names.
 | MPRIS thread | `tenuto-mpris` | The session-bus connection and its own current-thread Tokio runtime. Publishes the latest snapshot and queues requests for the runtime | Call into the runtime or `Session` |
 | Browse worker | `tenuto-browse` | One request at a time: a directory level, the subscription list, one feed's cached episodes, and since M6 the subscribe, refresh and unsubscribe mutations through `library` | Recurse into a library or touch `Session` |
 
-The Tokio runtime exists only when the source is an HTTP URL. A local-file session runs with no Tokio runtime at all.
+Tokio exists for HTTP sources, and on Linux for `tenuto-mpris`, which builds its own current-thread runtime. A local-file session without a desktop bus runs no Tokio runtime on the playback path.
 
-Three contexts block on the Tokio runtime, and no others do:
+Four contexts block on a Tokio runtime, and no others do:
 
 - the main thread of a feed command, through `application::feed_ops::wait_http`;
 - `tenuto-browse`, through the same helper, for the browser's subscription and station mutations;
-- `tenuto-artwork`, which fetches a remote cover with its own `block_on`.
+- `tenuto-artwork`, which fetches a remote cover with its own `block_on`;
+- `tenuto-mpris`, which `block_on`s its own current-thread runtime (Linux).
 
 The decode thread never blocks on the runtime: `HttpMediaSource` waits on `ByteChannel`, not on a future. Neither does the main thread under `tui` or `play`.
 
@@ -522,7 +523,7 @@ flowchart TB
             inputT["tenuto-input"]
             decodeT["tenuto-decode"]
             cb["CPAL callback"]
-            tokioT["Tokio worker (HTTP only)"]
+            tokioT["Tokio worker (HTTP only)<br/>tenuto-mpris: own runtime"]
             stateT["tenuto-state"]
             sigT["tenuto-signal-listener"]
             bg["tenuto-browse<br/>tenuto-artwork<br/>tenuto-metadata-1, -2<br/>tenuto-spectrum"]
@@ -555,7 +556,7 @@ Build requirements:
 | Lock file | `Cargo.lock` is committed. Every command runs with `--locked` |
 | Gates | `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked` on Linux, and on macOS as a non-blocking leg, `cargo doc --locked --no-deps` with `RUSTDOCFLAGS=-D warnings`, `cargo publish --dry-run --locked`, the Linux package build on Ubuntu 22.04 with installation and smoke tests of the .deb and the tarball on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04 (`.github/workflows/package.yml`), and `scripts/release/test.sh` plus a live `gh` rehearsal-lookup probe against this repository (`release-scripts` in `ci.yml`) |
 
-Key dependencies: Symphonia for demux and decode, CPAL for output, rtrb for the callback ring, rubato for resampling, crossbeam-channel for the protocol, Tokio and reqwest with rustls for HTTP, quick-xml for feeds, Ratatui and crossterm for the terminal, ratatui-image and image for cover art, rustfft for the spectrum.
+Key dependencies: Symphonia for demux and decode, CPAL for output, rtrb for the callback ring, rubato for resampling, crossbeam-channel for the protocol, Tokio and reqwest with rustls for HTTP, mpris-server (zbus) for the Linux media controls, quick-xml for feeds, Ratatui and crossterm for the terminal, ratatui-image and image for cover art, rustfft for the spectrum.
 
 The crate ships to crates.io as `tenuto`, the same name as the published
 binary and the library target. The package excludes `/tests`, `/docs` and

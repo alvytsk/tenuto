@@ -27,6 +27,10 @@ pub(super) fn log(failure: FailureLog, what: &str, error: &dyn Display) {
 
 /// Runs `job` (the thread body) so a panic in it is one log line: under
 /// `tui`'s hook an uncontained panic on any thread shuts the player down.
+// ponytail: zbus's tokio integration runs some auth syscalls via
+// spawn_blocking on blocking-pool threads, outside this guard; a panic there
+// is still fatal under tui's hook. Low risk (trivial syscall wrappers);
+// upgrade: contain at the hook level by thread name.
 pub(super) fn contained(failure: FailureLog, job: impl FnOnce()) {
     if let Err(panic) = run_contained("mpris", job) {
         log(failure, "media controls stopped", &panic);

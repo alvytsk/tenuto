@@ -194,7 +194,7 @@ pub(crate) fn queue_rows(state: &PersistedState, playlist: PlaylistId) -> Vec<Qu
 }
 
 /// The tag, trimmed, or `None` when it is absent or blank.
-fn filled(text: Option<&str>) -> Option<&str> {
+pub(crate) fn filled(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
 }
 
