@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Desktop media controls on Linux: `tui` and `play` appear in the desktop's
+  MPRIS media widget with the track's title, artist and length. Play, pause,
+  stop and volume work from the widget. `TENUTO_MPRIS=off` turns it off.
+
 ### Changed
 
 - `tenuto play` shows a local file's title tag (and its artist) instead of

@@ -37,7 +37,8 @@ pub fn command_in(root: &Path) -> Command {
     command
         .envs(profile_env(root))
         .env_remove("TENUTO_TEST_HOOK")
-        .env_remove("TENUTO_AUDIO_OUTPUT");
+        .env_remove("TENUTO_AUDIO_OUTPUT")
+        .env("TENUTO_MPRIS", "off");
     command
 }
 

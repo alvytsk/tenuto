@@ -76,6 +76,7 @@ pub fn command(root: &Path, args: &[&str], env: &[(&str, &str)]) -> CommandBuild
         command.env_remove(key);
     }
     command.env("TERM", CHILD_TERM);
+    command.env("TENUTO_MPRIS", "off");
     for (key, value) in env {
         command.env(key, value);
     }

@@ -52,6 +52,7 @@ use ratatui_image::picker::{Picker, ProtocolType};
 
 use crate::application::browse::{BrowseRequest, BrowseResult, BrowseWorker, TreeCollected};
 use crate::application::enrich::default_probe;
+use crate::application::mpris::FailureLog;
 use crate::application::profile::{OpenedState, open_state};
 use crate::application::runtime::{
     AppCommand, CoverKey, FlushReport, LibraryStores, PlayerRuntime, RuntimeParts,
@@ -201,6 +202,8 @@ fn start_and_loop(
         .insert(start_runtime(store, loaded, clock, hook));
     stage!(signals, cleanup);
 
+    // After the fd-2 redirect: a bus warning goes to the log, never the screen.
+    runtime.enable_media_controls(FailureLog::Warn);
     let terminal = stages.terminal.insert(attempt!(
         enter_terminal(options.mouse, cleanup).map_err(LifecycleError::Terminal)
     ));

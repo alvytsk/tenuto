@@ -278,6 +278,24 @@ An item with a GUID keeps its position when the show moves its audio to another 
 - An item with no GUID, no enclosure and no link has no identity and is skipped and counted.
 - An item with an identity but no usable enclosure is kept and listed with `AUDIO: none`.
 
+## Desktop media controls
+
+On Linux, `tui` and `play` register as an MPRIS player on the session bus, so
+a desktop widget or media keys can see what plays. The widget shows:
+
+| Media | Title | Artist |
+|---|---|---|
+| Local file | tag title, else file name | tag artist |
+| Podcast episode | episode title | podcast name in `tui`; else the tag artist, if any |
+| Radio station | station name in `tui`, the URL's last segment in `play` | none |
+
+The length shows for finite media with a known duration. Only play, pause,
+play/pause, stop and volume work; next, previous and seek are not offered.
+The widget entry goes away when tenuto quits. A missing or unresponsive bus
+never delays startup: `play` stays silent and `tui` logs one warning.
+
+`TENUTO_MPRIS=off` turns media controls off. Other systems have none.
+
 ## Files and state
 
 | Location | Contents |

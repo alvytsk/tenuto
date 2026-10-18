@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
-use crate::application::mpris::{MediaControls, command, snapshot};
+use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
 };
@@ -475,6 +475,14 @@ impl PlayerRuntime {
     /// is published on every [`pump`](Self::pump).
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
         self.media_controls = Some(controls);
+    }
+
+    /// Turns desktop media controls on. The bus connects on its own thread,
+    /// so this never blocks; nothing happens when the controls are off.
+    pub fn enable_media_controls(&mut self, failure: FailureLog) {
+        if let Some(controls) = spawn(failure) {
+            self.attach_media_controls(controls);
+        }
     }
 
     pub fn session(&self) -> &Session {
