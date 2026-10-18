@@ -733,7 +733,7 @@ impl PlayerRuntime {
             .flat_map(|(controls, _)| std::iter::from_fn(|| controls.try_recv()))
             .collect();
         for request in requests {
-            if let Some(cmd) = command(request, self.volume) {
+            if let Some(cmd) = command(request, &self.view()) {
                 self.handle(cmd);
             }
         }

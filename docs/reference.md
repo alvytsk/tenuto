@@ -289,8 +289,13 @@ a desktop widget or media keys can see what plays. The widget shows:
 | Podcast episode | episode title | podcast name in `tui`; else the tag artist, if any |
 | Radio station | station name in `tui`, the URL's last segment in `play` | none |
 
-The length shows for finite media with a known duration. Only play, pause,
-play/pause, stop and volume work; next, previous and seek are not offered.
+The length shows for finite media with a known duration. Play, pause,
+play/pause, stop, volume, next, previous and shuffle work as their keys do in
+`tui`: next and previous step through the playing playlist, shuffle toggles
+it (`play` has no playlist, so they do nothing there). Seeking, relative or
+to a position, works for media with a known length and is rounded to whole
+seconds; live streams offer none. Repeat is not offered: tenuto has no repeat
+mode.
 The widget entry goes away when tenuto quits. A missing or unresponsive bus
 never delays startup. A missing bus, or one that refuses the connection,
 makes `tui` log one warning (`play` stays silent); a hung bus logs nothing

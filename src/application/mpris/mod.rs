@@ -4,7 +4,7 @@
 //! the runtime and the D-Bus thread. No D-Bus code lives here.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use self::cover::CoverImage;
 
@@ -15,7 +15,6 @@ use crate::application::runtime::AppCommand;
 use crate::application::transport::PlaybackPhase;
 use crate::application::view::{PlayerView, filled};
 use crate::media::id::MediaId;
-use crate::volume::Volume;
 
 pub mod cover;
 
@@ -46,6 +45,8 @@ pub struct Snapshot {
     pub volume: f64,
     pub position: Duration,
     pub cover: Option<CoverImage>,
+    /// The playing playlist is shuffled.
+    pub shuffle: bool,
 }
 
 fn clean(text: &str) -> String {
@@ -84,6 +85,7 @@ pub fn snapshot(view: &PlayerView, media: Option<&MediaId>, podcast: Option<&str
             .as_ref()
             .map_or(Duration::ZERO, |n| n.position),
         cover: None,
+        shuffle: view.tabs.iter().any(|t| t.playing && t.shuffled),
     }
 }
 
@@ -93,34 +95,60 @@ pub enum Request {
     Play,
     Pause,
     Stop,
+    Next,
+    Previous,
+    /// MPRIS `Seek`: a relative offset in microseconds.
+    Seek(i64),
+    SetPosition(Duration),
+    SetShuffle(bool),
     SetVolume(f64),
 }
 
-pub fn command(request: Request, volume: Volume) -> Option<AppCommand> {
+pub fn command(request: Request, view: &PlayerView) -> Option<AppCommand> {
     match request {
         Request::PlayPause => Some(AppCommand::PlayPause),
         Request::Play => Some(AppCommand::Play),
         Request::Pause => Some(AppCommand::Pause),
         Request::Stop => Some(AppCommand::Stop),
+        Request::Next => Some(AppCommand::Next),
+        Request::Previous => Some(AppCommand::Previous),
+        Request::Seek(micros) => {
+            let secs = (micros as f64 / 1e6).round() as i64;
+            (secs != 0).then_some(AppCommand::SeekBy(secs))
+        }
+        Request::SetPosition(position) => Some(AppCommand::SeekTo(position)),
+        Request::SetShuffle(on) => view
+            .tabs
+            .iter()
+            .find(|t| t.playing && t.shuffled != on)
+            .map(|t| AppCommand::ToggleShuffle(t.id)),
         Request::SetVolume(x) if x.is_nan() => None,
         Request::SetVolume(x) => {
-            let delta = x.clamp(0.0, 1.0) - f64::from(volume.as_gain());
+            let delta = x.clamp(0.0, 1.0) - f64::from(view.volume.as_gain());
             (delta != 0.0).then_some(AppCommand::AdjustVolume(delta as f32))
         }
     }
 }
+
+/// How far the position may stray from where playback alone would have
+/// taken it before clients are told it was seeked.
+const SEEK_TOLERANCE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
     Metadata,
     PlaybackStatus,
     Volume,
+    Shuffle,
+    /// The position jumped: a seek, from MPRIS or the player itself.
+    Seeked,
 }
 
 /// The last snapshot handed to the desktop, and the track-id sequence.
 #[derive(Default)]
 pub struct Published {
     last: Option<Snapshot>,
+    last_at: Option<Instant>,
     seq: u64,
     volume_written: bool,
     cover_seq: u64,
@@ -137,6 +165,11 @@ pub enum CoverUpdate {
 
 impl Published {
     pub fn apply(&mut self, next: Snapshot) -> Vec<Change> {
+        self.apply_at(next, Instant::now())
+    }
+
+    /// `apply`, with `now` the time `next` was taken.
+    pub fn apply_at(&mut self, next: Snapshot, now: Instant) -> Vec<Change> {
         let mut changes = Vec::new();
         let last = self.last.as_ref();
         let media = |s: &Snapshot| s.track.as_ref().map(|t| t.media.clone());
@@ -152,8 +185,23 @@ impl Published {
         if last.is_none_or(|l| l.volume != next.volume) || self.volume_written {
             changes.push(Change::Volume);
         }
+        if last.is_none_or(|l| l.shuffle != next.shuffle) {
+            changes.push(Change::Shuffle);
+        }
+        if let (Some(l), Some(at)) = (last, self.last_at)
+            && media(l) == media(&next)
+        {
+            let expected = match l.status {
+                Status::Playing => l.position + now.saturating_duration_since(at),
+                _ => l.position,
+            };
+            if expected.abs_diff(next.position) > SEEK_TOLERANCE {
+                changes.push(Change::Seeked);
+            }
+        }
         self.volume_written = false;
         self.last = Some(next);
+        self.last_at = Some(now);
         changes
     }
 
@@ -286,10 +334,12 @@ pub fn channel() -> (MediaControls, Remote) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::view::PlaylistTab;
     use crate::application::view::{NowPlaying, PersistenceStatus};
     use crate::media::id::AbsolutePath;
     use crate::persistence::model::PersistedState;
     use crate::playlist::queue::{DisplayDuration, DurationSource};
+    use crate::volume::Volume;
     use std::sync::Arc;
 
     fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
@@ -329,6 +379,7 @@ mod tests {
             volume,
             position: Duration::ZERO,
             cover: None,
+            shuffle: false,
         }
     }
 
@@ -425,9 +476,16 @@ mod tests {
         assert_eq!(snapshot(&v, None, None).track, None);
     }
 
+    fn at_volume(volume: f32) -> PlayerView {
+        PlayerView {
+            volume: Volume::new(volume),
+            ..view(PlaybackPhase::Playing, None)
+        }
+    }
+
     #[test]
     fn command_maps_transport_requests() {
-        let v = Volume::FULL;
+        let v = &at_volume(1.0);
         assert!(matches!(
             command(Request::PlayPause, v),
             Some(AppCommand::PlayPause)
@@ -438,36 +496,125 @@ mod tests {
             Some(AppCommand::Pause)
         ));
         assert!(matches!(command(Request::Stop, v), Some(AppCommand::Stop)));
+        assert!(matches!(command(Request::Next, v), Some(AppCommand::Next)));
+        assert!(matches!(
+            command(Request::Previous, v),
+            Some(AppCommand::Previous)
+        ));
+    }
+
+    #[test]
+    fn command_seek_rounds_to_whole_seconds() {
+        let v = &at_volume(1.0);
+        assert!(matches!(
+            command(Request::Seek(-10_000_000), v),
+            Some(AppCommand::SeekBy(-10))
+        ));
+        assert!(matches!(
+            command(Request::Seek(1_600_000), v),
+            Some(AppCommand::SeekBy(2))
+        ));
+        assert!(command(Request::Seek(400_000), v).is_none());
+        let to = Duration::from_secs(42);
+        assert!(matches!(
+            command(Request::SetPosition(to), v),
+            Some(AppCommand::SeekTo(d)) if d == to
+        ));
+    }
+
+    #[test]
+    fn command_set_shuffle_toggles_the_playing_playlist_only_on_change() {
+        let mut v = at_volume(1.0);
+        let id = v.viewed;
+        v.tabs = vec![PlaylistTab {
+            id,
+            name: "p".into(),
+            playing: true,
+            shuffled: false,
+        }];
+        assert!(command(Request::SetShuffle(false), &v).is_none());
+        assert!(matches!(
+            command(Request::SetShuffle(true), &v),
+            Some(AppCommand::ToggleShuffle(t)) if t == id
+        ));
+        assert!(!snapshot(&v, None, None).shuffle);
+        v.tabs[0].shuffled = true;
+        assert!(snapshot(&v, None, None).shuffle);
+        assert!(command(Request::SetShuffle(true), &v).is_none());
     }
 
     #[test]
     fn command_volume_rejects_nan_and_clamps() {
-        assert!(command(Request::SetVolume(f64::NAN), Volume::FULL).is_none());
-        assert!(command(Request::SetVolume(1.5), Volume::FULL).is_none());
-        match command(Request::SetVolume(-1.0), Volume::new(0.5)) {
+        let full = &at_volume(1.0);
+        assert!(command(Request::SetVolume(f64::NAN), full).is_none());
+        assert!(command(Request::SetVolume(1.5), full).is_none());
+        match command(Request::SetVolume(-1.0), &at_volume(0.5)) {
             Some(AppCommand::AdjustVolume(d)) => assert_eq!(d, -0.5),
             other => panic!("{other:?}"),
         }
-        match command(Request::SetVolume(0.25), Volume::new(0.75)) {
+        match command(Request::SetVolume(0.25), &at_volume(0.75)) {
             Some(AppCommand::AdjustVolume(d)) => assert_eq!(d, -0.5),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_position_jump_reports_seeked_and_playback_does_not() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let at = |secs: u64, status: Status| {
+            let mut s = snap(Some(track("a")), status, 1.0);
+            s.position = Duration::from_secs(secs);
+            s
+        };
+        p.apply_at(at(10, Status::Playing), t0);
+        let later = |secs| t0 + Duration::from_secs(secs);
+        assert!(p.apply_at(at(13, Status::Playing), later(3)).is_empty());
+        assert_eq!(
+            p.apply_at(at(60, Status::Playing), later(4)),
+            vec![Change::Seeked]
+        );
+        p.apply_at(at(60, Status::Paused), later(4));
+        assert!(p.apply_at(at(60, Status::Paused), later(30)).is_empty());
+        assert_eq!(
+            p.apply_at(at(5, Status::Paused), later(31)),
+            vec![Change::Seeked]
+        );
+        // A new track starting elsewhere is metadata, not a seek.
+        let mut other = snap(Some(track("b")), Status::Paused, 1.0);
+        other.position = Duration::from_secs(90);
+        assert_eq!(p.apply_at(other, later(32)), vec![Change::Metadata]);
+    }
+
+    #[test]
+    fn shuffle_change_reports_shuffle() {
+        let mut p = Published::default();
+        p.apply(snap(None, Status::Playing, 1.0));
+        let mut next = snap(None, Status::Playing, 1.0);
+        next.shuffle = true;
+        assert_eq!(p.apply(next), vec![Change::Shuffle]);
     }
 
     #[test]
     fn first_apply_reports_everything() {
         let mut p = Published::default();
-        let all = vec![Change::Metadata, Change::PlaybackStatus, Change::Volume];
+        let all = vec![
+            Change::Metadata,
+            Change::PlaybackStatus,
+            Change::Volume,
+            Change::Shuffle,
+        ];
         assert_eq!(p.apply(snap(None, Status::Stopped, 1.0)), all);
     }
 
     #[test]
     fn position_only_change_reports_nothing_but_updates_position() {
         let mut p = Published::default();
-        p.apply(snap(Some(track("a")), Status::Playing, 1.0));
+        let t0 = Instant::now();
+        p.apply_at(snap(Some(track("a")), Status::Playing, 1.0), t0);
         let mut next = snap(Some(track("a")), Status::Playing, 1.0);
         next.position = Duration::from_secs(5);
-        assert!(p.apply(next).is_empty());
+        assert!(p.apply_at(next, t0 + Duration::from_secs(5)).is_empty());
         assert_eq!(p.snapshot().unwrap().position, Duration::from_secs(5));
     }
 

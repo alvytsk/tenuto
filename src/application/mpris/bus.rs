@@ -10,7 +10,7 @@ use crossbeam_channel::Sender;
 use mpris_server::zbus::{self, fdo};
 use mpris_server::{
     LoopStatus, Metadata, PlaybackRate, PlaybackStatus, PlayerInterface, Property, RootInterface,
-    Server, Time, TrackId,
+    Server, Signal, Time, TrackId,
 };
 
 use crate::lifecycle::panic::run_contained;
@@ -84,17 +84,24 @@ async fn run(mut remote: Remote, failure: FailureLog, cover_dir: Option<PathBuf>
         if let Some(dir) = &cover_dir {
             write_pending_cover(dir, &published, &mut previous);
         }
+        let seeked = changes
+            .contains(&Change::Seeked)
+            .then(|| position(&lock(&published)));
         let properties: Vec<Property> = {
             let published = lock(&published);
             changes
                 .into_iter()
-                .map(|c| property(&published, c))
+                .flat_map(|c| properties(&published, c))
                 .collect()
         };
-        if properties.is_empty() {
-            continue;
+        let mut sent = Ok(());
+        if !properties.is_empty() {
+            sent = server.properties_changed(properties).await;
         }
-        if let Err(error) = server.properties_changed(properties).await {
+        if let (Ok(()), Some(position)) = (&sent, seeked) {
+            sent = server.emit(Signal::Seeked { position }).await;
+        }
+        if let Err(error) = sent {
             log(failure, "media controls: bus connection lost", &error);
             break;
         }
@@ -158,12 +165,36 @@ fn lock(published: &Mutex<Published>) -> MutexGuard<'_, Published> {
     published.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn property(published: &Published, change: Change) -> Property {
+fn properties(published: &Published, change: Change) -> Vec<Property> {
     match change {
-        Change::Metadata => Property::Metadata(metadata(published)),
-        Change::PlaybackStatus => Property::PlaybackStatus(playback_status(published)),
-        Change::Volume => Property::Volume(volume(published)),
+        Change::Metadata => vec![
+            Property::Metadata(metadata(published)),
+            Property::CanSeek(can_seek(published)),
+        ],
+        Change::PlaybackStatus => vec![Property::PlaybackStatus(playback_status(published))],
+        Change::Volume => vec![Property::Volume(volume(published))],
+        Change::Shuffle => vec![Property::Shuffle(shuffle(published))],
+        Change::Seeked => Vec::new(),
     }
+}
+
+/// Only a track with a known length has a timeline to seek on: not live
+/// streams, not nothing.
+fn can_seek(published: &Published) -> bool {
+    published
+        .snapshot()
+        .and_then(|s| s.track.as_ref())
+        .is_some_and(|t| t.length.is_some())
+}
+
+fn shuffle(published: &Published) -> bool {
+    published.snapshot().is_some_and(|s| s.shuffle)
+}
+
+fn position(published: &Published) -> Time {
+    published
+        .snapshot()
+        .map_or(Time::ZERO, |s| micros(s.position.as_micros()))
 }
 
 fn metadata(published: &Published) -> Metadata {
@@ -266,11 +297,11 @@ impl RootInterface for Imp {
 
 impl PlayerInterface for Imp {
     async fn next(&self) -> fdo::Result<()> {
-        Ok(())
+        self.send(Request::Next)
     }
 
     async fn previous(&self) -> fdo::Result<()> {
-        Ok(())
+        self.send(Request::Previous)
     }
 
     async fn pause(&self) -> fdo::Result<()> {
@@ -289,12 +320,25 @@ impl PlayerInterface for Imp {
         self.send(Request::Play)
     }
 
-    async fn seek(&self, _offset: Time) -> fdo::Result<()> {
-        Ok(())
+    async fn seek(&self, offset: Time) -> fdo::Result<()> {
+        if !can_seek(&self.published()) {
+            return Ok(());
+        }
+        self.send(Request::Seek(offset.as_micros()))
     }
 
-    async fn set_position(&self, _track_id: TrackId, _position: Time) -> fdo::Result<()> {
-        Ok(())
+    /// Ignored for a stale track id or a negative position, as MPRIS asks.
+    async fn set_position(&self, track_id: TrackId, position: Time) -> fdo::Result<()> {
+        let current = {
+            let published = self.published();
+            can_seek(&published) && track_id.as_str() == published.track_id()
+        };
+        match u64::try_from(position.as_micros()) {
+            Ok(micros) if current => self.send(Request::SetPosition(
+                std::time::Duration::from_micros(micros),
+            )),
+            _ => Ok(()),
+        }
     }
 
     async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
@@ -322,10 +366,11 @@ impl PlayerInterface for Imp {
     }
 
     async fn shuffle(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(shuffle(&self.published()))
     }
 
-    async fn set_shuffle(&self, _shuffle: bool) -> zbus::Result<()> {
+    async fn set_shuffle(&self, shuffle: bool) -> zbus::Result<()> {
+        self.send(Request::SetShuffle(shuffle))?;
         Ok(())
     }
 
@@ -347,8 +392,7 @@ impl PlayerInterface for Imp {
     }
 
     async fn position(&self) -> fdo::Result<Time> {
-        let position = self.published().snapshot().map(|s| s.position);
-        Ok(position.map_or(Time::ZERO, |p| micros(p.as_micros())))
+        Ok(position(&self.published()))
     }
 
     async fn minimum_rate(&self) -> fdo::Result<PlaybackRate> {
@@ -360,11 +404,11 @@ impl PlayerInterface for Imp {
     }
 
     async fn can_go_next(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(true)
     }
 
     async fn can_go_previous(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(true)
     }
 
     async fn can_play(&self) -> fdo::Result<bool> {
@@ -376,7 +420,7 @@ impl PlayerInterface for Imp {
     }
 
     async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(can_seek(&self.published()))
     }
 
     async fn can_control(&self) -> fdo::Result<bool> {
@@ -415,6 +459,7 @@ mod tests {
             volume: 1.0,
             position: Duration::from_secs(position),
             cover: None,
+            shuffle: false,
         }
     }
 
@@ -454,19 +499,58 @@ mod tests {
     }
 
     #[test]
-    fn navigation_and_seek_are_ignored() {
+    fn navigation_and_shuffle_are_queued() {
         let (imp, controls) = imp();
         block(async {
             imp.next().await.unwrap();
             imp.previous().await.unwrap();
+            imp.set_shuffle(true).await.unwrap();
+        });
+        assert_eq!(controls.try_recv(), Some(Request::Next));
+        assert_eq!(controls.try_recv(), Some(Request::Previous));
+        assert_eq!(controls.try_recv(), Some(Request::SetShuffle(true)));
+    }
+
+    #[test]
+    fn seek_needs_a_track_with_a_length() {
+        let (imp, controls) = imp();
+        imp.published.lock().unwrap().apply(snap(0));
+        block(async {
+            assert!(!imp.can_seek().await.unwrap());
             imp.seek(Time::from_secs(5)).await.unwrap();
-            imp.set_position(TrackId::NO_TRACK, Time::ZERO)
+        });
+        assert!(controls.try_recv().is_none());
+        let mut live = snap(0);
+        live.track = Some(crate::application::mpris::Track {
+            media: crate::media::id::MediaId::LocalFile(
+                crate::media::id::AbsolutePath::new("/a".into()).unwrap(),
+            ),
+            title: "a".into(),
+            artist: None,
+            length: None,
+        });
+        imp.published.lock().unwrap().apply(live.clone());
+        assert!(!block(imp.can_seek()).unwrap());
+        let mut timed = live;
+        timed.track.as_mut().unwrap().length = Some(Duration::from_secs(60));
+        imp.published.lock().unwrap().apply(timed);
+        let id = TrackId::try_from(imp.published().track_id()).unwrap();
+        block(async {
+            assert!(imp.can_seek().await.unwrap());
+            imp.seek(Time::from_secs(-5)).await.unwrap();
+            imp.set_position(TrackId::NO_TRACK, Time::from_secs(9))
                 .await
                 .unwrap();
-            assert!(!imp.can_go_next().await.unwrap());
-            assert!(!imp.can_go_previous().await.unwrap());
-            assert!(!imp.can_seek().await.unwrap());
+            imp.set_position(id.clone(), Time::from_secs(-1))
+                .await
+                .unwrap();
+            imp.set_position(id, Time::from_secs(9)).await.unwrap();
         });
+        assert_eq!(controls.try_recv(), Some(Request::Seek(-5_000_000)));
+        assert_eq!(
+            controls.try_recv(),
+            Some(Request::SetPosition(Duration::from_secs(9)))
+        );
         assert!(controls.try_recv().is_none());
     }
 
