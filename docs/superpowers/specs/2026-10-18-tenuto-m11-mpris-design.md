@@ -185,3 +185,44 @@ Every request is a user's click, so "nothing plays on its own" holds. MPRIS neve
 - `mpris-server`'s `Player` versus `Server<impl PlayerInterface>`.
 - The latest-value channel, the method names, and the `trackid` counter.
 - Whether to add the D-Bus round-trip test.
+
+## 10. Addendum (2026-10-18): cover art
+
+Approved in conversation after the first six tasks landed. It replaces the §2 non-goal "Cover art (`mpris:artUrl`)" and narrows the §5.1 rule "no path, no art".
+
+### 10.1 What the widget gets
+
+- `mpris:artUrl` is a `file://` URL to a PNG that tenuto writes into its own cache directory, `<XDG cache>/tenuto/mpris/cover-<n>.png`. That cache path is the only path that goes on the bus.
+- A remote cover URL (podcast feed art, a station logo) never goes on the bus. It can carry a token, and the bar would then fetch it on its own.
+- A music file's path never goes on the bus either. Embedded and sibling covers are copied into the cache.
+- With no cover, there is no `artUrl`. The TUI's built-in placeholder picture is not used.
+
+### 10.2 Where covers come from
+
+The same sources and gates the TUI uses (`PlayerRuntime::active_cover`, `cover_for`):
+
+- **Music file:** the embedded picture, else the sibling `cover.jpg`/`cover.png`/`folder.jpg`/`folder.png`.
+- **Podcast episode:** the episode or feed image, once playback has opened the HTTP service. Nothing is fetched for a merely restored entry.
+- **Radio station:** its saved logo. SVG logos are rasterized, as the TUI does.
+- **`tenuto play` (detached):** a local file's embedded or sibling cover, or the embedded front cover of the loaded stream. `play` has no library, so a podcast or station there has no remote cover.
+
+### 10.3 How (my calls)
+
+- **Fetching:** `PlayerRuntime` gets its own cover worker, separate from the TUI's terminal-image pipeline, so it works in both front ends and with the terminal's images off.
+  - It reuses `artwork::ArtworkWorker` and `default_loader`, latest-wins and panic-contained.
+  - The runtime asks for a cover only when the playing media, its load or the HTTP gate changes, never per pass. `active_cover` reads store files.
+  - **Known cost:** in `tui`, a podcast's or station's remote cover is fetched twice, once for the terminal and once for the widget. It is marked with a `ponytail:` comment, to be shared if it matters.
+- **Writing:** the bus thread writes the file, never the main thread.
+  - It shrinks the image to at most 512 px on the long edge, keeping the aspect ratio, encodes a PNG, writes `cover-<n>.png.tmp` and renames it to `cover-<n>.png`.
+  - `<n>` is new for every cover, so bars that cache by URL refresh. The previous file is deleted.
+  - The thread empties its `cover-*` files at startup.
+  - A failed write is logged at `debug` and leaves no `artUrl`.
+- **Track id:** a cover that arrives after the title republishes `Metadata` with the same `trackid`.
+- **Change detection:** a cover is compared by identity (`Arc` pointer), never by pixels.
+
+### 10.4 Tests
+
+- **Pure:** the PNG writer (size cap, atomic rename, startup clearing); change detection on cover identity; the cover-update hand-off (new cover, unchanged, cleared).
+- **Runtime:** a tagged FLAC with an embedded picture yields a cover in the snapshot, both from a playlist entry and from detached play; an untagged file yields none.
+- **Bus:** writing a pending cover creates the file and sets `artUrl` to its `file://` URL; the next cover deletes the previous file; clearing deletes it and drops `artUrl`.
+- **Manual acceptance:** a tagged track, a Radio-T episode and a station each show their cover in the niri bar.
