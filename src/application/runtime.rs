@@ -420,9 +420,9 @@ pub struct PlayerRuntime {
     /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
     rows: Cell<Option<CachedRows>>,
     /// The runtime half of the desktop media-controls channel (M11).
-    media_controls: Option<MediaControls>,
-    /// Fetches the playing cover for the media controls; built with them.
-    covers: Option<CoverFetcher>,
+    /// The controls with the fetcher of the cover they publish, so the
+    /// fetcher cannot outlive them.
+    media_controls: Option<(MediaControls, CoverFetcher)>,
     /// What `covers` was last asked for: the playing media, `mirror.load`
     /// and whether HTTP is available. Compared before any store read.
     cover_wanted_key: Option<(Option<MediaId>, Option<LoadRequestId>, bool)>,
@@ -473,7 +473,6 @@ impl PlayerRuntime {
             viewed,
             rows: Cell::new(None),
             media_controls: None,
-            covers: None,
             cover_wanted_key: None,
             podcast_name: None,
         }
@@ -482,8 +481,7 @@ impl PlayerRuntime {
     /// Serves desktop media controls: requests are drained and a snapshot
     /// is published on every [`pump`](Self::pump).
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
-        self.media_controls = Some(controls);
-        self.covers = Some(CoverFetcher::new(default_loader(TestHook::None)));
+        self.media_controls = Some((controls, CoverFetcher::new(default_loader(TestHook::None))));
         self.cover_wanted_key = None;
     }
 
@@ -727,7 +725,7 @@ impl PlayerRuntime {
         let requests: Vec<_> = self
             .media_controls
             .iter()
-            .flat_map(|controls| std::iter::from_fn(|| controls.try_recv()))
+            .flat_map(|(controls, _)| std::iter::from_fn(|| controls.try_recv()))
             .collect();
         for request in requests {
             if let Some(cmd) = command(request, self.volume) {
@@ -754,13 +752,13 @@ impl PlayerRuntime {
     }
 
     fn publish_snapshot(&mut self) {
-        if self
-            .media_controls
-            .as_ref()
-            .is_none_or(MediaControls::is_closed)
-        {
+        // Taken out so `playing_cover(&self)` can run beside the fetcher.
+        let Some((controls, mut covers)) = self.media_controls.take() else {
+            return;
+        };
+        if controls.is_closed() {
             // Dropped once the bus thread has exited (no bus, lost connection).
-            self.media_controls = None;
+            self.cover_wanted_key = None;
             return;
         }
         let media = match &self.detached {
@@ -784,18 +782,13 @@ impl PlayerRuntime {
         );
         if self.cover_wanted_key.as_ref() != Some(&key) {
             let wanted = self.playing_cover();
-            if let Some(covers) = &mut self.covers {
-                covers.want(wanted);
-            }
+            covers.want(wanted);
             self.cover_wanted_key = Some(key);
         }
-        if let Some(covers) = &mut self.covers {
-            covers.poll();
-            snap.cover = media.and_then(|m| covers.cover_for(&m));
-        }
-        if let Some(controls) = &self.media_controls {
-            controls.publish(snap);
-        }
+        covers.poll();
+        snap.cover = media.and_then(|m| covers.cover_for(&m));
+        controls.publish(snap);
+        self.media_controls = Some((controls, covers));
     }
 
     fn pump_engine(&mut self) {

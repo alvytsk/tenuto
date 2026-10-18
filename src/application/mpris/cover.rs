@@ -117,6 +117,9 @@ pub fn clear_covers(dir: &Path) {
 mod tests {
     use super::*;
     use image::DynamicImage;
+    use std::time::{Duration, Instant};
+
+    use crate::media::id::AbsolutePath;
 
     fn img(w: u32, h: u32) -> DynamicImage {
         DynamicImage::new_rgb8(w, h)
@@ -160,5 +163,41 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left, ["keep.txt"]);
+    }
+
+    fn local(name: &str) -> (MediaId, CoverSource) {
+        let path = AbsolutePath::new(format!("/{name}").into()).unwrap();
+        (MediaId::LocalFile(path.clone()), CoverSource::Local(path))
+    }
+
+    #[test]
+    fn a_stale_result_never_becomes_the_cover() {
+        let (release_a, held) = crossbeam_channel::bounded::<()>(0);
+        let (started_tx, started) = crossbeam_channel::bounded::<()>(1);
+        let loader: CoverLoader = Arc::new(move |source| match source {
+            CoverSource::Local(p) if p.as_str().ends_with("/a") => {
+                let _ = started_tx.send(());
+                let _ = held.recv();
+                Ok(img(1, 1))
+            }
+            _ => Ok(img(2, 2)),
+        });
+        let mut fetcher = CoverFetcher::new(loader);
+        let (a, a_source) = local("a");
+        let (b, b_source) = local("b");
+        fetcher.want(Some((a.clone(), a_source)));
+        started.recv().unwrap(); // A's job is now in flight, blocked.
+        fetcher.want(Some((b.clone(), b_source)));
+        drop(release_a);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fetcher.cover_for(&b).is_none() {
+            assert!(Instant::now() < deadline, "B's cover never arrived");
+            fetcher.poll();
+            assert!(fetcher.cover_for(&a).is_none(), "A's cover leaked");
+            std::thread::yield_now();
+        }
+        let image = fetcher.cover_for(&b).unwrap();
+        assert_eq!((image.0.width(), image.0.height()), (2, 2));
+        assert!(fetcher.cover_for(&a).is_none());
     }
 }

@@ -287,20 +287,26 @@ fn a_late_cover_does_not_attach_to_the_next_track() {
     enqueue(
         &mut rig.runtime,
         vec![
-            EnqueueItem::Path(a.to_str().unwrap().into()),
+            EnqueueItem::Path(a.clone()),
             EnqueueItem::Path(SHORT.into()),
         ],
     );
     let rows = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(rows[0]));
+    pump_until(&mut rig, "A's cover", |_| has_cover(&remote));
     rig.runtime.handle(AppCommand::PlayEntry(rows[1]));
-    pump_until(&mut rig, "B playing", playing);
+    let b = MediaId::LocalFile(tenuto::media::id::AbsolutePath::new(SHORT.into()).unwrap());
+    pump_until(&mut rig, "B's snapshot", |_| {
+        remote
+            .snapshots
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.track.as_ref())
+            .is_some_and(|t| t.media == b)
+    });
     pump_for(&mut rig, Duration::from_secs(1));
     let snap = remote.snapshots.borrow().clone().unwrap();
-    assert!(
-        snap.track
-            .is_some_and(|t| t.media.to_string().contains("sine.flac"))
-    );
+    assert_eq!(snap.track.map(|t| t.media), Some(b));
     assert!(snap.cover.is_none());
     let _ = rig.runtime.shutdown();
 }
