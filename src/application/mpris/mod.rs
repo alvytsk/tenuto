@@ -342,6 +342,10 @@ mod tests {
     fn command_volume_rejects_nan_and_clamps() {
         assert!(command(Request::SetVolume(f64::NAN), Volume::FULL).is_none());
         assert!(command(Request::SetVolume(1.5), Volume::FULL).is_none());
+        match command(Request::SetVolume(-1.0), Volume::new(0.5)) {
+            Some(AppCommand::AdjustVolume(d)) => assert_eq!(d, -0.5),
+            other => panic!("{other:?}"),
+        }
         match command(Request::SetVolume(0.25), Volume::new(0.75)) {
             Some(AppCommand::AdjustVolume(d)) => assert_eq!(d, -0.5),
             other => panic!("{other:?}"),
@@ -399,6 +403,26 @@ mod tests {
             vec![Change::Volume]
         );
         assert!(p.apply(snap(None, Status::Stopped, 1.0)).is_empty());
+    }
+
+    #[test]
+    fn status_only_change_reports_playback_status() {
+        let mut p = Published::default();
+        p.apply(snap(None, Status::Playing, 1.0));
+        assert_eq!(
+            p.apply(snap(None, Status::Paused, 1.0)),
+            vec![Change::PlaybackStatus]
+        );
+    }
+
+    #[test]
+    fn volume_only_change_reports_volume() {
+        let mut p = Published::default();
+        p.apply(snap(None, Status::Playing, 1.0));
+        assert_eq!(
+            p.apply(snap(None, Status::Playing, 0.5)),
+            vec![Change::Volume]
+        );
     }
 
     #[test]
