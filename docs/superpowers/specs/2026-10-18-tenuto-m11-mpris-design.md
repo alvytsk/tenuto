@@ -192,7 +192,7 @@ Approved in conversation after the first six tasks landed. It replaces the §2 n
 
 ### 10.1 What the widget gets
 
-- `mpris:artUrl` is a `file://` URL to a PNG that tenuto writes into its own cache directory, `<XDG cache>/tenuto/mpris/cover-<n>.png`. That cache path is the only path that goes on the bus.
+- `mpris:artUrl` is a `file://` URL to a PNG that tenuto writes into its own cache directory, `<XDG cache>/tenuto/mpris/cover-<pid>-<n>.png`. That cache path is the only path that goes on the bus.
 - A remote cover URL (podcast feed art, a station logo) never goes on the bus. It can carry a token, and the bar would then fetch it on its own.
 - A music file's path never goes on the bus either. Embedded and sibling covers are copied into the cache.
 - With no cover, there is no `artUrl`. The TUI's built-in placeholder picture is not used.
@@ -213,9 +213,9 @@ The same sources and gates the TUI uses (`PlayerRuntime::active_cover`, `cover_f
   - The runtime asks for a cover only when the playing media, its load or the HTTP gate changes, never per pass. `active_cover` reads store files.
   - **Known cost:** in `tui`, a podcast's or station's remote cover is fetched twice, once for the terminal and once for the widget. It is marked with a `ponytail:` comment, to be shared if it matters.
 - **Writing:** the bus thread writes the file, never the main thread.
-  - It shrinks the image to at most 512 px on the long edge, keeping the aspect ratio, encodes a PNG, writes `cover-<n>.png.tmp` and renames it to `cover-<n>.png`.
-  - `<n>` is new for every cover, so bars that cache by URL refresh. The previous file is deleted.
-  - The thread empties its `cover-*` files at startup.
+  - It shrinks the image to at most 512 px on the long edge, keeping the aspect ratio, encodes a PNG, writes `cover-<pid>-<n>.png.tmp` and renames it to `cover-<pid>-<n>.png`.
+  - `<pid>-<n>` is new for every cover and every run, so bars that cache by URL refresh. The previous file is deleted.
+  - At startup the thread removes `cover-*` files of its own pid and of processes that no longer exist (Linux checks `/proc/<pid>`); a live instance's files stay.
   - A failed write is logged at `debug` and leaves no `artUrl`.
 - **Track id:** a cover that arrives after the title republishes `Metadata` with the same `trackid`.
 - **Change detection:** a cover is compared by identity (`Arc` pointer), never by pixels.

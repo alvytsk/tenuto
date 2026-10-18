@@ -80,6 +80,24 @@ impl CoverFetcher {
     }
 }
 
+/// Wraps `inner` so the worker shrinks a decoded cover to `COVER_EDGE` at
+/// once: the fetcher then keeps a small image, and the resize runs off the
+/// bus thread.
+pub fn shrink_loader(inner: CoverLoader) -> CoverLoader {
+    Arc::new(move |source| {
+        let image = inner(source)?;
+        Ok(
+            if image.width() > COVER_EDGE || image.height() > COVER_EDGE {
+                image.thumbnail(COVER_EDGE, COVER_EDGE)
+            } else {
+                image
+            },
+        )
+    })
+}
+
+/// Writes `cover-<pid>-<seq>.png`: the pid keeps URLs distinct between runs
+/// and keeps two instances sharing a cache folder apart.
 pub fn write_cover(dir: &Path, seq: u64, image: &DynamicImage) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let small;
@@ -93,28 +111,41 @@ pub fn write_cover(dir: &Path, seq: u64, image: &DynamicImage) -> io::Result<Pat
     image
         .write_to(&mut png, ImageFormat::Png)
         .map_err(io::Error::other)?;
-    let path = dir.join(format!("cover-{seq}.png"));
-    let tmp = dir.join(format!("cover-{seq}.png.tmp"));
+    let pid = std::process::id();
+    let path = dir.join(format!("cover-{pid}-{seq}.png"));
+    let tmp = dir.join(format!("cover-{pid}-{seq}.png.tmp"));
     std::fs::write(&tmp, png.into_inner())?;
     std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
 
-// ponytail: two processes with different XDG_STATE_HOME but the same
-// XDG_CACHE_HOME share this folder, overwrite cover-<n>.png and clear each
-// other's files at startup. Upgrade: cover-<pid>-<n>.png, with clearing that
-// skips live pids.
+/// Removes cover files left by earlier runs: ours, and those of processes
+/// that no longer exist. A live process's files stay. Names without a pid
+/// (the pre-pid format) go too.
 pub fn clear_covers(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let own = std::process::id();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("cover-") && (name.ends_with(".png") || name.ends_with(".png.tmp")) {
+        let Some(rest) = name.strip_prefix("cover-") else {
+            continue;
+        };
+        if !(name.ends_with(".png") || name.ends_with(".png.tmp")) {
+            continue;
+        }
+        let pid = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+        if pid.is_none_or(|pid| pid == own || !process_alive(pid)) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Off Linux there is no `/proc`: "can't tell" counts as not alive.
+fn process_alive(pid: u32) -> bool {
+    cfg!(target_os = "linux") && Path::new(&format!("/proc/{pid}")).exists()
 }
 
 #[cfg(test)]
@@ -169,6 +200,50 @@ mod tests {
         assert_eq!(left, ["keep.txt"]);
     }
 
+    #[test]
+    fn cover_files_carry_the_pid_so_urls_differ_between_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_cover(dir.path(), 1, &img(4, 4)).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, format!("cover-{}-1.png", std::process::id()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clear_covers_spares_a_live_process_and_removes_dead_and_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = std::process::id();
+        // Pid 1 is alive; u32::MAX is never a pid.
+        let names = [
+            "cover-1-1.png".to_string(),
+            "cover-1-2.png.tmp".to_string(),
+            format!("cover-{}-1.png", u32::MAX),
+            format!("cover-{own}-7.png"),
+            "keep.txt".to_string(),
+        ];
+        for name in &names {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        clear_covers(dir.path());
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["cover-1-1.png", "cover-1-2.png.tmp", "keep.txt"]);
+    }
+
+    #[test]
+    fn the_shrinking_loader_caps_the_long_edge() {
+        let big: CoverLoader = Arc::new(|_| Ok(img(3000, 2000)));
+        let small: CoverLoader = Arc::new(|_| Ok(img(100, 80)));
+        let source = local("x").1;
+        let out = shrink_loader(big)(&source).unwrap();
+        assert_eq!((out.width(), out.height()), (512, 341));
+        let out = shrink_loader(small)(&source).unwrap();
+        assert_eq!((out.width(), out.height()), (100, 80));
+    }
+
     fn local(name: &str) -> (MediaId, CoverSource) {
         let path = AbsolutePath::new(format!("/{name}").into()).unwrap();
         (MediaId::LocalFile(path.clone()), CoverSource::Local(path))
@@ -190,7 +265,9 @@ mod tests {
         let (a, a_source) = local("a");
         let (b, b_source) = local("b");
         fetcher.want(Some((a.clone(), a_source)));
-        started.recv().unwrap(); // A's job is now in flight, blocked.
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("A's job never started"); // A's job is now in flight, blocked.
         fetcher.want(Some((b.clone(), b_source)));
         drop(release_a);
         let deadline = Instant::now() + Duration::from_secs(10);

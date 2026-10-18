@@ -216,6 +216,17 @@ fn png_bytes() -> Vec<u8> {
     bytes
 }
 
+fn png_of(w: u32, h: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(w, h))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap_or_else(|e| panic!("encode: {e}"));
+    bytes
+}
+
 fn has_cover(remote: &tenuto::application::mpris::Remote) -> bool {
     remote
         .snapshots
@@ -266,6 +277,21 @@ fn a_detached_track_with_an_embedded_picture_publishes_a_cover() {
 }
 
 #[test]
+fn a_large_embedded_cover_reaches_the_snapshot_shrunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = png_of(3000, 2000);
+    let path = tagged_flac::tagged_flac(dir.path(), "Song", "Band", "Album", Some(&big));
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    play_path(&mut rig, &path);
+    pump_until(&mut rig, "cover", |_| has_cover(&remote));
+    let cover = remote.snapshots.borrow().clone().unwrap().cover.unwrap();
+    assert!(cover.0.width().max(cover.0.height()) <= 512, "{cover:?}");
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
 fn an_untagged_track_publishes_no_cover() {
     let mut rig = rig_with(PersistedState::default());
     let (controls, remote) = channel();
@@ -278,7 +304,7 @@ fn an_untagged_track_publishes_no_cover() {
 }
 
 #[test]
-fn a_late_cover_does_not_attach_to_the_next_track() {
+fn the_previous_cover_is_dropped_on_track_change() {
     let dir = tempfile::tempdir().unwrap();
     let a = tagged_flac::tagged_flac(dir.path(), "A", "Band", "Album", Some(&png_bytes()));
     let mut rig = rig_with(PersistedState::default());

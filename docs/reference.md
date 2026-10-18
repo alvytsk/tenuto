@@ -309,12 +309,13 @@ terminal cover:
 sibling) and the embedded front cover of a loaded stream.
 
 The cover reaches the bar as a PNG, at most 512 px on the long edge, that
-tenuto writes to `<XDG cache>/tenuto/mpris/cover-<n>.png` (`~/.cache/tenuto/mpris/`
-by default). Only that path goes on the bus: a remote cover URL and a music
-file's own path never do. The file is replaced as the cover changes, and the
-directory's `cover-*` files are removed at startup, and the last cover is
-removed on exit when possible. Without a
-cover, or when the file cannot be written, the widget shows none.
+tenuto writes to `<XDG cache>/tenuto/mpris/cover-<pid>-<n>.png`
+(`~/.cache/tenuto/mpris/` by default). Only that path goes on the bus: a
+remote cover URL and a music file's own path never do. The file is replaced
+as the cover changes. At startup tenuto removes the `cover-*` files of earlier
+runs (those of a still-running tenuto stay), and the last cover is removed on
+exit when possible. Without a cover, or when the file cannot be written, the
+widget shows none.
 
 `TENUTO_MPRIS=off` turns media controls off. Other systems have none.
 
@@ -329,6 +330,7 @@ cover, or when the file cannot be written, the widget shows none.
 | `$XDG_DATA_HOME/tenuto/subscriptions.lock` | The subscription writer lock |
 | `$XDG_DATA_HOME/tenuto/stations.json` | Saved radio stations. Durable user data |
 | `$XDG_CACHE_HOME/tenuto/feeds/<feed-id>.json` | Cached episodes. Refetchable |
+| `$XDG_CACHE_HOME/tenuto/mpris/cover-<pid>-<n>.png` | The cover shown by desktop media controls. Disposable |
 
 On macOS these resolve to the platform's own data, cache and local-data directories. The cache and the logs are disposable. Subscriptions and checkpoints are not.
 

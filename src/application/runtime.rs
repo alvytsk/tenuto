@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
-use crate::application::mpris::cover::CoverFetcher;
+use crate::application::mpris::cover::{CoverFetcher, shrink_loader};
 use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
@@ -481,7 +481,10 @@ impl PlayerRuntime {
     /// Serves desktop media controls: requests are drained and a snapshot
     /// is published on every [`pump`](Self::pump).
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
-        self.media_controls = Some((controls, CoverFetcher::new(default_loader(TestHook::None))));
+        self.media_controls = Some((
+            controls,
+            CoverFetcher::new(shrink_loader(default_loader(TestHook::None))),
+        ));
         self.cover_wanted_key = None;
     }
 
@@ -777,6 +780,7 @@ impl PlayerRuntime {
         }
         let podcast = self.podcast_name.as_ref().and_then(|(_, n)| n.as_deref());
         let mut snap = snapshot(&self.view(), media.as_ref(), podcast);
+        // Mirrors `cover_key()`, widened for detached media: change both together.
         let key = (
             media.clone(),
             self.mirror.as_ref().map(|m| m.load),

@@ -158,6 +158,7 @@ impl Published {
     }
 
     /// Reports each change of the snapshot's cover once; `seq` counts covers.
+    /// Call it after every `apply`, or a cover change is merged into the next.
     pub fn take_cover_update(&mut self) -> CoverUpdate {
         let now = self.last.as_ref().and_then(|s| s.cover.clone());
         if now == self.cover_taken {
