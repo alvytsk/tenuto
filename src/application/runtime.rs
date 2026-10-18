@@ -175,6 +175,8 @@ impl EnqueueItem {
 #[derive(Clone, Debug)]
 pub enum AppCommand {
     PlayPause,
+    /// Pause only: never resumes, whatever the view says (MPRIS `Pause`).
+    Pause,
     Play,
     PlayEntry(QueueEntryId),
     Stop,
@@ -630,6 +632,7 @@ impl PlayerRuntime {
     pub fn handle(&mut self, command: AppCommand) {
         match command {
             AppCommand::PlayPause => self.transport(TransportInput::Space, None),
+            AppCommand::Pause => self.route(PlaybackCommand::Pause),
             AppCommand::Play => self.transport(TransportInput::Play, None),
             AppCommand::PlayEntry(id) => self.transport(TransportInput::Enter, Some(id)),
             AppCommand::SeekBy(step) => self.transport(TransportInput::SeekBy(step), None),
