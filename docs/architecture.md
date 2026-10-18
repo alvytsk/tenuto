@@ -196,6 +196,7 @@ flowchart TB
 | `library` | The application seam for feeds and stations: `list_feeds`, `list_episodes`, `resolve_episode`, `subscribe`, `unsubscribe`, `refresh`, `refresh_all`, and since M7.1 `list_stations`, `add_station`, `remove_station`, `reprobe_station`. Async where the network is involved. | Print, `block_on`, open a device or a terminal |
 | `application::feed_ops` | The one dispatch for feed and station mutations, shared by the CLI and the browse worker: the report text and a complete-or-incomplete outcome. Owns `wait_http`, the synchronous bridge into the Tokio runtime. | Format listing columns, print, or decide exit codes |
 | `application::runtime` | One owner for the engine, `Session`, the writer, the `HttpService` and the workers, for both front ends. Driven by `AppCommand` values, plus `play_detached` for media played outside every playlist (M9.3). Pumped once per front-end iteration. `application::profile::open_state` opens `state.json` into its `Session` and writer. | Read a key or draw a frame |
+| `application::mpris` | Map `PlayerView` to MPRIS metadata, status, volume and shuffle, and MPRIS requests to `AppCommand`s. The runtime hands it a snapshot each pass and drains its requests (M11). Linux only; `TENUTO_MPRIS=off` disables it. | Touch the engine, or block the main thread |
 | `session` | Decide what to checkpoint and when. Allocate and track `LoadRequestId` tokens. Build every state snapshot. | Perform I/O or own a thread |
 | `playlist` (`PlaylistSet`, `Playlist`, `Queue`), `resume` | `PlaylistSet` owns every playlist rule: global entry and playlist IDs, the entry cap, cursors, `playing`, shuffle and its pin, the successor on delete, and recovery of stored playlists. `resume` is the resume decision from a position and a completion flag, and holds `PlaybackCheckpoint`, the logical resume position. `resume` owns the fresh-load resume intent (`resume_intent`), from the stored progress `session` hands it. | Import persistence. Hand out mutable access to a queue, playlist or entry |
 | `playback` | The decode worker, the CPAL stream's whole lifecycle, position accounting, the command and event protocol, the spectrum tap and worker. | Depend on persistence or block on Tokio |
@@ -232,15 +233,18 @@ Each thread has strict ownership. The names below are the OS thread names.
 | Metadata workers | `tenuto-metadata-1`, `-2` | Tag probes for untitled local queue entries, each inside `run_contained` | Touch `Session`, the terminal or the network |
 | Artwork worker | `tenuto-artwork` | One latest-wins slot: resolve and decode the active entry's cover within 10 MiB encoded and 16 million pixels, inside `run_contained` | Encode for the terminal or open its own connection |
 | Spectrum worker | `tenuto-spectrum` | Read the output taps, run the 2048-sample Hann FFT, publish at most 20 frames per second into a latest-value slot | Block or allocate on the callback's behalf. Catch its own panics |
+| MPRIS thread | `tenuto-mpris` | The session-bus connection and its own current-thread Tokio runtime. Publishes the latest snapshot and queues requests for the runtime. Writes each new cover as a PNG in `<XDG cache>/tenuto/mpris/` and publishes it as `mpris:artUrl`, never holding the snapshot lock during the write | Call into the runtime or `Session` |
+| Media-controls cover worker | `tenuto-artwork` | The runtime's `CoverFetcher` owns a second `ArtworkWorker`, separate from the TUI's, with the same name: resolve and decode the playing cover for the snapshot, latest-wins | Encode, write files or touch the bus |
 | Browse worker | `tenuto-browse` | One request at a time: a directory level, the subscription list, one feed's cached episodes, and since M6 the subscribe, refresh and unsubscribe mutations through `library` | Recurse into a library or touch `Session` |
 
-The Tokio runtime exists only when the source is an HTTP URL. A local-file session runs with no Tokio runtime at all.
+Tokio exists for HTTP sources, and on Linux for `tenuto-mpris`, which builds its own current-thread runtime. A local-file session without a desktop bus runs no Tokio runtime on the playback path.
 
-Three contexts block on the Tokio runtime, and no others do:
+Four contexts block on a Tokio runtime, and no others do:
 
 - the main thread of a feed command, through `application::feed_ops::wait_http`;
 - `tenuto-browse`, through the same helper, for the browser's subscription and station mutations;
-- `tenuto-artwork`, which fetches a remote cover with its own `block_on`.
+- `tenuto-artwork`, which fetches a remote cover with its own `block_on`;
+- `tenuto-mpris`, which `block_on`s its own current-thread runtime (Linux).
 
 The decode thread never blocks on the runtime: `HttpMediaSource` waits on `ByteChannel`, not on a future. Neither does the main thread under `tui` or `play`.
 
@@ -520,7 +524,7 @@ flowchart TB
             inputT["tenuto-input"]
             decodeT["tenuto-decode"]
             cb["CPAL callback"]
-            tokioT["Tokio worker (HTTP only)"]
+            tokioT["Tokio worker (HTTP only)<br/>tenuto-mpris: own runtime"]
             stateT["tenuto-state"]
             sigT["tenuto-signal-listener"]
             bg["tenuto-browse<br/>tenuto-artwork<br/>tenuto-metadata-1, -2<br/>tenuto-spectrum"]
@@ -553,7 +557,7 @@ Build requirements:
 | Lock file | `Cargo.lock` is committed. Every command runs with `--locked` |
 | Gates | `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, `cargo test --locked` on Linux, and on macOS as a non-blocking leg, `cargo doc --locked --no-deps` with `RUSTDOCFLAGS=-D warnings`, `cargo publish --dry-run --locked`, the Linux package build on Ubuntu 22.04 with installation and smoke tests of the .deb and the tarball on Debian 12 and 13 and Ubuntu 22.04, 24.04 and 26.04 (`.github/workflows/package.yml`), and `scripts/release/test.sh` plus a live `gh` rehearsal-lookup probe against this repository (`release-scripts` in `ci.yml`) |
 
-Key dependencies: Symphonia for demux and decode, CPAL for output, rtrb for the callback ring, rubato for resampling, crossbeam-channel for the protocol, Tokio and reqwest with rustls for HTTP, quick-xml for feeds, Ratatui and crossterm for the terminal, ratatui-image and image for cover art, rustfft for the spectrum.
+Key dependencies: Symphonia for demux and decode, CPAL for output, rtrb for the callback ring, rubato for resampling, crossbeam-channel for the protocol, Tokio and reqwest with rustls for HTTP, mpris-server (zbus) for the Linux media controls, quick-xml for feeds, Ratatui and crossterm for the terminal, ratatui-image and image for cover art, rustfft for the spectrum.
 
 The crate ships to crates.io as `tenuto`, the same name as the published
 binary and the library target. The package excludes `/tests`, `/docs` and

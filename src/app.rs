@@ -10,6 +10,7 @@ use crossterm::style::Print;
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{cursor, execute};
 
+use crate::application::mpris::FailureLog;
 use crate::application::profile::{OpenedState, open_state};
 use crate::application::runtime::{AppCommand, FlushReport, PlayerRuntime, RuntimeParts};
 use crate::application::source::resolve_source;
@@ -204,6 +205,7 @@ fn run_resolved_locked(
         hook: TestHook::None,
     });
     runtime.play_detached(media, location);
+    runtime.enable_media_controls(FailureLog::Debug);
     // A load that failed before it reached the engine (the HTTP service
     // would not start, say) is reported now, before the terminal goes raw and
     // before `Loading` is printed.

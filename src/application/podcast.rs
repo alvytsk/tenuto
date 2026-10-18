@@ -42,6 +42,25 @@ pub fn podcast_artwork(
     episode.image.clone().or(cached.image)
 }
 
+/// The podcast an episode belongs to: the subscription's title, else the
+/// cached feed's. `None` for a non-podcast or when neither is readable.
+pub fn podcast_name(
+    subs: &SubscriptionStore,
+    cache: &CacheStore,
+    media: &MediaId,
+) -> Option<String> {
+    let feed = media.feed()?;
+    let snapshot = subs.read_snapshot().ok()?;
+    let subscription = snapshot
+        .subscriptions
+        .iter()
+        .find(|subscription| &subscription.feed_id == feed)?;
+    subscription
+        .title
+        .clone()
+        .or_else(|| cache.read(subscription).ok()?.title)
+}
+
 /// The outcome of [`resolve_podcast`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum PodcastResolution {

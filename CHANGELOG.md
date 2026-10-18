@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Desktop media controls on Linux: `tui` and `play` appear in the desktop's
+  MPRIS media widget with the track's title, artist and length. Play, pause,
+  stop, next, previous, shuffle, seek and volume work from the widget.
+  `TENUTO_MPRIS=off` turns it off.
+  The widget also shows the cover (embedded or sibling picture, podcast
+  image, station logo), written as `cover-<pid>-<n>.png` under
+  `<XDG cache>/tenuto/mpris/`.
+
+### Changed
+
+- `tenuto play` shows a title tag, when the file or stream has one, instead
+  of the file name, for local files and remote non-podcast media. The
+  artist tag reaches only the desktop media widget; `play`'s status row
+  shows the title alone.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added

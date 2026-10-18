@@ -278,6 +278,52 @@ An item with a GUID keeps its position when the show moves its audio to another 
 - An item with no GUID, no enclosure and no link has no identity and is skipped and counted.
 - An item with an identity but no usable enclosure is kept and listed with `AUDIO: none`.
 
+## Desktop media controls
+
+On Linux, `tui` and `play` register as an MPRIS player on the session bus, so
+a desktop widget or media keys can see what plays. The widget shows:
+
+| Media | Title | Artist |
+|---|---|---|
+| Local file | tag title, else file name | tag artist |
+| Podcast episode | episode title | podcast name in `tui`; else the tag artist, if any |
+| Radio station | station name in `tui`, the URL's last segment in `play` | none |
+
+The length shows for finite media with a known duration. Play, pause,
+play/pause, stop, volume, next, previous and shuffle work as their keys do in
+`tui`: next and previous step through the playing playlist, shuffle toggles
+it (`play` has no playlist, so they do nothing there). Seeking, relative or
+to a position, works for media with a known length and is rounded to whole
+seconds; live streams offer none. Repeat is not offered: tenuto has no repeat
+mode.
+The widget entry goes away when tenuto quits. A missing or unresponsive bus
+never delays startup. A missing bus, or one that refuses the connection,
+makes `tui` log one warning (`play` stays silent); a hung bus logs nothing
+and the media-controls thread just waits.
+
+The widget also shows the cover, taken from the same places as the
+terminal cover:
+
+- a music file's embedded picture, else a `cover.jpg`, `cover.png`,
+  `folder.jpg` or `folder.png` beside it;
+- a podcast episode's or feed's image, once playback has started (a restored,
+  unplayed entry fetches nothing);
+- a station's saved logo (SVG is rasterized).
+
+`play` has no library, so it shows covers for music files only (embedded or
+sibling) and the embedded front cover of a loaded stream.
+
+The cover reaches the bar as a PNG, at most 512 px on the long edge, that
+tenuto writes to `<XDG cache>/tenuto/mpris/cover-<pid>-<n>.png`
+(`~/.cache/tenuto/mpris/` by default). Only that path goes on the bus: a
+remote cover URL and a music file's own path never do. The file is replaced
+as the cover changes. At startup tenuto removes the `cover-*` files of earlier
+runs (those of a still-running tenuto stay), and the last cover is removed on
+exit when possible. Without a cover, or when the file cannot be written, the
+widget shows none.
+
+`TENUTO_MPRIS=off` turns media controls off. Other systems have none.
+
 ## Files and state
 
 | Location | Contents |
@@ -289,6 +335,7 @@ An item with a GUID keeps its position when the show moves its audio to another 
 | `$XDG_DATA_HOME/tenuto/subscriptions.lock` | The subscription writer lock |
 | `$XDG_DATA_HOME/tenuto/stations.json` | Saved radio stations. Durable user data |
 | `$XDG_CACHE_HOME/tenuto/feeds/<feed-id>.json` | Cached episodes. Refetchable |
+| `$XDG_CACHE_HOME/tenuto/mpris/cover-<pid>-<n>.png` | The cover shown by desktop media controls. Disposable |
 
 On macOS these resolve to the platform's own data, cache and local-data directories. The cache and the logs are disposable. Subscriptions and checkpoints are not.
 

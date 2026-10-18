@@ -9,6 +9,7 @@
 pub mod browse;
 pub mod enrich;
 pub mod feed_ops;
+pub mod mpris;
 pub mod podcast;
 pub mod profile;
 pub mod runtime;

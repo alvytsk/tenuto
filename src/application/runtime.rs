@@ -15,8 +15,10 @@ use url::Url;
 
 use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
+use crate::application::mpris::cover::{CoverFetcher, shrink_loader};
+use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
 use crate::application::podcast::{
-    PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, resolve_podcast,
+    PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
 };
 use crate::application::seek::KeyRouter;
 use crate::application::source::{is_url_spelling, resolve_path, resolve_source};
@@ -24,11 +26,11 @@ use crate::application::transport::{
     PlaybackPhase, TransportDecision, TransportInput, TransportSituation, decide, decide_detached,
 };
 use crate::application::view::{
-    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, playlist_tabs,
+    NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, filled, playlist_tabs,
     queue_rows, saved_history,
 };
 use crate::artwork::default::CoverKind;
-use crate::artwork::worker::CoverSource;
+use crate::artwork::worker::{CoverSource, default_loader};
 use crate::clock::{Clock, SystemClock};
 use crate::feed::cache::CacheStore;
 use crate::feed::error::FeedError;
@@ -175,6 +177,8 @@ impl EnqueueItem {
 #[derive(Clone, Debug)]
 pub enum AppCommand {
     PlayPause,
+    /// Pause only: never resumes, whatever the view says (MPRIS `Pause`).
+    Pause,
     Play,
     PlayEntry(QueueEntryId),
     Stop,
@@ -281,6 +285,8 @@ struct Mirror {
     front_cover: Option<Arc<CoverBytes>>,
     /// The decoder's title; a detached podcast episode is named by it.
     title: Option<String>,
+    /// The decoder's artist tag.
+    artist: Option<String>,
     duration: Option<Duration>,
     duration_provenance: PositionProvenance,
     capabilities: MediaCapabilities,
@@ -311,6 +317,7 @@ impl Mirror {
             media: media.clone(),
             front_cover: metadata.front_cover.clone(),
             title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
             duration: metadata.duration,
             duration_provenance: metadata.duration_provenance,
             capabilities: *capabilities,
@@ -412,6 +419,15 @@ pub struct PlayerRuntime {
     /// `Session::state_edits` and the playlist they were built from, so a
     /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
     rows: Cell<Option<CachedRows>>,
+    /// The runtime half of the desktop media-controls channel (M11).
+    /// The controls with the fetcher of the cover they publish, so the
+    /// fetcher cannot outlive them.
+    media_controls: Option<(MediaControls, CoverFetcher)>,
+    /// What `covers` was last asked for: the playing media, `mirror.load`
+    /// and whether HTTP is available. Compared before any store read.
+    cover_wanted_key: Option<(Option<MediaId>, Option<LoadRequestId>, bool)>,
+    /// The podcast name of the playing media, looked up once per change.
+    podcast_name: Option<(MediaId, Option<String>)>,
 }
 
 /// `(state_edits, viewed, rows)`; see [`PlayerRuntime`]'s `rows`.
@@ -456,6 +472,29 @@ impl PlayerRuntime {
             restored,
             viewed,
             rows: Cell::new(None),
+            media_controls: None,
+            cover_wanted_key: None,
+            podcast_name: None,
+        }
+    }
+
+    /// Serves desktop media controls: requests are drained and a snapshot
+    /// is published on every [`pump`](Self::pump).
+    pub fn attach_media_controls(&mut self, controls: MediaControls) {
+        self.media_controls = Some((
+            controls,
+            CoverFetcher::new(shrink_loader(default_loader(TestHook::None))),
+        ));
+        self.cover_wanted_key = None;
+    }
+
+    /// Turns desktop media controls on. The bus connects on its own thread,
+    /// so this never blocks; nothing happens when the controls are off.
+    pub fn enable_media_controls(&mut self, failure: FailureLog) {
+        let cover_dir =
+            directories::ProjectDirs::from("", "", "tenuto").map(|d| d.cache_dir().join("mpris"));
+        if let Some(controls) = spawn(failure, cover_dir) {
+            self.attach_media_controls(controls);
         }
     }
 
@@ -630,6 +669,7 @@ impl PlayerRuntime {
     pub fn handle(&mut self, command: AppCommand) {
         match command {
             AppCommand::PlayPause => self.transport(TransportInput::Space, None),
+            AppCommand::Pause => self.route(PlaybackCommand::Pause),
             AppCommand::Play => self.transport(TransportInput::Play, None),
             AppCommand::PlayEntry(id) => self.transport(TransportInput::Enter, Some(id)),
             AppCommand::SeekBy(step) => self.transport(TransportInput::SeekBy(step), None),
@@ -687,6 +727,77 @@ impl PlayerRuntime {
     /// One iteration: apply finished metadata enrichment, drain engine
     /// events, act on what they asked for, then sample progress.
     pub fn pump(&mut self) {
+        let requests: Vec<_> = self
+            .media_controls
+            .iter()
+            .flat_map(|(controls, _)| std::iter::from_fn(|| controls.try_recv()))
+            .collect();
+        for request in requests {
+            if let Some(cmd) = command(request, &self.view()) {
+                self.handle(cmd);
+            }
+        }
+        self.pump_engine();
+        self.publish_snapshot();
+    }
+
+    /// The cover source of what is playing, detached media included.
+    fn playing_cover(&self) -> Option<(MediaId, CoverSource)> {
+        let Some(media) = &self.detached else {
+            return self.active_cover();
+        };
+        let source = match media {
+            MediaId::LocalFile(path) => CoverSource::Local(path.clone()),
+            _ => {
+                let mirror = self.mirror.as_ref().filter(|m| &m.media == media)?;
+                CoverSource::Embedded(Arc::clone(mirror.front_cover.as_ref()?))
+            }
+        };
+        Some((media.clone(), source))
+    }
+
+    fn publish_snapshot(&mut self) {
+        // Taken out so `playing_cover(&self)` can run beside the fetcher.
+        let Some((controls, mut covers)) = self.media_controls.take() else {
+            return;
+        };
+        if controls.is_closed() {
+            // Dropped once the bus thread has exited (no bus, lost connection).
+            self.cover_wanted_key = None;
+            return;
+        }
+        let media = match &self.detached {
+            Some(media) => Some(media.clone()),
+            None => self.active_entry().map(|entry| entry.media().clone()),
+        };
+        if self.podcast_name.as_ref().map(|(m, _)| m) != media.as_ref() {
+            self.podcast_name = media.clone().map(|media| {
+                let name = self.library.as_ref().and_then(|library| {
+                    podcast_name(&library.subscriptions, &library.cache, &media)
+                });
+                (media, name)
+            });
+        }
+        let podcast = self.podcast_name.as_ref().and_then(|(_, n)| n.as_deref());
+        let mut snap = snapshot(&self.view(), media.as_ref(), podcast);
+        // Mirrors `cover_key()`, widened for detached media: change both together.
+        let key = (
+            media.clone(),
+            self.mirror.as_ref().map(|m| m.load),
+            self.http.is_some(),
+        );
+        if self.cover_wanted_key.as_ref() != Some(&key) {
+            let wanted = self.playing_cover();
+            covers.want(wanted);
+            self.cover_wanted_key = Some(key);
+        }
+        covers.poll();
+        snap.cover = media.and_then(|m| covers.cover_for(&m));
+        controls.publish(snap);
+        self.media_controls = Some((controls, covers));
+    }
+
+    fn pump_engine(&mut self) {
         // The restored queue is offered on the first pass rather than in
         // `new`: a front end builds the runtime before it is ready to run
         // (the terminal player, before entering the terminal), and no worker
@@ -785,6 +896,10 @@ impl PlayerRuntime {
 
     /// Stops the engine, reconciles what it never delivered, and flushes.
     pub fn shutdown(mut self) -> FlushReport {
+        // Drop the controls first: the mpris thread then cleans up its cover
+        // file while the engine shuts down and the state flushes.
+        self.media_controls.take();
+        self.cover_wanted_key = None;
         self.router.cancel();
         // Cancelled, not joined: see `MetadataWorkers::spawn`.
         if let Some(workers) = self.metadata.take() {
@@ -1587,10 +1702,12 @@ impl PlayerRuntime {
             MediaId::PodcastEpisode { .. } => {
                 episode_name(mirror.and_then(|mirror| mirror.title.as_deref()))
             }
-            other => display_name(other),
+            other => filled(mirror.and_then(|mirror| mirror.title.as_deref()))
+                .map_or_else(|| display_name(other), str::to_owned),
         };
         let unloaded = NowPlaying {
             title: displayable(&title),
+            artist: filled(mirror.and_then(|mirror| mirror.artist.as_deref())).map(displayable),
             saved: saved_history(self.session.state().entry_for(media)),
             ..NowPlaying::unloaded()
         };
