@@ -312,7 +312,8 @@ The cover reaches the bar as a PNG, at most 512 px on the long edge, that
 tenuto writes to `<XDG cache>/tenuto/mpris/cover-<n>.png` (`~/.cache/tenuto/mpris/`
 by default). Only that path goes on the bus: a remote cover URL and a music
 file's own path never do. The file is replaced as the cover changes, and the
-directory's `cover-*` files are removed at startup and on exit. Without a
+directory's `cover-*` files are removed at startup, and the last cover is
+removed on exit when possible. Without a
 cover, or when the file cannot be written, the widget shows none.
 
 `TENUTO_MPRIS=off` turns media controls off. Other systems have none.

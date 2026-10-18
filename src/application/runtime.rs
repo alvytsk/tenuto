@@ -892,6 +892,10 @@ impl PlayerRuntime {
 
     /// Stops the engine, reconciles what it never delivered, and flushes.
     pub fn shutdown(mut self) -> FlushReport {
+        // Drop the controls first: the mpris thread then cleans up its cover
+        // file while the engine shuts down and the state flushes.
+        self.media_controls.take();
+        self.cover_wanted_key = None;
         self.router.cancel();
         // Cancelled, not joined: see `MetadataWorkers::spawn`.
         if let Some(workers) = self.metadata.take() {

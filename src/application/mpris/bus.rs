@@ -82,7 +82,7 @@ async fn run(mut remote: Remote, failure: FailureLog, cover_dir: Option<PathBuf>
         };
         let changes = lock(&published).apply(snapshot);
         if let Some(dir) = &cover_dir {
-            write_pending_cover(dir, &published, &mut previous, failure);
+            write_pending_cover(dir, &published, &mut previous);
         }
         let properties: Vec<Property> = {
             let published = lock(&published);
@@ -107,12 +107,7 @@ async fn run(mut remote: Remote, failure: FailureLog, cover_dir: Option<PathBuf>
 /// Applies one pending cover update: a new cover is written (outside the
 /// lock), the previous file deleted and `art_url` set to the new file's URL;
 /// a cleared one deletes the file; a failed write leaves no `art_url`.
-fn write_pending_cover(
-    dir: &Path,
-    published: &Mutex<Published>,
-    previous: &mut Option<PathBuf>,
-    failure: FailureLog,
-) {
+fn write_pending_cover(dir: &Path, published: &Mutex<Published>, previous: &mut Option<PathBuf>) {
     let update = lock(published).take_cover_update();
     let url = match update {
         CoverUpdate::Unchanged => return,
@@ -127,7 +122,11 @@ fn write_pending_cover(
                 url
             }
             Err(error) => {
-                log(failure, "media controls: cannot write the cover", &error);
+                log(
+                    FailureLog::Debug,
+                    "media controls: cannot write the cover",
+                    &error,
+                );
                 None
             }
         },
@@ -505,7 +504,7 @@ mod tests {
         snapshot: Snapshot,
     ) {
         lock(published).apply(snapshot);
-        write_pending_cover(dir, published, previous, FailureLog::Debug);
+        write_pending_cover(dir, published, previous);
     }
 
     #[test]
@@ -532,6 +531,8 @@ mod tests {
         step(dir.path(), &imp.published, &mut previous, with_cover(2));
         let second = previous.clone().unwrap();
         assert_ne!(first, second);
+        let url = url::Url::from_file_path(&second).unwrap().to_string();
+        assert_eq!(imp.published().art_url(), Some(url.as_str()));
         assert!(!first.exists());
         assert!(second.exists());
     }
@@ -563,6 +564,26 @@ mod tests {
             &mut previous,
             with_cover(1),
         );
+        assert!(previous.is_none());
+        assert_eq!(imp.published().art_url(), None);
+    }
+
+    #[test]
+    fn a_failed_write_after_a_cover_deletes_it_and_drops_art_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let (imp, _controls) = imp();
+        let mut previous = None;
+        step(dir.path(), &imp.published, &mut previous, with_cover(1));
+        let first = previous.clone().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, b"x").unwrap();
+        step(
+            &blocker.join("sub"),
+            &imp.published,
+            &mut previous,
+            with_cover(2),
+        );
+        assert!(!first.exists());
         assert!(previous.is_none());
         assert_eq!(imp.published().art_url(), None);
     }

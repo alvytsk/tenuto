@@ -100,6 +100,10 @@ pub fn write_cover(dir: &Path, seq: u64, image: &DynamicImage) -> io::Result<Pat
     Ok(path)
 }
 
+// ponytail: two processes with different XDG_STATE_HOME but the same
+// XDG_CACHE_HOME share this folder, overwrite cover-<n>.png and clear each
+// other's files at startup. Upgrade: cover-<pid>-<n>.png, with clearing that
+// skips live pids.
 pub fn clear_covers(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;

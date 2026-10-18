@@ -29,7 +29,7 @@ In the niri bar, for both `tui` and `play`:
 
 - [ ] A tagged local track, a podcast episode and a radio station each show the right title and artist.
 - [ ] Play/pause from the widget works and the widget's state follows the space key; Next/Previous don't appear.
-- [ ] A tagged track, a Radio-T episode and a station each show their cover in the bar (spec §10.4); an untagged track shows none, and `~/.cache/tenuto/mpris/` holds at most one `cover-*.png`, emptied on quit.
+- [ ] A tagged track, a Radio-T episode and a station each show their cover in the bar (spec §10.4); an untagged track shows none, and `~/.cache/tenuto/mpris/` holds at most one `cover-*.png`, emptied at startup, the last cover removed on exit when possible.
 - [ ] The widget entry goes away on quit.
 - [ ] With `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, tenuto starts normally and writes nothing to the terminal (`tui` logs one warning to its log file).
 - [ ] With `TENUTO_MPRIS=off`, tenuto doesn't appear in the widget.
