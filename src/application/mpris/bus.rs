@@ -363,6 +363,7 @@ mod tests {
             status: Status::Playing,
             volume: 1.0,
             position: Duration::from_secs(position),
+            cover: None,
         }
     }
 

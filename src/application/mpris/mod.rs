@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use self::cover::CoverImage;
+
 use crossbeam_channel::{Receiver, Sender};
 use tokio::sync::watch;
 
@@ -13,6 +15,8 @@ use crate::application::transport::PlaybackPhase;
 use crate::application::view::{PlayerView, filled};
 use crate::media::id::MediaId;
 use crate::volume::Volume;
+
+pub mod cover;
 
 #[cfg(target_os = "linux")]
 mod bus;
@@ -40,6 +44,7 @@ pub struct Snapshot {
     pub status: Status,
     pub volume: f64,
     pub position: Duration,
+    pub cover: Option<CoverImage>,
 }
 
 fn clean(text: &str) -> String {
@@ -77,6 +82,7 @@ pub fn snapshot(view: &PlayerView, media: Option<&MediaId>, podcast: Option<&str
             .now_playing
             .as_ref()
             .map_or(Duration::ZERO, |n| n.position),
+        cover: None,
     }
 }
 
@@ -116,6 +122,16 @@ pub struct Published {
     last: Option<Snapshot>,
     seq: u64,
     volume_written: bool,
+    cover_seq: u64,
+    cover_taken: Option<CoverImage>,
+    art_url: Option<String>,
+}
+
+/// What `Published::take_cover_update` found since the last call.
+pub enum CoverUpdate {
+    Unchanged,
+    Cleared,
+    New { seq: u64, image: CoverImage },
 }
 
 impl Published {
@@ -126,7 +142,7 @@ impl Published {
         if last.map(media) != Some(media(&next)) && !(last.is_none() && next.track.is_none()) {
             self.seq += 1;
         }
-        if last.is_none_or(|l| l.track != next.track) {
+        if last.is_none_or(|l| l.track != next.track || l.cover != next.cover) {
             changes.push(Change::Metadata);
         }
         if last.is_none_or(|l| l.status != next.status) {
@@ -138,6 +154,33 @@ impl Published {
         self.volume_written = false;
         self.last = Some(next);
         changes
+    }
+
+    /// Reports each change of the snapshot's cover once; `seq` counts covers.
+    pub fn take_cover_update(&mut self) -> CoverUpdate {
+        let now = self.last.as_ref().and_then(|s| s.cover.clone());
+        if now == self.cover_taken {
+            return CoverUpdate::Unchanged;
+        }
+        self.cover_taken = now.clone();
+        match now {
+            Some(image) => {
+                self.cover_seq += 1;
+                CoverUpdate::New {
+                    seq: self.cover_seq,
+                    image,
+                }
+            }
+            None => CoverUpdate::Cleared,
+        }
+    }
+
+    pub fn set_art_url(&mut self, url: Option<String>) {
+        self.art_url = url;
+    }
+
+    pub fn art_url(&self) -> Option<&str> {
+        self.art_url.as_deref()
     }
 
     pub fn track_id(&self) -> String {
@@ -282,6 +325,7 @@ mod tests {
             status,
             volume,
             position: Duration::ZERO,
+            cover: None,
         }
     }
 
@@ -487,6 +531,46 @@ mod tests {
         p.apply(snap(Some(track("a")), Status::Playing, 1.0));
         p.apply(snap(None, Status::Stopped, 1.0));
         assert_eq!(p.track_id(), NO_TRACK);
+    }
+
+    #[test]
+    fn same_media_new_cover_reports_metadata_and_keeps_track_id() {
+        let mut p = Published::default();
+        p.apply(snap(Some(track("a")), Status::Playing, 1.0));
+        let id = p.track_id();
+        let mut next = snap(Some(track("a")), Status::Playing, 1.0);
+        next.cover = Some(cover());
+        assert_eq!(p.apply(next), vec![Change::Metadata]);
+        assert_eq!(p.track_id(), id);
+    }
+
+    #[test]
+    fn take_cover_update_reports_each_change_once() {
+        let mut p = Published::default();
+        let with = |c: Option<CoverImage>| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.cover = c;
+            s
+        };
+        let first = cover();
+        p.apply(with(Some(first.clone())));
+        assert!(matches!(
+            p.take_cover_update(),
+            CoverUpdate::New { seq: 1, .. }
+        ));
+        assert!(matches!(p.take_cover_update(), CoverUpdate::Unchanged));
+        p.apply(with(Some(cover())));
+        assert!(matches!(
+            p.take_cover_update(),
+            CoverUpdate::New { seq: 2, .. }
+        ));
+        p.apply(with(None));
+        assert!(matches!(p.take_cover_update(), CoverUpdate::Cleared));
+        assert!(matches!(p.take_cover_update(), CoverUpdate::Unchanged));
+    }
+
+    fn cover() -> CoverImage {
+        CoverImage(Arc::new(image::DynamicImage::new_rgb8(1, 1)))
     }
 
     #[test]
