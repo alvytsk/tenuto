@@ -283,6 +283,8 @@ struct Mirror {
     front_cover: Option<Arc<CoverBytes>>,
     /// The decoder's title; a detached podcast episode is named by it.
     title: Option<String>,
+    /// The decoder's artist tag.
+    artist: Option<String>,
     duration: Option<Duration>,
     duration_provenance: PositionProvenance,
     capabilities: MediaCapabilities,
@@ -313,6 +315,7 @@ impl Mirror {
             media: media.clone(),
             front_cover: metadata.front_cover.clone(),
             title: metadata.title.clone(),
+            artist: metadata.artist.clone(),
             duration: metadata.duration,
             duration_provenance: metadata.duration_provenance,
             capabilities: *capabilities,
@@ -1590,10 +1593,15 @@ impl PlayerRuntime {
             MediaId::PodcastEpisode { .. } => {
                 episode_name(mirror.and_then(|mirror| mirror.title.as_deref()))
             }
-            other => display_name(other),
+            other => mirror
+                .and_then(|mirror| mirror.title.clone())
+                .unwrap_or_else(|| display_name(other)),
         };
         let unloaded = NowPlaying {
             title: displayable(&title),
+            artist: mirror
+                .and_then(|mirror| mirror.artist.as_deref())
+                .map(displayable),
             saved: saved_history(self.session.state().entry_for(media)),
             ..NowPlaying::unloaded()
         };

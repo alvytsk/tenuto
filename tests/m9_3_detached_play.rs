@@ -5,6 +5,8 @@ mod support;
 
 #[path = "support/runtime.rs"]
 mod runtime;
+#[path = "support/tagged_flac.rs"]
+mod tagged_flac;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -243,4 +245,17 @@ fn a_detached_load_failure_reports_load_failed_with_its_message() {
             .is_some_and(|status| !status.is_empty())
     );
     let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_detached_tagged_file_shows_its_tag_title_and_artist() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = tagged_flac::tagged_flac(dir.path(), "Song", "Band", "Album", None);
+    let mut rig = rig_with(PersistedState::default());
+    let (media, location) = local(path.to_str().unwrap());
+    rig.runtime.play_detached(media, location);
+    pump_until(&mut rig, "plays", playing);
+    let now = rig.runtime.view().now_playing.unwrap();
+    assert_eq!(now.title, "Song");
+    assert_eq!(now.artist.as_deref(), Some("Band"));
 }
