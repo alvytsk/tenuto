@@ -177,7 +177,7 @@ pub fn spawn(failure: FailureLog) -> Option<MediaControls> {
         let (controls, remote) = channel();
         let spawned = std::thread::Builder::new()
             .name("tenuto-mpris".into())
-            .spawn(move || bus::serve(remote, failure));
+            .spawn(move || bus::contained(failure, || bus::serve(remote, failure)));
         match spawned {
             Ok(_detached) => Some(controls),
             Err(error) => {

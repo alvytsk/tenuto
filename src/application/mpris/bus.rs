@@ -12,6 +12,8 @@ use mpris_server::{
     Server, Time, TrackId,
 };
 
+use crate::lifecycle::panic::run_contained;
+
 use super::{Change, FailureLog, Published, Remote, Request, Status};
 
 const NAME: &str = "tenuto";
@@ -20,6 +22,14 @@ pub(super) fn log(failure: FailureLog, what: &str, error: &dyn Display) {
     match failure {
         FailureLog::Warn => tracing::warn!(%error, "{what}"),
         FailureLog::Debug => tracing::debug!(%error, "{what}"),
+    }
+}
+
+/// Runs `job` (the thread body) so a panic in it is one log line: under
+/// `tui`'s hook an uncontained panic on any thread shuts the player down.
+pub(super) fn contained(failure: FailureLog, job: impl FnOnce()) {
+    if let Err(panic) = run_contained("mpris", job) {
+        log(failure, "media controls stopped", &panic);
     }
 }
 
@@ -353,9 +363,18 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_on_the_thread_is_contained() {
+        contained(FailureLog::Debug, || panic!("bus thread panic"));
+    }
+
+    #[test]
     fn set_volume_rejects_nan() {
         let (imp, controls) = imp();
-        assert!(block(imp.set_volume(f64::NAN)).is_err());
+        let error = block(imp.set_volume(f64::NAN)).unwrap_err();
+        assert!(
+            matches!(&error, zbus::Error::FDO(e) if matches!(**e, fdo::Error::InvalidArgs(_))),
+            "{error:?}"
+        );
         assert!(controls.try_recv().is_none());
     }
 
