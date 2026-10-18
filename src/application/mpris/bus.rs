@@ -3,6 +3,7 @@
 //! a desktop shell asks for. Handlers never wait on the runtime.
 
 use std::fmt::Display;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crossbeam_channel::Sender;
@@ -14,7 +15,8 @@ use mpris_server::{
 
 use crate::lifecycle::panic::run_contained;
 
-use super::{Change, FailureLog, Published, Remote, Request, Status};
+use super::cover::{clear_covers, write_cover};
+use super::{Change, CoverUpdate, FailureLog, Published, Remote, Request, Status};
 
 const NAME: &str = "tenuto";
 
@@ -38,17 +40,21 @@ pub(super) fn contained(failure: FailureLog, job: impl FnOnce()) {
 }
 
 /// Runs until the runtime drops its `MediaControls`, or the bus fails.
-pub(super) fn serve(remote: Remote, failure: FailureLog) {
+pub(super) fn serve(remote: Remote, failure: FailureLog, cover_dir: Option<PathBuf>) {
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(remote, failure)),
+        Ok(runtime) => runtime.block_on(run(remote, failure, cover_dir)),
         Err(error) => log(failure, "media controls: cannot start a runtime", &error),
     }
 }
 
-async fn run(mut remote: Remote, failure: FailureLog) {
+async fn run(mut remote: Remote, failure: FailureLog, cover_dir: Option<PathBuf>) {
+    if let Some(dir) = &cover_dir {
+        clear_covers(dir);
+    }
+    let mut previous: Option<PathBuf> = None;
     let published = Arc::new(Mutex::new(Published::default()));
     let imp = || Imp {
         published: Arc::clone(&published),
@@ -74,9 +80,12 @@ async fn run(mut remote: Remote, failure: FailureLog) {
         let Some(snapshot) = remote.snapshots.borrow_and_update().clone() else {
             continue;
         };
+        let changes = lock(&published).apply(snapshot);
+        if let Some(dir) = &cover_dir {
+            write_pending_cover(dir, &published, &mut previous, failure);
+        }
         let properties: Vec<Property> = {
-            let mut published = lock(&published);
-            let changes = published.apply(snapshot);
+            let published = lock(&published);
             changes
                 .into_iter()
                 .map(|c| property(&published, c))
@@ -86,9 +95,49 @@ async fn run(mut remote: Remote, failure: FailureLog) {
             continue;
         }
         if let Err(error) = server.properties_changed(properties).await {
-            return log(failure, "media controls: bus connection lost", &error);
+            log(failure, "media controls: bus connection lost", &error);
+            break;
         }
     }
+    if let Some(path) = previous {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Applies one pending cover update: a new cover is written (outside the
+/// lock), the previous file deleted and `art_url` set to the new file's URL;
+/// a cleared one deletes the file; a failed write leaves no `art_url`.
+fn write_pending_cover(
+    dir: &Path,
+    published: &Mutex<Published>,
+    previous: &mut Option<PathBuf>,
+    failure: FailureLog,
+) {
+    let update = lock(published).take_cover_update();
+    let url = match update {
+        CoverUpdate::Unchanged => return,
+        CoverUpdate::Cleared => None,
+        CoverUpdate::New { seq, image } => match write_cover(dir, seq, &image.0) {
+            Ok(path) => {
+                let url = url::Url::from_file_path(&path).ok().map(String::from);
+                let stale = previous.replace(path);
+                if let Some(stale) = stale {
+                    let _ = std::fs::remove_file(stale);
+                }
+                url
+            }
+            Err(error) => {
+                log(failure, "media controls: cannot write the cover", &error);
+                None
+            }
+        },
+    };
+    if url.is_none()
+        && let Some(stale) = previous.take()
+    {
+        let _ = std::fs::remove_file(stale);
+    }
+    lock(published).set_art_url(url);
 }
 
 /// Whether another process owns `org.mpris.MediaPlayer2.tenuto`; false when
@@ -126,6 +175,9 @@ fn metadata(published: &Published) -> Metadata {
         metadata.set_title(Some(track.title.clone()));
         metadata.set_artist(track.artist.clone().map(|a| [a]));
         metadata.set_length(track.length.map(|d| micros(d.as_micros())));
+    }
+    if let Some(url) = published.art_url() {
+        metadata.set_art_url(Some(url));
     }
     metadata
 }
@@ -433,5 +485,85 @@ mod tests {
         imp.published.lock().unwrap().apply(snap(0));
         let metadata = block(imp.metadata()).unwrap();
         assert_eq!(metadata.trackid(), Some(TrackId::NO_TRACK));
+    }
+
+    fn with_cover(seq: u8) -> Snapshot {
+        let image = image::DynamicImage::new_rgb8(4 + u32::from(seq), 4);
+        Snapshot {
+            cover: Some(crate::application::mpris::cover::CoverImage(Arc::new(
+                image,
+            ))),
+            ..snap(0)
+        }
+    }
+
+    /// Applies `snapshot` the way the serve loop does.
+    fn step(
+        dir: &std::path::Path,
+        published: &Mutex<Published>,
+        previous: &mut Option<std::path::PathBuf>,
+        snapshot: Snapshot,
+    ) {
+        lock(published).apply(snapshot);
+        write_pending_cover(dir, published, previous, FailureLog::Debug);
+    }
+
+    #[test]
+    fn a_new_cover_is_written_and_published_as_a_file_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let (imp, _controls) = imp();
+        let mut previous = None;
+        step(dir.path(), &imp.published, &mut previous, with_cover(1));
+        let path = previous.clone().unwrap();
+        assert!(path.exists());
+        let url = url::Url::from_file_path(&path).unwrap().to_string();
+        assert_eq!(imp.published().art_url(), Some(url.as_str()));
+        let metadata = block(imp.metadata()).unwrap();
+        assert_eq!(metadata.art_url(), Some(url));
+    }
+
+    #[test]
+    fn the_next_cover_deletes_the_previous_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (imp, _controls) = imp();
+        let mut previous = None;
+        step(dir.path(), &imp.published, &mut previous, with_cover(1));
+        let first = previous.clone().unwrap();
+        step(dir.path(), &imp.published, &mut previous, with_cover(2));
+        let second = previous.clone().unwrap();
+        assert_ne!(first, second);
+        assert!(!first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn a_cleared_cover_deletes_the_file_and_drops_art_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let (imp, _controls) = imp();
+        let mut previous = None;
+        step(dir.path(), &imp.published, &mut previous, with_cover(1));
+        let path = previous.clone().unwrap();
+        step(dir.path(), &imp.published, &mut previous, snap(0));
+        assert!(!path.exists());
+        assert!(previous.is_none());
+        assert_eq!(imp.published().art_url(), None);
+        assert_eq!(block(imp.metadata()).unwrap().art_url(), None::<String>);
+    }
+
+    #[test]
+    fn an_unwritable_cover_dir_leaves_no_art_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let (imp, _controls) = imp();
+        let mut previous = None;
+        step(
+            &file.join("sub"),
+            &imp.published,
+            &mut previous,
+            with_cover(1),
+        );
+        assert!(previous.is_none());
+        assert_eq!(imp.published().art_url(), None);
     }
 }

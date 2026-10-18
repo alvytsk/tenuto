@@ -3,6 +3,7 @@
 //! properties changed between two snapshots, and the channel pair between
 //! the runtime and the D-Bus thread. No D-Bus code lives here.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use self::cover::CoverImage;
@@ -210,8 +211,9 @@ pub enum FailureLog {
 
 /// Starts the `tenuto-mpris` thread and returns at once; connecting happens
 /// on the thread. `None` when `TENUTO_MPRIS=off`, off Linux, or the thread
-/// could not be spawned.
-pub fn spawn(failure: FailureLog) -> Option<MediaControls> {
+/// could not be spawned. `cover_dir` is where cover PNGs are written; `None`
+/// publishes no covers.
+pub fn spawn(failure: FailureLog, cover_dir: Option<PathBuf>) -> Option<MediaControls> {
     if std::env::var_os("TENUTO_MPRIS").is_some_and(|v| v == "off") {
         return None;
     }
@@ -220,7 +222,7 @@ pub fn spawn(failure: FailureLog) -> Option<MediaControls> {
         let (controls, remote) = channel();
         let spawned = std::thread::Builder::new()
             .name("tenuto-mpris".into())
-            .spawn(move || bus::contained(failure, || bus::serve(remote, failure)));
+            .spawn(move || bus::contained(failure, || bus::serve(remote, failure, cover_dir)));
         match spawned {
             Ok(_detached) => Some(controls),
             Err(error) => {
@@ -231,7 +233,7 @@ pub fn spawn(failure: FailureLog) -> Option<MediaControls> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = failure;
+        let _ = (failure, cover_dir);
         None
     }
 }

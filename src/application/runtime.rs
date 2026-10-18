@@ -488,7 +488,9 @@ impl PlayerRuntime {
     /// Turns desktop media controls on. The bus connects on its own thread,
     /// so this never blocks; nothing happens when the controls are off.
     pub fn enable_media_controls(&mut self, failure: FailureLog) {
-        if let Some(controls) = spawn(failure) {
+        let cover_dir =
+            directories::ProjectDirs::from("", "", "tenuto").map(|d| d.cache_dir().join("mpris"));
+        if let Some(controls) = spawn(failure, cover_dir) {
             self.attach_media_controls(controls);
         }
     }

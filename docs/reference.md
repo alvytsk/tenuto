@@ -296,6 +296,25 @@ never delays startup. A missing bus, or one that refuses the connection,
 makes `tui` log one warning (`play` stays silent); a hung bus logs nothing
 and the media-controls thread just waits.
 
+The widget also shows the cover, taken from the same places as the
+terminal cover:
+
+- a music file's embedded picture, else a `cover.jpg`, `cover.png`,
+  `folder.jpg` or `folder.png` beside it;
+- a podcast episode's or feed's image, once playback has started (a restored,
+  unplayed entry fetches nothing);
+- a station's saved logo (SVG is rasterized).
+
+`play` has no library, so it shows covers for music files only (embedded or
+sibling) and the embedded front cover of a loaded stream.
+
+The cover reaches the bar as a PNG, at most 512 px on the long edge, that
+tenuto writes to `<XDG cache>/tenuto/mpris/cover-<n>.png` (`~/.cache/tenuto/mpris/`
+by default). Only that path goes on the bus: a remote cover URL and a music
+file's own path never do. The file is replaced as the cover changes, and the
+directory's `cover-*` files are removed at startup and on exit. Without a
+cover, or when the file cannot be written, the widget shows none.
+
 `TENUTO_MPRIS=off` turns media controls off. Other systems have none.
 
 ## Files and state
