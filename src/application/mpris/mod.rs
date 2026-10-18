@@ -14,6 +14,9 @@ use crate::application::view::PlayerView;
 use crate::media::id::MediaId;
 use crate::volume::Volume;
 
+#[cfg(target_os = "linux")]
+mod bus;
+
 const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +154,42 @@ impl Published {
     /// A client wrote `Volume`: report it even if the value ended unchanged.
     pub fn mark_volume_written(&mut self) {
         self.volume_written = true;
+    }
+}
+
+/// Where the D-Bus thread logs its one failure line: `tui` sends `warn` to
+/// its log file, `play` keeps stderr quiet with `debug`.
+#[derive(Clone, Copy, Debug)]
+pub enum FailureLog {
+    Warn,
+    Debug,
+}
+
+/// Starts the `tenuto-mpris` thread and returns at once; connecting happens
+/// on the thread. `None` when `TENUTO_MPRIS=off`, off Linux, or the thread
+/// could not be spawned.
+pub fn spawn(failure: FailureLog) -> Option<MediaControls> {
+    if std::env::var_os("TENUTO_MPRIS").is_some_and(|v| v == "off") {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let (controls, remote) = channel();
+        let spawned = std::thread::Builder::new()
+            .name("tenuto-mpris".into())
+            .spawn(move || bus::serve(remote, failure));
+        match spawned {
+            Ok(_detached) => Some(controls),
+            Err(error) => {
+                bus::log(failure, "media controls: cannot start a thread", &error);
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = failure;
+        None
     }
 }
 
