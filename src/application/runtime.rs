@@ -15,8 +15,9 @@ use url::Url;
 
 use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
+use crate::application::mpris::{MediaControls, command, snapshot};
 use crate::application::podcast::{
-    PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, resolve_podcast,
+    PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
 };
 use crate::application::seek::KeyRouter;
 use crate::application::source::{is_url_spelling, resolve_path, resolve_source};
@@ -417,6 +418,10 @@ pub struct PlayerRuntime {
     /// `Session::state_edits` and the playlist they were built from, so a
     /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
     rows: Cell<Option<CachedRows>>,
+    /// The runtime half of the desktop media-controls channel (M11).
+    media_controls: Option<MediaControls>,
+    /// The podcast name of the playing media, looked up once per change.
+    podcast_name: Option<(MediaId, Option<String>)>,
 }
 
 /// `(state_edits, viewed, rows)`; see [`PlayerRuntime`]'s `rows`.
@@ -461,7 +466,15 @@ impl PlayerRuntime {
             restored,
             viewed,
             rows: Cell::new(None),
+            media_controls: None,
+            podcast_name: None,
         }
+    }
+
+    /// Serves desktop media controls: requests are drained and a snapshot
+    /// is published on every [`pump`](Self::pump).
+    pub fn attach_media_controls(&mut self, controls: MediaControls) {
+        self.media_controls = Some(controls);
     }
 
     pub fn session(&self) -> &Session {
@@ -693,6 +706,44 @@ impl PlayerRuntime {
     /// One iteration: apply finished metadata enrichment, drain engine
     /// events, act on what they asked for, then sample progress.
     pub fn pump(&mut self) {
+        let requests: Vec<_> = self
+            .media_controls
+            .iter()
+            .flat_map(|controls| std::iter::from_fn(|| controls.try_recv()))
+            .collect();
+        for request in requests {
+            if let Some(cmd) = command(request, self.volume) {
+                self.handle(cmd);
+            }
+        }
+        self.pump_engine();
+        self.publish_snapshot();
+    }
+
+    fn publish_snapshot(&mut self) {
+        if self.media_controls.is_none() {
+            return;
+        }
+        let media = match &self.detached {
+            Some(media) => Some(media.clone()),
+            None => self.active_entry().map(|entry| entry.media().clone()),
+        };
+        if self.podcast_name.as_ref().map(|(m, _)| m) != media.as_ref() {
+            self.podcast_name = media.clone().map(|media| {
+                let name = self.library.as_ref().and_then(|library| {
+                    podcast_name(&library.subscriptions, &library.cache, &media)
+                });
+                (media, name)
+            });
+        }
+        let podcast = self.podcast_name.as_ref().and_then(|(_, n)| n.as_deref());
+        let snap = snapshot(&self.view(), media.as_ref(), podcast);
+        if let Some(controls) = &self.media_controls {
+            controls.publish(snap);
+        }
+    }
+
+    fn pump_engine(&mut self) {
         // The restored queue is offered on the first pass rather than in
         // `new`: a front end builds the runtime before it is ready to run
         // (the terminal player, before entering the terminal), and no worker

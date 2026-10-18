@@ -2,17 +2,30 @@
 
 mod support;
 
+#[path = "support/feeds.rs"]
+mod feeds;
 #[path = "support/runtime.rs"]
 mod runtime;
+#[path = "support/tagged_flac.rs"]
+mod tagged_flac;
 
 use std::time::Duration;
 
-use runtime::{enqueue, pump_for, pump_until, rig_with, row_ids, step};
+use runtime::{enqueue, pump_for, pump_until, rig_with, rig_with_library, row_ids, step};
+use std::sync::Arc;
 use support::server::{Script, TestServer};
-use tenuto::application::runtime::{AppCommand, EnqueueItem};
+use tenuto::application::mpris::{Request, Status, channel};
+use tenuto::application::runtime::{AppCommand, EnqueueItem, LibraryStores};
 use tenuto::application::transport::PlaybackPhase;
+use tenuto::clock::{Clock, SystemClock};
+use tenuto::feed::cache::CacheStore;
+use tenuto::media::id::{EpisodeKey, FeedId, MediaId};
 use tenuto::persistence::model::PersistedState;
 use tenuto::playback::state::PlaybackState;
+use tenuto::queue::{NewQueueEntry, QueueSource};
+use tenuto::session::Session;
+use tenuto::station::store::StationStore;
+use tenuto::subscription::store::SubscriptionStore;
 
 const FIVE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine-5s.flac");
 
@@ -69,4 +82,123 @@ fn pause_on_a_paused_station_leaves_it_paused() {
     assert_eq!(server.requests().len(), settled);
     let _ = rig.runtime.shutdown();
     server.shutdown();
+}
+
+fn play_five(rig: &mut runtime::Rig) {
+    enqueue(&mut rig.runtime, vec![EnqueueItem::Path(FIVE.into())]);
+    let row = row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(row));
+    pump_until(rig, "playing", |v| v.phase == PlaybackPhase::Playing);
+}
+
+#[test]
+fn a_play_pause_request_reaches_the_runtime() {
+    let mut rig = rig_with(PersistedState::default());
+    play_five(&mut rig);
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    remote.requests.try_send(Request::PlayPause).unwrap();
+    pump_until(&mut rig, "paused", |v| v.phase == PlaybackPhase::Paused);
+    let snap = remote.snapshots.borrow().clone().unwrap();
+    assert_eq!(snap.status, Status::Paused);
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn the_snapshot_describes_the_playing_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = tagged_flac::tagged_flac(dir.path(), "Song", "Band", "Album", None);
+    let mut rig = rig_with(PersistedState::default());
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Path(path.to_str().unwrap().into())],
+    );
+    let row = row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(row));
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    pump_until(&mut rig, "titled", |v| {
+        v.now_playing
+            .as_ref()
+            .is_some_and(|n| n.title == "Song" && n.duration.is_some())
+    });
+    let track = remote.snapshots.borrow().clone().unwrap().track.unwrap();
+    assert_eq!(track.title, "Song");
+    assert_eq!(track.artist.as_deref(), Some("Band"));
+    assert!(track.length.is_some());
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_click_with_nothing_loaded_does_nothing() {
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    remote.requests.try_send(Request::Play).unwrap();
+    pump_for(&mut rig, Duration::from_millis(500));
+    let snap = remote.snapshots.borrow().clone().unwrap();
+    assert!(snap.track.is_none());
+    assert_eq!(snap.status, Status::Stopped);
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_podcast_episode_shows_the_podcast_name_as_artist() {
+    let server = TestServer::start(Script::from_fixture("sine-5s.flac"));
+    let enclosure = server.url("/ep.flac");
+    let library = feeds::Rig::new().unwrap();
+    let rss = format!(
+        r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Radio-T</title><item><title>e1</title><guid>e1</guid><enclosure url="{enclosure}" type="audio/flac"/></item></channel></rss>"#
+    );
+    library
+        .seed(rss.as_bytes(), "https://feeds.example/radio-t.xml")
+        .unwrap();
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let stores = LibraryStores {
+        subscriptions: SubscriptionStore::new(
+            library.root.path().join("data/tenuto/subscriptions.json"),
+            Arc::clone(&clock),
+        ),
+        cache: CacheStore::new(library.root.path().join("cache/tenuto/feeds")),
+        stations: StationStore::new(library.root.path().join("data/tenuto/stations.json"), clock),
+    };
+    let episode = MediaId::PodcastEpisode {
+        feed: FeedId::new(feeds::FEED_ID.into()).unwrap(),
+        episode: EpisodeKey::resolve(Some("e1"), None, None).unwrap(),
+    };
+    let entry = NewQueueEntry::new(
+        episode,
+        QueueSource::Podcast {
+            fallback: enclosure.parse().unwrap(),
+        },
+        Default::default(),
+    )
+    .unwrap();
+    let mut session = Session::new(PersistedState::default());
+    session
+        .enqueue(session.state().playlists().playing(), vec![entry])
+        .unwrap();
+    let mut rig = rig_with_library(session.state().clone(), stores);
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    let row = row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(row));
+    pump_until(&mut rig, "playing", |v| v.phase == PlaybackPhase::Playing);
+    let track = remote.snapshots.borrow().clone().unwrap().track.unwrap();
+    assert_eq!(track.artist.as_deref(), Some("Radio-T"));
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn position_advances_in_successive_snapshots() {
+    let mut rig = rig_with(PersistedState::default());
+    play_five(&mut rig);
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    step(&mut rig);
+    let before = remote.snapshots.borrow().clone().unwrap().position;
+    pump_for(&mut rig, Duration::from_secs(1));
+    let after = remote.snapshots.borrow().clone().unwrap().position;
+    assert!(after > before, "{before:?} then {after:?}");
+    let _ = rig.runtime.shutdown();
 }
