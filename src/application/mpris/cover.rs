@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use image::{DynamicImage, ImageFormat};
 
+use crate::artwork::worker::{ArtworkWorker, CoverLoader, CoverSource};
+use crate::media::id::MediaId;
+
 pub const COVER_EDGE: u32 = 512;
 
 /// Equal only to its own clones, so a `Snapshot` stays `PartialEq`.
@@ -23,6 +26,57 @@ impl PartialEq for CoverImage {
 impl fmt::Debug for CoverImage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "CoverImage({}x{})", self.0.width(), self.0.height())
+    }
+}
+
+/// Fetches the playing media's cover on the artwork worker.
+// ponytail: in `tui`, a remote cover is fetched again here beside
+// `tui::Artwork`. If that matters, share the fetch by having the TUI hand its
+// decoded image to the runtime.
+pub struct CoverFetcher {
+    worker: ArtworkWorker,
+    requested: Option<(MediaId, CoverSource)>,
+    current: Option<(MediaId, CoverImage)>,
+}
+
+impl CoverFetcher {
+    pub fn new(loader: CoverLoader) -> Self {
+        Self {
+            worker: ArtworkWorker::spawn(loader),
+            requested: None,
+            current: None,
+        }
+    }
+
+    /// `wanted` changed: request it (or clear on None). Drops a cover whose
+    /// media differs from `wanted`'s.
+    pub fn want(&mut self, wanted: Option<(MediaId, CoverSource)>) {
+        let media = wanted.as_ref().map(|(media, _)| media);
+        if self.current.as_ref().map(|(m, _)| m) != media {
+            self.current = None;
+        }
+        if self.requested != wanted {
+            if let Some((media, source)) = wanted.clone() {
+                self.worker.request(media, source);
+            }
+            self.requested = wanted;
+        }
+    }
+
+    /// Drains finished jobs; keeps a result only if its media is the
+    /// requested one (Ok becomes current, Err clears it).
+    pub fn poll(&mut self) {
+        while let Some(result) = self.worker.try_result() {
+            if self.requested.as_ref().map(|(m, _)| m) != Some(&result.media) {
+                continue;
+            }
+            self.current = result.image.ok().map(|i| (result.media, CoverImage(i)));
+        }
+    }
+
+    pub fn cover_for(&self, media: &MediaId) -> Option<CoverImage> {
+        let (m, image) = self.current.as_ref()?;
+        (m == media).then(|| image.clone())
     }
 }
 

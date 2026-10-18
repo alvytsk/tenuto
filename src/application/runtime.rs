@@ -15,6 +15,7 @@ use url::Url;
 
 use crate::application::browse::TreeCollected;
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
+use crate::application::mpris::cover::CoverFetcher;
 use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
@@ -29,7 +30,7 @@ use crate::application::view::{
     queue_rows, saved_history,
 };
 use crate::artwork::default::CoverKind;
-use crate::artwork::worker::CoverSource;
+use crate::artwork::worker::{CoverSource, default_loader};
 use crate::clock::{Clock, SystemClock};
 use crate::feed::cache::CacheStore;
 use crate::feed::error::FeedError;
@@ -420,6 +421,11 @@ pub struct PlayerRuntime {
     rows: Cell<Option<CachedRows>>,
     /// The runtime half of the desktop media-controls channel (M11).
     media_controls: Option<MediaControls>,
+    /// Fetches the playing cover for the media controls; built with them.
+    covers: Option<CoverFetcher>,
+    /// What `covers` was last asked for: the playing media, `mirror.load`
+    /// and whether HTTP is available. Compared before any store read.
+    cover_wanted_key: Option<(Option<MediaId>, Option<LoadRequestId>, bool)>,
     /// The podcast name of the playing media, looked up once per change.
     podcast_name: Option<(MediaId, Option<String>)>,
 }
@@ -467,6 +473,8 @@ impl PlayerRuntime {
             viewed,
             rows: Cell::new(None),
             media_controls: None,
+            covers: None,
+            cover_wanted_key: None,
             podcast_name: None,
         }
     }
@@ -475,6 +483,8 @@ impl PlayerRuntime {
     /// is published on every [`pump`](Self::pump).
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
         self.media_controls = Some(controls);
+        self.covers = Some(CoverFetcher::new(default_loader(TestHook::None)));
+        self.cover_wanted_key = None;
     }
 
     /// Turns desktop media controls on. The bus connects on its own thread,
@@ -728,6 +738,21 @@ impl PlayerRuntime {
         self.publish_snapshot();
     }
 
+    /// The cover source of what is playing, detached media included.
+    fn playing_cover(&self) -> Option<(MediaId, CoverSource)> {
+        let Some(media) = &self.detached else {
+            return self.active_cover();
+        };
+        let source = match media {
+            MediaId::LocalFile(path) => CoverSource::Local(path.clone()),
+            _ => {
+                let mirror = self.mirror.as_ref().filter(|m| &m.media == media)?;
+                CoverSource::Embedded(Arc::clone(mirror.front_cover.as_ref()?))
+            }
+        };
+        Some((media.clone(), source))
+    }
+
     fn publish_snapshot(&mut self) {
         if self
             .media_controls
@@ -751,7 +776,23 @@ impl PlayerRuntime {
             });
         }
         let podcast = self.podcast_name.as_ref().and_then(|(_, n)| n.as_deref());
-        let snap = snapshot(&self.view(), media.as_ref(), podcast);
+        let mut snap = snapshot(&self.view(), media.as_ref(), podcast);
+        let key = (
+            media.clone(),
+            self.mirror.as_ref().map(|m| m.load),
+            self.http.is_some(),
+        );
+        if self.cover_wanted_key.as_ref() != Some(&key) {
+            let wanted = self.playing_cover();
+            if let Some(covers) = &mut self.covers {
+                covers.want(wanted);
+            }
+            self.cover_wanted_key = Some(key);
+        }
+        if let Some(covers) = &mut self.covers {
+            covers.poll();
+            snap.cover = media.and_then(|m| covers.cover_for(&m));
+        }
         if let Some(controls) = &self.media_controls {
             controls.publish(snap);
         }

@@ -202,3 +202,125 @@ fn position_advances_in_successive_snapshots() {
     assert!(after > before, "{before:?} then {after:?}");
     let _ = rig.runtime.shutdown();
 }
+
+const SHORT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine.flac");
+
+fn png_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30])))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap_or_else(|e| panic!("encode: {e}"));
+    bytes
+}
+
+fn has_cover(remote: &tenuto::application::mpris::Remote) -> bool {
+    remote
+        .snapshots
+        .borrow()
+        .as_ref()
+        .is_some_and(|s| s.cover.is_some())
+}
+
+fn playing(v: &tenuto::application::view::PlayerView) -> bool {
+    v.phase == PlaybackPhase::Playing
+}
+
+fn play_path(rig: &mut runtime::Rig, path: &std::path::Path) {
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::Path(path.to_path_buf())],
+    );
+    let row = row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(row));
+}
+
+#[test]
+fn a_playlist_track_with_an_embedded_picture_publishes_a_cover() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = tagged_flac::tagged_flac(dir.path(), "Song", "Band", "Album", Some(&png_bytes()));
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    play_path(&mut rig, &path);
+    pump_until(&mut rig, "cover", |_| has_cover(&remote));
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_detached_track_with_an_embedded_picture_publishes_a_cover() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = tagged_flac::tagged_flac(dir.path(), "Song", "Band", "Album", Some(&png_bytes()));
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    let abs = tenuto::media::id::AbsolutePath::new(path.clone()).unwrap();
+    rig.runtime.play_detached(
+        MediaId::LocalFile(abs),
+        tenuto::media::source::SourceLocation::LocalPath(path),
+    );
+    pump_until(&mut rig, "cover", |_| has_cover(&remote));
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn an_untagged_track_publishes_no_cover() {
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    play_path(&mut rig, std::path::Path::new(SHORT));
+    pump_until(&mut rig, "playing", playing);
+    pump_for(&mut rig, Duration::from_secs(1));
+    assert!(!has_cover(&remote));
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_late_cover_does_not_attach_to_the_next_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tagged_flac::tagged_flac(dir.path(), "A", "Band", "Album", Some(&png_bytes()));
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Path(a.to_str().unwrap().into()),
+            EnqueueItem::Path(SHORT.into()),
+        ],
+    );
+    let rows = row_ids(&rig.runtime);
+    rig.runtime.handle(AppCommand::PlayEntry(rows[0]));
+    rig.runtime.handle(AppCommand::PlayEntry(rows[1]));
+    pump_until(&mut rig, "B playing", playing);
+    pump_for(&mut rig, Duration::from_secs(1));
+    let snap = remote.snapshots.borrow().clone().unwrap();
+    assert!(
+        snap.track
+            .is_some_and(|t| t.media.to_string().contains("sine.flac"))
+    );
+    assert!(snap.cover.is_none());
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_cover_that_fails_to_decode_publishes_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = tagged_flac::tagged_flac(
+        dir.path(),
+        "Song",
+        "Band",
+        "Album",
+        Some(b"\x89PNG\r\n\x1a\ngarbage"),
+    );
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    play_path(&mut rig, &path);
+    pump_until(&mut rig, "playing", playing);
+    pump_for(&mut rig, Duration::from_secs(1));
+    assert!(!has_cover(&remote));
+    let _ = rig.runtime.shutdown();
+}
