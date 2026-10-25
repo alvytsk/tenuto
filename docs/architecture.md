@@ -2,7 +2,7 @@
 
 Tenuto is a keyboard-first terminal audio player for local files, finite remote audio over HTTP, live HTTP radio, and podcast episodes from RSS or Atom feeds. It ships as one Rust binary, `tenuto`, with a plain `play` command and a full-screen `tui` player.
 
-This document describes the system as built through M10 (finite reconnect), including M9.1 (`PlaylistSet`). It uses the C4 model: context, containers, components, one runtime sequence, and deployment. The design decisions behind each part live in the specs under [`superpowers/specs/`](superpowers/specs/). The acceptance records live in [`m3-acceptance.md`](m3-acceptance.md), [`m5-acceptance.md`](m5-acceptance.md), [`m6-acceptance.md`](m6-acceptance.md), [`m7-acceptance.md`](m7-acceptance.md), [`m7.1-acceptance.md`](m7.1-acceptance.md), [`m8-acceptance.md`](m8-acceptance.md), [`m9.1-acceptance.md`](m9.1-acceptance.md) and [`m10-acceptance.md`](m10-acceptance.md). Known debt lives in [`m1-known-debt.md`](m1-known-debt.md).
+This document describes the system as built through M11 (MPRIS desktop media controls), including M9 (architecture deepening) and M10 (finite reconnect). It uses the C4 model: context, containers, components, one runtime sequence, and deployment. The design decisions behind each part live in the specs under [`superpowers/specs/`](superpowers/specs/). The acceptance records live in [`m3-acceptance.md`](m3-acceptance.md), [`m5-acceptance.md`](m5-acceptance.md), [`m6-acceptance.md`](m6-acceptance.md), [`m7-acceptance.md`](m7-acceptance.md), [`m7.1-acceptance.md`](m7.1-acceptance.md), [`m8-acceptance.md`](m8-acceptance.md), [`m9.1-acceptance.md`](m9.1-acceptance.md), [`m10-acceptance.md`](m10-acceptance.md) and [`m11-acceptance.md`](m11-acceptance.md). Known debt lives in [`m1-known-debt.md`](m1-known-debt.md).
 
 ## 1. Scope and invariants
 
@@ -47,6 +47,7 @@ flowchart LR
     media["Media servers<br/>finite HTTP audio, CDNs"]
     feeds["Feed servers<br/>RSS 2.0 and Atom 1.0"]
     fs[("XDG directories<br/>state, data, cache, logs")]
+    bus["Desktop session bus<br/>MPRIS2, Linux only"]
 
     listener -- "keys, mouse" --> term
     term -- "input events" --> tenuto
@@ -55,9 +56,10 @@ flowchart LR
     tenuto -- "GET, Range, redirects" --> media
     tenuto -- "conditional GET" --> feeds
     tenuto -- "atomic JSON writes" --> fs
+    tenuto -- "now playing, cover; play, pause, seek requests" --- bus
 ```
 
-Tenuto talks to nothing else. There is no daemon, no client, no remote control, and no third-party service integration.
+Tenuto talks to nothing else. There is no daemon and no client. On Linux it publishes MPRIS2 on the session bus (M11), so a desktop bar or media keys can show what is playing and send play, pause, next, previous and seek; `TENUTO_MPRIS=off` turns that off. There is no other remote control and no third-party service integration.
 
 ## 3. Containers
 
@@ -75,6 +77,7 @@ flowchart TB
         stations[("stations.json<br/>$XDG_DATA_HOME/tenuto<br/>saved radio stations")]
         cache[("feeds/&lt;feed-id&gt;.json<br/>$XDG_CACHE_HOME/tenuto<br/>refetchable episodes")]
         logs[("logs/tenuto-tui-*.log<br/>$XDG_STATE_HOME/tenuto<br/>one per tui run, five kept")]
+        covers[("mpris/cover-*.png<br/>$XDG_CACHE_HOME/tenuto<br/>the published cover")]
     end
     device["Audio device"]
     net["Media and feed servers"]
@@ -86,6 +89,7 @@ flowchart TB
     bin --> stations
     bin --> cache
     bin --> logs
+    bin --> covers
     bin --> device
     bin --> net
 ```
@@ -99,6 +103,7 @@ flowchart TB
 | `stations.json` | Station layer | Durable user data | The browser's Radio tab: add, remove, re-probe. Only `tui` writes it, so `state.lock` serializes writers and it has no lock of its own |
 | `feeds/<feed-id>.json` | Feed layer | Disposable, refetchable | `subscribe` and `refresh` |
 | `logs/` | TUI | Disposable | The fd-2 redirect under `tui` |
+| `mpris/cover-<pid>-<seq>.png` | MPRIS | Disposable | `tenuto-mpris`, one file per published cover. A new cover replaces the previous file, the bus thread removes its last one on exit, and startup clears files left by exited processes |
 
 On macOS and Windows the XDG paths resolve to the platform's own data, cache and local-data directories.
 
@@ -636,7 +641,7 @@ the script tests without a container.
 - **Position lives in the worker.** Only loading, restart, a successful seek, and resume of a stored target establish a new one.
 - **The library layer is async but does synchronous filesystem work between awaits.** The CLI blocks a `main` with nothing else to do. The terminal player keeps that work on the browse worker.
 - **Feed formats.** RSS 2.0 and Atom 1.0 only. RSS 1.0 and JSON Feed are refused by name. Bytes decide the encoding. An undecodable document is refused, not repaired.
-- **Out of scope for v0.1.** Streaming services, yt-dlp, media servers, equalizer, themes, plugins, a daemon and client split, remote control, MPRIS and media keys. The spectrum analyzer is the one visual addition the M5 spec allowed.
+- **Out of scope.** Streaming services, yt-dlp, media servers, equalizer, themes, plugins, a daemon and client split, and any remote control beyond MPRIS (M11). The spectrum analyzer is the one visual addition the M5 spec allowed.
 - **Known limitations.** Non-UTF-8 paths. Estimated position where the device reports no latency. Seek support that stays `Unknown` until probed. Symphonia reads an embedded picture in full while probing, before the 10 MiB artwork cap applies. Shoutcast v1 (`ICY 200 OK`) and streams without ICY headers are not playable (`docs/m1-known-debt.md`).
 - **Live radio, next.** ICY now-playing titles (M7.2) are the planned follow-up: a pure demultiplexer ahead of Symphonia, a generation-keyed latest-value slot, and a droppable `StreamMetadata` event. Not implemented; recorded in the M7 spec §12 so the seams are in the right place.
 - **Finite recovery does not revalidate across a reopen (M10).** A reopen probes fresh at byte zero without the previous response's validator, so an episode replaced on the server during an outage resumes at the same time offset in the new file. Stop → Play has the same limit.

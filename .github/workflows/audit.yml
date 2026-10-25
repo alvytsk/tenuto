@@ -10,8 +10,12 @@ on:
     paths:
       - "Cargo.lock"
 
+# audit-check reports through a check run on push and pull_request, and
+# opens an issue per advisory on the scheduled run.
 permissions:
   contents: read
+  checks: write
+  issues: write
 
 jobs:
   audit:
