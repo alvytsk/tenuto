@@ -56,6 +56,7 @@ Work goes bottom-up through the layers of `architecture.md` §4. M9.1 comes firs
 **Cover tracker.**
 - Problem: choosing the active cover is split between three runtime queries (`cover_key` :485, `active_cover` :509, `active_cover_kind` :553) and a deduplication private to the TUI (`Artwork::poll`, `tui/mod.rs:503-560`). `tests/m7_1_station_artwork.rs:330` records that the real mechanism cannot be driven from a test.
 - Direction: an application-side tracker yields the active entry's cover kind and image state. The TUI keeps only terminal encoding and placement.
+- Status: shipped after M11, which had added a second fetcher for the MPRIS snapshot beside the TUI's. `application::cover::Covers` owns the one `tenuto-artwork` worker, the source dedup and the fetch-ahead; `PlayerRuntime::cover` serves the TUI's `CoverCache` and the snapshot the same `Arc`, so a remote cover is fetched once per track. `tests/m7_1_station_artwork.rs` drives the real mechanism through the runtime.
 
 **Playlist navigator.** Depends on PlaylistSet.
 - Problem: the viewed playlist, its selection and the browser's destination rows are split between the runtime and the TUI. The browser gets its rows two ways: `view.rows` at `tui/mod.rs:401`, and a fresh `Arc` at `tui/mod.rs:780`. The fresh `Arc` defeats the `Arc::ptr_eq` skip that #29 added.

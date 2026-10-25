@@ -14,8 +14,9 @@ use std::time::Duration;
 use url::Url;
 
 use crate::application::browse::TreeCollected;
+use crate::application::cover::{Covers, Shown};
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
-use crate::application::mpris::cover::{CoverFetcher, shrink_loader};
+use crate::application::mpris::cover::CoverImage;
 use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
@@ -29,6 +30,7 @@ use crate::application::view::{
     NowPlaying, PersistenceStatus, PlayerView, QueueRow, entry_plain_title, filled, playlist_tabs,
     queue_rows, saved_history,
 };
+use crate::artwork::decode::ArtworkError;
 use crate::artwork::default::CoverKind;
 use crate::artwork::worker::{CoverSource, default_loader};
 use crate::clock::{Clock, SystemClock};
@@ -420,12 +422,18 @@ pub struct PlayerRuntime {
     /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
     rows: Cell<Option<CachedRows>>,
     /// The runtime half of the desktop media-controls channel (M11).
-    /// The controls with the fetcher of the cover they publish, so the
-    /// fetcher cannot outlive them.
-    media_controls: Option<(MediaControls, CoverFetcher)>,
+    media_controls: Option<MediaControls>,
+    /// The playing media's cover, for the front end and the media controls
+    /// alike. Tracked while either shows it.
+    covers: Covers,
+    /// Whether the front end draws covers ([`Self::enable_covers`]).
+    covers_drawn: bool,
     /// What `covers` was last asked for: the playing media, `mirror.load`
-    /// and whether HTTP is available. Compared before any store read.
-    cover_wanted_key: Option<(Option<MediaId>, Option<LoadRequestId>, bool)>,
+    /// and whether HTTP is available. Compared before any store read, since
+    /// resolving a podcast's cover reads the feed cache.
+    cover_seen: Option<(Option<MediaId>, Option<LoadRequestId>, bool)>,
+    /// The loading entry whose cover `covers` was last asked to fetch ahead.
+    loading_seen: Option<QueueEntryId>,
     /// The podcast name of the playing media, looked up once per change.
     podcast_name: Option<(MediaId, Option<String>)>,
 }
@@ -473,7 +481,10 @@ impl PlayerRuntime {
             viewed,
             rows: Cell::new(None),
             media_controls: None,
-            cover_wanted_key: None,
+            covers: Covers::new(default_loader(parts.hook)),
+            covers_drawn: false,
+            cover_seen: None,
+            loading_seen: None,
             podcast_name: None,
         }
     }
@@ -481,11 +492,24 @@ impl PlayerRuntime {
     /// Serves desktop media controls: requests are drained and a snapshot
     /// is published on every [`pump`](Self::pump).
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
-        self.media_controls = Some((
-            controls,
-            CoverFetcher::new(shrink_loader(default_loader(TestHook::None))),
-        ));
-        self.cover_wanted_key = None;
+        self.media_controls = Some(controls);
+    }
+
+    /// The front end draws covers: [`Self::cover`] follows the playing media
+    /// from the next [`pump`](Self::pump) on.
+    pub fn enable_covers(&mut self) {
+        self.covers_drawn = true;
+    }
+
+    /// The playing media's cover, while covers are tracked: the front end
+    /// has enabled them, or media controls are attached.
+    pub fn cover(&self) -> Option<&Shown> {
+        self.covers.shown()
+    }
+
+    /// Why the shown cover failed to load, once.
+    pub fn take_cover_failure(&mut self) -> Option<ArtworkError> {
+        self.covers.take_failure()
     }
 
     /// Turns desktop media controls on. The bus connects on its own thread,
@@ -566,7 +590,7 @@ impl PlayerRuntime {
     /// delivers the stream's embedded cover.
     // A feed refresh or a station re-probe that changes an entry's artwork
     // URL is not itself part of this key — but `load` still moves on the
-    // entry's next load, and `Artwork::requested` (src/tui/mod.rs) is keyed
+    // entry's next load, and `Covers::requested` (application/cover.rs) is keyed
     // on the cover source as well as the media, so the new art does show on
     // that next load (M7.1 §8.1), not merely "eventually".
     pub fn cover_key(&self) -> Option<CoverKey> {
@@ -730,7 +754,7 @@ impl PlayerRuntime {
         let requests: Vec<_> = self
             .media_controls
             .iter()
-            .flat_map(|(controls, _)| std::iter::from_fn(|| controls.try_recv()))
+            .flat_map(|controls| std::iter::from_fn(|| controls.try_recv()))
             .collect();
         for request in requests {
             if let Some(cmd) = command(request, &self.view()) {
@@ -738,7 +762,41 @@ impl PlayerRuntime {
             }
         }
         self.pump_engine();
+        self.track_covers();
         self.publish_snapshot();
+    }
+
+    /// The playing media: the detached one, else the active entry's.
+    fn playing_media(&self) -> Option<MediaId> {
+        match &self.detached {
+            Some(media) => Some(media.clone()),
+            None => self.active_entry().map(|entry| entry.media().clone()),
+        }
+    }
+
+    /// Keeps `covers` on the playing media, and on the loading entry's cover
+    /// ahead of its `Loaded`, while anything shows covers.
+    fn track_covers(&mut self) {
+        if !self.covers_drawn && self.media_controls.is_none() {
+            return;
+        }
+        let key = (
+            self.playing_media(),
+            self.mirror.as_ref().map(|mirror| mirror.load),
+            self.http.is_some(),
+        );
+        if self.cover_seen.as_ref() != Some(&key) {
+            let wanted = self.playing_cover();
+            self.covers.want(wanted);
+            self.cover_seen = Some(key);
+        }
+        let loading = self.loading_entry();
+        if loading != self.loading_seen {
+            self.loading_seen = loading;
+            let ahead = loading.and_then(|id| self.cover_of(id));
+            self.covers.want_ahead(ahead);
+        }
+        self.covers.poll();
     }
 
     /// The cover source of what is playing, detached media included.
@@ -757,19 +815,15 @@ impl PlayerRuntime {
     }
 
     fn publish_snapshot(&mut self) {
-        // Taken out so `playing_cover(&self)` can run beside the fetcher.
-        let Some((controls, mut covers)) = self.media_controls.take() else {
+        let Some(controls) = &self.media_controls else {
             return;
         };
         if controls.is_closed() {
             // Dropped once the bus thread has exited (no bus, lost connection).
-            self.cover_wanted_key = None;
+            self.media_controls = None;
             return;
         }
-        let media = match &self.detached {
-            Some(media) => Some(media.clone()),
-            None => self.active_entry().map(|entry| entry.media().clone()),
-        };
+        let media = self.playing_media();
         if self.podcast_name.as_ref().map(|(m, _)| m) != media.as_ref() {
             self.podcast_name = media.clone().map(|media| {
                 let name = self.library.as_ref().and_then(|library| {
@@ -780,21 +834,13 @@ impl PlayerRuntime {
         }
         let podcast = self.podcast_name.as_ref().and_then(|(_, n)| n.as_deref());
         let mut snap = snapshot(&self.view(), media.as_ref(), podcast);
-        // Mirrors `cover_key()`, widened for detached media: change both together.
-        let key = (
-            media.clone(),
-            self.mirror.as_ref().map(|m| m.load),
-            self.http.is_some(),
-        );
-        if self.cover_wanted_key.as_ref() != Some(&key) {
-            let wanted = self.playing_cover();
-            covers.want(wanted);
-            self.cover_wanted_key = Some(key);
-        }
-        covers.poll();
-        snap.cover = media.and_then(|m| covers.cover_for(&m));
+        snap.cover = self
+            .covers
+            .shown()
+            .filter(|shown| Some(&shown.media) == media.as_ref())
+            .and_then(|shown| shown.image.clone())
+            .map(CoverImage);
         controls.publish(snap);
-        self.media_controls = Some((controls, covers));
     }
 
     fn pump_engine(&mut self) {
@@ -899,7 +945,6 @@ impl PlayerRuntime {
         // Drop the controls first: the mpris thread then cleans up its cover
         // file while the engine shuts down and the state flushes.
         self.media_controls.take();
-        self.cover_wanted_key = None;
         self.router.cancel();
         // Cancelled, not joined: see `MetadataWorkers::spawn`.
         if let Some(workers) = self.metadata.take() {

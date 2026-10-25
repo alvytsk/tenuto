@@ -7,6 +7,7 @@
 //! result.
 
 pub mod browse;
+pub mod cover;
 pub mod enrich;
 pub mod feed_ops;
 pub mod mpris;

@@ -16,9 +16,8 @@
 //! reads run on a [`BrowseWorker`] started the first time it opens.
 //!
 //! Cover art (§9) is detected once after entering the alternate screen,
-//! loaded for the active local entry on an [`ArtworkWorker`] started the
-//! first time one needs it, and prepared by [`images::CoverCache`] before
-//! each draw — never inside it.
+//! loaded by the runtime ([`PlayerRuntime::cover`]), and prepared by
+//! [`images::CoverCache`] before each draw — never inside it.
 //!
 //! The spectrum row (§10) enables the engine's analysis worker only while
 //! the row exists and playback is `Playing`, and its levels are chosen and
@@ -44,21 +43,20 @@ use crossterm::cursor::Hide;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
-use image::DynamicImage;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui_image::picker::{Picker, ProtocolType};
 
 use crate::application::browse::{BrowseRequest, BrowseResult, BrowseWorker, TreeCollected};
+use crate::application::cover::Shown;
 use crate::application::enrich::default_probe;
 use crate::application::mpris::FailureLog;
 use crate::application::profile::{OpenedState, open_state};
 use crate::application::runtime::{
-    AppCommand, CoverKey, FlushReport, LibraryStores, PlayerRuntime, RuntimeParts,
+    AppCommand, FlushReport, LibraryStores, PlayerRuntime, RuntimeParts,
 };
 use crate::application::view::PlayerView;
-use crate::artwork::worker::{ArtworkWorker, CoverSource, default_loader};
 use crate::clock::{Clock, SystemClock};
 use crate::error::LifecycleError;
 use crate::http::limits::Limits;
@@ -69,10 +67,8 @@ use crate::lifecycle::lock::{LockError, ProfileLock};
 use crate::lifecycle::panic::{FatalCleanup, install_panic_hook};
 use crate::lifecycle::signals::ShutdownSignals;
 use crate::lifecycle::terminal::KITTY_DELETE_ALL;
-use crate::media::id::MediaId;
 use crate::persistence::store::{LoadOutcome, QueueBackup, StateStore};
 use crate::playback::engine::EngineHandle;
-use crate::queue::QueueEntryId;
 use crate::tui::browser::{BrowserEffect, BrowserState};
 use crate::tui::images::{ArtworkMode, CoverCache, failure_status, picker_for, query_terminal};
 use crate::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
@@ -221,6 +217,9 @@ fn start_and_loop(
         .is_some_and(|picker| picker.protocol_type() == ProtocolType::Kitty)
     {
         cleanup.terminal().set_kitty_images(true);
+    }
+    if options.artwork != ArtworkMode::Off {
+        runtime.enable_covers();
     }
     let artwork = Artwork::new(options.artwork, picker, hook);
     stage!(signals, cleanup);
@@ -459,32 +458,9 @@ fn update_spectrum(
 struct Artwork {
     mode: ArtworkMode,
     picker: Option<Picker>,
-    hook: TestHook,
-    /// Started the first time a local entry becomes active, never under
-    /// `--artwork off`.
-    worker: Option<ArtworkWorker>,
-    /// The entry whose cover was last requested, **and the source it was
-    /// requested from**; `None` while the active entry has no cover source
-    /// (see `PlayerRuntime::active_cover`). The source belongs in the key
-    /// because a re-probe can change a station's (or a feed's) artwork URL
-    /// without changing its media identity (M7.1 §8.1).
-    requested: Option<(MediaId, CoverSource)>,
-    /// The `cover_key` last seen; the cover is resolved only when it moves,
-    /// because resolving a podcast's cover reads the feed cache from disk.
-    key: Option<CoverKey>,
-    /// The entry being loaded, whose cover is fetched before its `Loaded`
-    /// makes it active (see `PlayerRuntime::loading_entry`).
-    loading: Option<QueueEntryId>,
-    /// That cover's request, and the cover once it arrives. One slot: a
-    /// decoded cover can run to tens of megabytes.
-    ahead: Option<Ahead>,
+    /// The runtime's cover as last handed to `covers`.
+    shown: Option<Shown>,
     covers: CoverCache,
-}
-
-struct Ahead {
-    media: MediaId,
-    source: CoverSource,
-    image: Option<Arc<DynamicImage>>,
 }
 
 impl Artwork {
@@ -492,109 +468,42 @@ impl Artwork {
         Self {
             mode,
             picker,
-            hook,
-            worker: None,
-            requested: None,
-            key: None,
-            loading: None,
-            ahead: None,
+            shown: None,
             covers: CoverCache::new(hook),
         }
     }
 
-    /// Requests the cover when the active entry's cover source changes, shows
-    /// the placeholder meanwhile and for every other entry, and installs a
-    /// finished cover if it is still for the active entry. A failed load
-    /// leaves the placeholder and, unless there simply is no artwork, a
-    /// status message; a result for an entry no longer active is dropped
-    /// silently.
+    /// Hands the runtime's cover to `covers` when it changes: the
+    /// placeholder while it loads, the image once it lands. With no cover
+    /// source, the last media keeps the placeholder. A failure that is not
+    /// simply missing artwork becomes a status message.
     fn poll(&mut self, runtime: &mut PlayerRuntime) {
         if self.mode == ArtworkMode::Off {
             return;
         }
-        let key = runtime.cover_key();
-        if key != self.key {
-            self.key = key;
-            match runtime.active_cover() {
-                // A key move for a media already requested from the same
-                // source (its load landed, say) resolves to the same cover;
-                // only a new entry, or one whose cover just became
-                // available or changed source (a re-probe, §8.1), is
-                // requested.
-                Some((media, source))
-                    if self.requested.as_ref() == Some(&(media.clone(), source.clone())) => {}
-                Some((media, source)) => {
-                    let ahead = self
-                        .ahead
-                        .take()
-                        .filter(|ahead| ahead.media == media && ahead.source == source);
-                    // Fetched ahead: installed at once, or still on its way
-                    // and installed by the result loop below.
-                    let image = ahead.as_ref().and_then(|ahead| ahead.image.clone());
-                    self.covers
-                        .set_image(media.clone(), runtime.active_cover_kind(), image);
-                    if ahead.is_none() {
-                        self.request(media.clone(), source.clone());
-                    }
-                    self.requested = Some((media, source));
-                }
-                None => {
-                    if let Some((previous, _)) = self.requested.take() {
-                        self.covers
-                            .set_image(previous, runtime.active_cover_kind(), None);
-                    }
-                }
-            }
+        if let Some(status) = runtime
+            .take_cover_failure()
+            .as_ref()
+            .and_then(failure_status)
+        {
+            runtime.set_status(status);
         }
-        let loading = runtime.loading_entry();
-        if loading != self.loading {
-            self.loading = loading;
-            self.ahead = None;
-            if let Some((media, source)) = loading.and_then(|id| runtime.cover_of(id)) {
-                self.request(media.clone(), source.clone());
-                self.ahead = Some(Ahead {
-                    media,
-                    source,
-                    image: None,
-                });
-            }
-        }
-        let Some(worker) = &self.worker else {
+        let current = runtime.cover().cloned();
+        if current == self.shown {
             return;
-        };
-        while let Some(result) = worker.try_result() {
-            if self.requested.as_ref().map(|(media, _)| media) != Some(&result.media) {
-                if let Some(ahead) = &mut self.ahead
-                    && ahead.media == result.media
-                {
-                    match result.image {
-                        Ok(image) => ahead.image = Some(image),
-                        // Requested again once active, to report the failure.
-                        Err(_) => self.ahead = None,
-                    }
-                }
-                continue;
-            }
-            let image = match result.image {
-                Ok(image) => Some(image),
-                Err(error) => {
-                    tracing::debug!(%error, "no cover art for the active entry");
-                    if let Some(status) = failure_status(&error) {
-                        runtime.set_status(status);
-                    }
-                    None
-                }
-            };
-            self.covers
-                .set_image(result.media, runtime.active_cover_kind(), image);
         }
-    }
-
-    fn request(&mut self, media: MediaId, source: CoverSource) {
-        let hook = self.hook;
-        self.worker
-            .get_or_insert_with(|| ArtworkWorker::spawn(default_loader(hook)))
-            .request(media, source);
+        let kind = runtime.active_cover_kind();
+        match &current {
+            Some(shown) => self
+                .covers
+                .set_image(shown.media.clone(), kind, shown.image.clone()),
+            None => {
+                if let Some(previous) = self.shown.take() {
+                    self.covers.set_image(previous.media, kind, None);
+                }
+            }
+        }
+        self.shown = current;
     }
 
     /// Prepares the cover for this frame's cover region, then clears the
