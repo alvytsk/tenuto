@@ -41,7 +41,7 @@ pub enum CoverSource {
 /// cannot see past it: `Remote` compares by URL alone, ignoring which
 /// `HttpService` handle carried it, and `Embedded` compares by `Arc::ptr_eq`
 /// so a re-delivered identical cover still dedups. This is the key
-/// `Artwork::requested` (`src/tui/mod.rs`) widens to, so a re-probed
+/// `Covers::requested` (`src/application/cover.rs`) widens to, so a re-probed
 /// station's changed logo URL is a different source even though its media
 /// identity is not (M7.1 §8.1).
 impl PartialEq for CoverSource {

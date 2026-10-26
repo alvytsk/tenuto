@@ -8,9 +8,6 @@ use std::sync::Arc;
 
 use image::{DynamicImage, ImageFormat};
 
-use crate::artwork::worker::{ArtworkWorker, CoverLoader, CoverSource};
-use crate::media::id::MediaId;
-
 pub const COVER_EDGE: u32 = 512;
 
 /// Equal only to its own clones, so a `Snapshot` stays `PartialEq`.
@@ -27,73 +24,6 @@ impl fmt::Debug for CoverImage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "CoverImage({}x{})", self.0.width(), self.0.height())
     }
-}
-
-/// Fetches the playing media's cover on the artwork worker.
-// ponytail: in `tui`, a remote cover is fetched again here beside
-// `tui::Artwork`. If that matters, share the fetch by having the TUI hand its
-// decoded image to the runtime.
-pub struct CoverFetcher {
-    worker: ArtworkWorker,
-    requested: Option<(MediaId, CoverSource)>,
-    current: Option<(MediaId, CoverImage)>,
-}
-
-impl CoverFetcher {
-    pub fn new(loader: CoverLoader) -> Self {
-        Self {
-            worker: ArtworkWorker::spawn(loader),
-            requested: None,
-            current: None,
-        }
-    }
-
-    /// `wanted` changed: request it (or clear on None). Drops a cover whose
-    /// media differs from `wanted`'s.
-    pub fn want(&mut self, wanted: Option<(MediaId, CoverSource)>) {
-        let media = wanted.as_ref().map(|(media, _)| media);
-        if self.current.as_ref().map(|(m, _)| m) != media {
-            self.current = None;
-        }
-        if self.requested != wanted {
-            if let Some((media, source)) = wanted.clone() {
-                self.worker.request(media, source);
-            }
-            self.requested = wanted;
-        }
-    }
-
-    /// Drains finished jobs; keeps a result only if its media is the
-    /// requested one (Ok becomes current, Err clears it).
-    pub fn poll(&mut self) {
-        while let Some(result) = self.worker.try_result() {
-            if self.requested.as_ref().map(|(m, _)| m) != Some(&result.media) {
-                continue;
-            }
-            self.current = result.image.ok().map(|i| (result.media, CoverImage(i)));
-        }
-    }
-
-    pub fn cover_for(&self, media: &MediaId) -> Option<CoverImage> {
-        let (m, image) = self.current.as_ref()?;
-        (m == media).then(|| image.clone())
-    }
-}
-
-/// Wraps `inner` so the worker shrinks a decoded cover to `COVER_EDGE` at
-/// once: the fetcher then keeps a small image, and the resize runs off the
-/// bus thread.
-pub fn shrink_loader(inner: CoverLoader) -> CoverLoader {
-    Arc::new(move |source| {
-        let image = inner(source)?;
-        Ok(
-            if image.width() > COVER_EDGE || image.height() > COVER_EDGE {
-                image.thumbnail(COVER_EDGE, COVER_EDGE)
-            } else {
-                image
-            },
-        )
-    })
 }
 
 /// Writes `cover-<pid>-<seq>.png`: the pid keeps URLs distinct between runs
@@ -152,9 +82,6 @@ fn process_alive(pid: u32) -> bool {
 mod tests {
     use super::*;
     use image::DynamicImage;
-    use std::time::{Duration, Instant};
-
-    use crate::media::id::AbsolutePath;
 
     fn img(w: u32, h: u32) -> DynamicImage {
         DynamicImage::new_rgb8(w, h)
@@ -231,54 +158,5 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["cover-1-1.png", "cover-1-2.png.tmp", "keep.txt"]);
-    }
-
-    #[test]
-    fn the_shrinking_loader_caps_the_long_edge() {
-        let big: CoverLoader = Arc::new(|_| Ok(img(3000, 2000)));
-        let small: CoverLoader = Arc::new(|_| Ok(img(100, 80)));
-        let source = local("x").1;
-        let out = shrink_loader(big)(&source).unwrap();
-        assert_eq!((out.width(), out.height()), (512, 341));
-        let out = shrink_loader(small)(&source).unwrap();
-        assert_eq!((out.width(), out.height()), (100, 80));
-    }
-
-    fn local(name: &str) -> (MediaId, CoverSource) {
-        let path = AbsolutePath::new(format!("/{name}").into()).unwrap();
-        (MediaId::LocalFile(path.clone()), CoverSource::Local(path))
-    }
-
-    #[test]
-    fn a_stale_result_never_becomes_the_cover() {
-        let (release_a, held) = crossbeam_channel::bounded::<()>(0);
-        let (started_tx, started) = crossbeam_channel::bounded::<()>(1);
-        let loader: CoverLoader = Arc::new(move |source| match source {
-            CoverSource::Local(p) if p.as_str().ends_with("/a") => {
-                let _ = started_tx.send(());
-                let _ = held.recv();
-                Ok(img(1, 1))
-            }
-            _ => Ok(img(2, 2)),
-        });
-        let mut fetcher = CoverFetcher::new(loader);
-        let (a, a_source) = local("a");
-        let (b, b_source) = local("b");
-        fetcher.want(Some((a.clone(), a_source)));
-        started
-            .recv_timeout(Duration::from_secs(10))
-            .expect("A's job never started"); // A's job is now in flight, blocked.
-        fetcher.want(Some((b.clone(), b_source)));
-        drop(release_a);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while fetcher.cover_for(&b).is_none() {
-            assert!(Instant::now() < deadline, "B's cover never arrived");
-            fetcher.poll();
-            assert!(fetcher.cover_for(&a).is_none(), "A's cover leaked");
-            std::thread::yield_now();
-        }
-        let image = fetcher.cover_for(&b).unwrap();
-        assert_eq!((image.0.width(), image.0.height()), (2, 2));
-        assert!(fetcher.cover_for(&a).is_none());
     }
 }

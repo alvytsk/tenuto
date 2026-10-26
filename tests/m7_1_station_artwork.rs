@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use runtime::enqueue;
 use support::server::{Script, TestServer};
+use tenuto::application::mpris::channel;
 use tenuto::application::runtime::{AppCommand, EnqueueItem, LibraryStores};
 use tenuto::artwork::worker::{CoverSource, default_loader};
 use tenuto::clock::SystemClock;
@@ -192,6 +193,64 @@ fn listing_enqueueing_and_restoring_a_station_request_no_logo() {
     logo_server.shutdown();
 }
 
+/// The player's cover area and the desktop media controls share one fetch:
+/// with both showing covers, the logo is requested once and both get the
+/// same decoded image.
+#[test]
+fn the_player_and_the_media_controls_share_one_logo_fetch() {
+    let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let logo_server = TestServer::start(Script::serving(png_bytes()));
+    let station_server = TestServer::start(
+        Script::from_fixture("sine-noxing.mp3")
+            .icy_station()
+            .icy_logo(logo_server.url("/logo.svg")),
+    );
+    let http = service();
+    let st = store(root.path());
+    add(&http, &st, &station_server.url("/radio")).unwrap_or_else(|error| panic!("{error}"));
+
+    let mut rig = runtime::rig_with_library(PersistedState::default(), stores(root.path()));
+    rig.runtime.enable_covers();
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    enqueue(
+        &mut rig.runtime,
+        vec![EnqueueItem::from_input(&station_server.url("/radio"))],
+    );
+    let station = runtime::row_ids(&rig.runtime)[0];
+    rig.runtime.handle(AppCommand::PlayEntry(station));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (shown, published) = loop {
+        runtime::step(&mut rig);
+        let shown = rig.runtime.cover().and_then(|shown| shown.image.clone());
+        let published = remote
+            .snapshots
+            .borrow()
+            .as_ref()
+            .and_then(|snapshot| snapshot.cover.clone());
+        if let (Some(shown), Some(published)) = (shown, published) {
+            break (shown, published);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the logo never reached both: {:?}",
+            rig.runtime.view()
+        );
+    };
+    assert!(Arc::ptr_eq(&shown, &published.0), "one decoded image");
+    runtime::pump_for(&mut rig, Duration::from_secs(1));
+    assert_eq!(
+        logo_requests(&logo_server, "/logo.svg"),
+        1,
+        "exactly one logo request"
+    );
+
+    let _ = rig.runtime.shutdown();
+    station_server.shutdown();
+    logo_server.shutdown();
+}
+
 #[test]
 fn playing_a_station_requests_its_logo_exactly_once() {
     let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
@@ -216,7 +275,7 @@ fn playing_a_station_requests_its_logo_exactly_once() {
     let source = wait_for_remote_logo_path(&mut rig, "/logo.svg");
 
     // `active_cover` alone never touches the network; only pushing the
-    // source through the loader (what `Artwork::poll` does in the TUI) does.
+    // source through the loader (what the runtime's `Covers` does) does.
     let image = default_loader(TestHook::None)(&source);
     assert!(image.is_ok(), "the logo should decode: {:?}", image.err());
     assert_eq!(
@@ -306,12 +365,10 @@ fn a_station_with_no_logo_falls_back_to_the_embedded_cover() {
     server.shutdown();
 }
 
-/// Controller ruling: `Artwork::poll` is private to the TUI and cannot be
-/// driven from an integration test, so this proves the mechanism at the
-/// seam this test *can* reach — `active_cover` returning the re-probed
-/// logo's URL on the entry's next load, a source unequal (widened dedup
-/// key) to the one captured on the first play, and the loader actually
-/// reaching the new path.
+/// The re-probed logo, at the seam below `PlayerRuntime::cover`:
+/// `active_cover` returns the new URL on the entry's next load, a source
+/// unequal (widened dedup key) to the one captured on the first play, and
+/// the loader actually reaches the new path.
 #[test]
 fn a_re_probed_logo_replaces_the_old_one_on_the_next_load() {
     let logo_server = TestServer::start(Script::serving(png_bytes()));
