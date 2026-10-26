@@ -2036,7 +2036,7 @@ impl Worker {
         let captured_exactly = self.capture_position();
         self.teardown();
         self.source = None;
-        // MINOR 5 (fix round 1): `descriptor`'s own doc comment says "set by
+        // `descriptor`'s own doc comment says "set by
         // `load`, cleared by `shutdown`" - make that true rather than leave
         // it stale. Latent either way, since every `shutdown()` call site
         // returns immediately after, but a stale value contradicts the
@@ -2113,7 +2113,7 @@ impl Worker {
                     ..
                 } = self;
                 let (Some(source), Some(converter)) = (source.as_mut(), converter.as_mut()) else {
-                    // IMPORTANT 2 (fix round 1): a retired remote source is
+                    // A retired remote source is
                     // `None` here with `descriptor` still naming it - the
                     // very next pass after `is_retired_read`'s own arm ran,
                     // since `SEEK` takes no step-1 action and `select!` can
@@ -2433,7 +2433,7 @@ impl Worker {
         // consumed. A truncated or timed-out tail cannot set completed
         // status.
         if let Some(failure) = self.confirm_remote_completion() {
-            // IMPORTANT 1 (final review), site 6: `Cancelled` here means a
+            // `Cancelled` here means a
             // stop, seek or shutdown retired the confirmation read, not that
             // the tail failed to confirm anything. Reporting `Failed` would
             // be announcing a fault over an operation that is about to be
@@ -2482,7 +2482,7 @@ impl Worker {
         if !self.source_is_remote() {
             return None;
         }
-        // MINOR 7 (fix round 1): `Duration::default()` is zero, which would
+        // `Duration::default()` is zero, which would
         // make `demanded >= stall` fire on the very first slice and report a
         // stall the server never caused. `source_is_remote()` above means an
         // `HttpService` was necessarily installed to have opened this source
@@ -2612,7 +2612,7 @@ impl Worker {
 
         let prepared = match prepare(&source, &self.prepare_context()) {
             Ok(prepared) => prepared,
-            // IMPORTANT 1 (final review): a stop or shutdown landing during
+            // A stop or shutdown landing during
             // this open must not be reported as `Failed` - `self.state` is
             // still `Loading` here (set above), so leaving it alone is what
             // lets the very next pass's `do_stop` actually run instead of
@@ -2681,7 +2681,7 @@ impl Worker {
                     (target, disposition)
                 }
             }
-            // §4.3 (Task 6 fix round 1): the estimate always wins as the
+            // The estimate always wins as the
             // seek target, unconditionally — it is a preference between two
             // already-known locations decided upstream in
             // `resume::resume_intent`, not a duration-validated choice,
@@ -2785,8 +2785,8 @@ impl Worker {
             // failure lands back in `Failed` and the next `Play` tries once
             // again, driven by the listener each time.
             //
-            // The state moves to `Loading` *before* `restore()` runs (fix
-            // round 1, IMPORTANT 4): `fail_with`'s very first statement
+            // The state moves to `Loading` *before* `restore()` runs:
+            // `fail_with`'s very first statement
             // returns early when `self.state == Failed`, which exists so a
             // repeating fatal fault does not re-announce itself every loop
             // iteration - but a listener-driven retry is not that, and a
@@ -2851,8 +2851,8 @@ impl Worker {
         }
         // §9: a source that cannot seek cannot restore a nonzero position,
         // and starting at zero silently would be exactly the reset the
-        // milestone's invariant forbids. Checked *before* any reopen (fix
-        // round 1, IMPORTANT 3): `self.capabilities` already answers this
+        // milestone's invariant forbids. Checked *before* any reopen:
+        // `self.capabilities` already answers this
         // from the source's last time open - a stop-then-play cycle reopens
         // the same location and gets the same answer - so opening a live
         // fetch only to reject and abandon it here would leak the
@@ -2867,7 +2867,7 @@ impl Worker {
         // already live, so the local path is unchanged.
         match self.ensure_source_open() {
             Ok(_) => {}
-            // IMPORTANT 1 (final review): the state a caller left this in
+            // The state a caller left this in
             // (`Loading`, from `play`'s `Failed` arm) survives untouched, so
             // a stop landing during this reopen reaches the next pass's
             // `do_stop` instead of being swallowed by a `Failed` it did not
@@ -3150,7 +3150,7 @@ impl Worker {
             return;
         }
         // A source known to be unsupported is rejected before any reopen,
-        // playing or stopped alike (fix round 1, IMPORTANT 3): checked
+        // playing or stopped alike: checked
         // before `ensure_source_open` because `self.capabilities` already
         // answers this from the source's last time open - a retired remote
         // source's location hasn't changed, so opening a live fetch only to
@@ -3175,7 +3175,7 @@ impl Worker {
         // reject the seek as "nothing is loaded" on a source whose identity,
         // descriptor and position the worker is still holding.
         if let Err(error) = self.ensure_source_open() {
-            // IMPORTANT 1 (final review), site 4: a stop or shutdown landing
+            // A stop or shutdown landing
             // during this reopen is a cancellation, not a validation
             // failure - §8's "never `SeekRejected`, which would misreport a
             // cancellation" applies here exactly as it already does to the
@@ -3207,8 +3207,7 @@ impl Worker {
                     match self.verify_seek_support() {
                         Ok(true) => {}
                         // A genuine demuxer refusal: this and only this
-                        // means "this source cannot seek" (IMPORTANT 1,
-                        // final review, site 5).
+                        // means "this source cannot seek".
                         Ok(false) => {
                             self.reject_seek("this source cannot seek".into());
                             return;
@@ -3243,7 +3242,7 @@ impl Worker {
         let playing = self.state == PlaybackState::Playing;
         self.capture_position();
         let preserved = self.position;
-        // Deliberately no pre-emptive `begin()` here (fix round 1, MINOR 8).
+        // Deliberately no pre-emptive `begin()` here.
         // The gate above already refused every source that would reach this
         // point without a `MediaSource::seek()` call to answer it (Symphonia
         // reads forward on the *same* generation for one it cannot really
@@ -3343,7 +3342,7 @@ impl Worker {
         }
         let reopened = match self.ensure_source_open() {
             Ok(reopened) => reopened,
-            // IMPORTANT 1 (final review): same rule as `restore`'s arm above
+            // Same rule as `restore`'s arm above
             // - a cancellation must not become `Failed`, or the stop that
             // caused it is swallowed by `do_stop`'s own early return.
             Err(error) if is_cancelled(&error) => return,
@@ -3661,7 +3660,7 @@ impl Worker {
             prepared.source.note_demuxer_proven();
             prepared.capabilities = prepared.source.capabilities();
         }
-        // MINOR 6 (fix round 1): a stop-then-play cycle reopens against the
+        // A stop-then-play cycle reopens against the
         // same location and answers with the same capabilities every time;
         // only announce when something actually changed.
         if self.capabilities != prepared.capabilities {
@@ -3684,9 +3683,9 @@ impl Worker {
     /// source's own evidence on success, so a later caller reads `Native`
     /// off the same field this one just updated.
     ///
-    /// `Result<bool, PlaybackError>`, not a bare `bool` (IMPORTANT 1, final
-    /// review, site 5): the trial goes through `HttpMediaSource::seek`, which
-    /// issues a real range request, so a cancellation and a typed remote
+    /// `Result<bool, PlaybackError>`, not a bare `bool`: the trial goes
+    /// through `HttpMediaSource::seek`, which issues a real range request,
+    /// so a cancellation and a typed remote
     /// failure (a 416, `ResourceChanged`, a stall...) are both reachable here
     /// and neither is the same fact as a demuxer that genuinely refused the
     /// seek. `Ok(false)` is reserved for that last case alone; the caller
@@ -3777,11 +3776,9 @@ fn is_cancelled(error: &PlaybackError) -> bool {
         // never routed through Symphonia at all - is not caught by
         // `remote_cause` below: `#[error(transparent)]` forwards `source()`
         // to the inner `RemoteFailure`'s own `source()`, and `Cancelled` has
-        // none, so walking the chain finds nothing (fix round 2, IMPORTANT
-        // 1: the reopen-cancellation tests this fixed added are what caught
-        // this - every call site that previously used this helper only ever
-        // saw a *decode-layer* error Symphonia had mangled a `RemoteIoError`
-        // into, which `remote_cause` walks to correctly).
+        // none, so walking the chain finds nothing. `remote_cause` handles
+        // the *decode-layer* case, where Symphonia has wrapped the failure
+        // in a `RemoteIoError`.
         || matches!(error, PlaybackError::Remote(RemoteFailure::Cancelled))
         || matches!(remote_cause(error), Some(RemoteFailure::Cancelled))
 }
@@ -3821,7 +3818,7 @@ fn stop_or_shutdown(word: u8) -> bool {
 /// `SeekMode::Coarse` is what `seek_refined` performs now (`decode.rs`), but
 /// that mode swap only changes *behaviour* for MP3 - it is the only
 /// `FormatReader::seek` in this crate's dependency tree that reads `mode` at
-/// all (fix round 1). So the provenance this returns is **not** asserted
+/// all. So the provenance this returns is **not** asserted
 /// here: it is read straight off `SeekOutcome::provenance`, which
 /// `seek_refined` itself computes from the reader's own `format_info()` -
 /// `Estimated` for MP3, `Established` for every other format this crate
@@ -3843,8 +3840,8 @@ fn seek_bounded(
     });
     source_interrupt.set_operation_deadline(None);
     // Provenance comes from `SeekOutcome` itself, not asserted here: it
-    // follows the demuxer that actually ran `Coarse` (MP3 only - fix round
-    // 1), never asserted uniformly for every landing regardless of format.
+    // follows the demuxer that actually ran `Coarse` (MP3 only),
+    // never asserted uniformly for every landing regardless of format.
     outcome.map(|outcome| {
         let provenance = outcome.provenance;
         (outcome, provenance)

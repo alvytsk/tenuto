@@ -271,7 +271,7 @@ impl DecodedSource {
     /// confirmed position depends on which demuxer actually ran — see
     /// `SeekOutcome::provenance` and this method's own computation of it,
     /// just below the `seek()` call. It is *not* unconditionally
-    /// `Estimated`: `Coarse` only changes behaviour for MP3 (fix round 1).
+    /// `Estimated`: `Coarse` only changes behaviour for MP3.
     ///
     /// The reader can only seek to a packet boundary, so refinement is
     /// required for an exact landing regardless of mode; it is also what
@@ -297,7 +297,7 @@ impl DecodedSource {
             )
             .map_err(|source| PlaybackError::SeekFailed { target, source })?;
         // Provenance follows the demuxer that actually ran `Coarse`, not the
-        // `SeekMode` this call requests uniformly (M3.1 Task 4, fix round 1).
+        // `SeekMode` this call requests uniformly.
         // Across this crate's whole dependency tree, MP3's `MpaReader` is the
         // *only* `FormatReader::seek` that reads its `mode` argument at all —
         // FLAC's own seek (`symphonia-bundle-flac`) binary-searches on real

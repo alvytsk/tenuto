@@ -399,7 +399,7 @@ async fn run_fetch(
             let mut demanded = Duration::ZERO;
             let mut last = interrupt.now();
             loop {
-                // Deliberately no `wait_while_frozen` here (fix round 1):
+                // Deliberately no `wait_while_frozen` here:
                 // delivery must not be gated on the freeze level. `ByteChannel::
                 // push` already blocks on capacity once the buffer is full, and
                 // that backpressure — not a producer-side freeze gate — is what
