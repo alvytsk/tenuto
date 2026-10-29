@@ -1,0 +1,94 @@
+name: macOS build
+
+# One-off, unsigned universal (arm64 + x86_64) macOS build of the commit this
+# branch points at. Not part of CI or the release pipeline: it lives only on
+# the macos-build branch and uploads a workflow artifact, never a release.
+
+on:
+  push:
+    branches: [macos-build]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (macos-latest, universal)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup target add --toolchain 1.98.1 aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Package
+        env:
+          # Keeps bsdtar from adding AppleDouble ._ files for extended attributes.
+          COPYFILE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          name="tenuto-${version}-universal-apple-darwin"
+          stage=$(mktemp -d)
+          mkdir -p "$stage/$name" dist
+          lipo -create -output "$stage/$name/tenuto" \
+            target/aarch64-apple-darwin/release/tenuto \
+            target/x86_64-apple-darwin/release/tenuto
+          cp README.md CHANGELOG.md LICENSE "$stage/$name/"
+          tar -czf "dist/$name.tar.gz" -C "$stage" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" >SHA256SUMS)
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "rustc: $(rustc -V)"
+            echo "runner: macOS $(sw_vers -productVersion) $(uname -m)"
+            echo "architectures: $(lipo -archs "$stage/$name/tenuto")"
+            vtool -show-build "$stage/$name/tenuto"
+            otool -L "$stage/$name/tenuto"
+          } >dist/build-info.txt
+          cat dist/build-info.txt
+          echo "VERSION=$version" >>"$GITHUB_ENV"
+          echo "NAME=$name" >>"$GITHUB_ENV"
+      # Runs the binary from the tarball, not from target/, in an empty HOME.
+      # The x86_64 slice runs only where the runner has Rosetta.
+      - name: Smoke test
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          extract=$(mktemp -d)
+          home=$(mktemp -d)
+          tar -xzf "dist/$NAME.tar.gz" -C "$extract"
+          bin="$extract/$NAME/tenuto"
+          archs=$(lipo -archs "$bin")
+          for arch in arm64 x86_64; do
+            case " $archs " in
+              *" $arch "*) ;;
+              *) echo "missing the $arch slice: $archs" >&2; exit 1 ;;
+            esac
+          done
+          [ "$(HOME="$home" "$bin" --version)" = "tenuto $VERSION" ]
+          HOME="$home" "$bin" --help | grep -qF "Usage: tenuto"
+          HOME="$home" TENUTO_AUDIO_OUTPUT=null "$bin" play tests/fixtures/sine.wav </dev/null >play.log 2>&1 \
+            || { tail -n 20 play.log; exit 1; }
+          grep -qF "[ended]" play.log || { tail -n 20 play.log; exit 1; }
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            [ "$(HOME="$home" arch -x86_64 "$bin" --version)" = "tenuto $VERSION" ]
+            echo "x86_64 slice ran under Rosetta"
+          else
+            echo "::notice::No Rosetta on this runner; the x86_64 slice was built but not run"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.NAME }}
+          path: dist/
+          if-no-files-found: error
