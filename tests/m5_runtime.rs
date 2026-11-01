@@ -495,23 +495,43 @@ fn delayed_fixture(path: &str, delay: Duration) -> TestServer {
 
 #[test]
 fn a_refused_load_drained_with_a_later_adoption_does_not_stop_the_adopted_track() {
-    let (_media, root) = media_dir(&["a.flac", "b.flac"]);
-    let mut rig = rig_with(seeded(vec![
-        local_entry(&root.join("a.flac")),
-        local_entry(&root.join("b.flac")),
-    ]));
+    // A's headers land 400 ms before B's, so A's outcome is always queued
+    // and drained first, while B's load is still pending — the window the
+    // stop the refusal asks for must not act in.
+    let a = delayed_fixture("/a.flac", Duration::from_millis(200));
+    let b = delayed_fixture("/b.flac", Duration::from_millis(600));
+    let mut rig = rig_with(PersistedState::default());
+    enqueue(
+        &mut rig.runtime,
+        vec![
+            EnqueueItem::Url(a.url("/a.flac")),
+            EnqueueItem::Url(b.url("/b.flac")),
+        ],
+    );
     let ids = row_ids(&rig.runtime);
     rig.runtime.handle(AppCommand::PlayEntry(ids[0]));
     // Invalidates A's pending load; its `Loaded` asks for a stop.
     rig.runtime.handle(AppCommand::Remove(ids[0]));
     rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
-    // Both outcomes are waiting when the first pump drains them together.
-    std::thread::sleep(Duration::from_secs(1));
+    // Both loads are pending until A's refused `Loaded` retires its
+    // registration, so this steps exactly until that refusal has been
+    // drained and its stop answered — with B's load still pending.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while rig.runtime.session().pending_load_count() > 1 {
+        assert!(
+            Instant::now() < deadline,
+            "A's refused load was never drained; pending {}",
+            rig.runtime.session().pending_load_count()
+        );
+        step(&mut rig);
+    }
     pump_until(&mut rig, "B playing", |view| is_playing(view, ids[1]));
     pump_for(&mut rig, Duration::from_millis(300));
     let view = rig.runtime.view();
     assert!(is_playing(&view, ids[1]), "B keeps playing: {view:?}");
     let _ = rig.runtime.shutdown();
+    a.shutdown();
+    b.shutdown();
 }
 
 #[test]

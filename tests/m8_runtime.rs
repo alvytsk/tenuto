@@ -13,9 +13,10 @@ mod tagged_flac;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids, step};
+use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids, step, wait_off_clock};
 use tenuto::application::browse::TreeCollected;
 use tenuto::application::enrich::{TagProbe, default_probe};
 use tenuto::application::runtime::{
@@ -484,6 +485,22 @@ fn instant_probe() -> TagProbe {
     })
 }
 
+/// How many metadata workers the runtime starts; matches the private
+/// `METADATA_WORKERS` in `application::runtime`.
+const METADATA_WORKERS: usize = 2;
+
+/// `instant_probe` that counts its calls, so a test can tell when the
+/// workers have filled their bounded result channel.
+fn counting_probe(calls: Arc<AtomicUsize>) -> TagProbe {
+    Arc::new(move |path: &AbsolutePath| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(LocalTags {
+            title: Some(format!("Tagged {}", path.as_path().display())),
+            ..LocalTags::default()
+        })
+    })
+}
+
 /// A folder larger than the metadata workers' old 256-job backlog: every row
 /// must end up titled, not just the first few hundred (M8 §5, §8).
 #[test]
@@ -521,11 +538,23 @@ fn one_pump_applies_at_most_a_bounded_batch_of_results() {
     const FILES: usize = 1000;
     let dir = tempfile::tempdir().expect("tempdir");
     let files = empty_files(dir.path(), FILES);
-    let mut rig = rig_with_probe(PersistedState::default(), instant_probe());
+    let probed = Arc::new(AtomicUsize::new(0));
+    let mut rig = rig_with_probe(
+        PersistedState::default(),
+        counting_probe(Arc::clone(&probed)),
+    );
     let first = rig.runtime.viewed();
     rig.runtime.handle(AppCommand::AddTree(tree(first, files)));
-    // Let the workers get well ahead of the runtime before the first pump.
-    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(rig.runtime.rows_of(first).len(), FILES);
+    assert_eq!(rig.runtime.view().status.as_deref(), Some("added 1000"));
+    // The workers' result channel holds one slot per result a pump may
+    // take, and each worker holds at most one finished job more — in the
+    // probe or blocked sending it. Once this many probes have run, the
+    // channel is full, and the pump below faces the largest backlog it
+    // can, however loaded the machine.
+    wait_off_clock("the metadata workers filled the result channel", || {
+        probed.load(Ordering::SeqCst) >= MAX_ENRICHMENT_PER_PUMP + METADATA_WORKERS
+    });
 
     rig.runtime.pump();
     let titled = rig
