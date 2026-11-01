@@ -324,8 +324,15 @@ impl DecodedSource {
         // `actual_ts` is signed and MP3 readers report a NEGATIVE timestamp when
         // seeking into an encoder's delay region, so a bare `as u64` wraps to
         // ~1.8e19 and the next `cursor += frames` overflows. A frame before the
-        // first playable one is position zero.
-        self.cursor = seeked.actual_ts.get().max(0) as u64;
+        // first playable one is position zero. The timestamp also counts in
+        // the track's own time base, which is frames only where the container
+        // chose `1/sample_rate`; it must be converted before it joins the
+        // frame arithmetic below.
+        self.cursor = ticks_to_frames(
+            seeked.actual_ts.get().max(0) as u64,
+            self.time_base,
+            self.sample_rate,
+        );
         self.pending = false;
 
         let target_frames = self.duration_to_frames(target);
@@ -351,7 +358,14 @@ impl DecodedSource {
                     // being decoded again or silently skipped.
                     if self.cursor > target_frames {
                         let overshoot = (self.cursor - target_frames) as usize;
-                        let discard = self.planes[0].len() - overshoot;
+                        // Provably below `planes[0].len()`: the loop guard had
+                        // the cursor under the target when this packet was
+                        // decoded, so the overshoot is smaller than the
+                        // packet's own frame count. Saturating anyway keeps
+                        // the trim from ever underflowing — correct by
+                        // arithmetic, not by an invariant a container must
+                        // happen to uphold.
+                        let discard = self.planes[0].len().saturating_sub(overshoot);
                         for plane in &mut self.planes {
                             plane.drain(0..discard);
                         }
@@ -384,10 +398,6 @@ impl DecodedSource {
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
-
-    pub fn time_base(&self) -> Option<TimeBase> {
-        self.time_base
-    }
 }
 
 fn copy_planar(decoded: &GenericAudioBufferRef<'_>, planes: &mut Vec<Vec<f32>>) {
@@ -405,6 +415,31 @@ fn nearest_frame(value: Duration, sample_rate: u32) -> u64 {
     (value.as_secs_f64() * f64::from(sample_rate)).round() as u64
 }
 
+/// Convert a demuxer timestamp counted in the track's own time base into
+/// frames at `sample_rate` — the one unit every cursor and seek quantity in
+/// this source is kept in.
+///
+/// WAV, FLAC and MP3 all choose `time_base == 1/sample_rate`, so ticks are
+/// already frames and this is the identity. The other containers this crate
+/// opens make no such promise: ISO-BMFF's track time base is the media
+/// header's free-choice timescale, and Matroska timestamps in the segment's
+/// scale, milliseconds by default. A timestamp from either, read as frames
+/// verbatim, is wrong by the ratio of the two rates and corrupts every
+/// comparison and trim that follows the seek. A track without a time base
+/// offers no conversion to perform; its ticks are taken as frames.
+fn ticks_to_frames(ticks: u64, time_base: Option<TimeBase>, sample_rate: u32) -> u64 {
+    let Some(base) = time_base else {
+        return ticks;
+    };
+    // The u128 intermediate holds the worst case (an i64-scale timestamp
+    // times a 32-bit numerator times a 32-bit rate) without truncating;
+    // rounding to nearest inverts `duration_to_frames` exactly, and the
+    // saturating narrow keeps an absurd timestamp from wrapping.
+    let numer = u128::from(ticks) * u128::from(base.numer.get()) * u128::from(sample_rate);
+    let denom = u128::from(base.denom.get());
+    u64::try_from((numer + denom / 2) / denom).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +450,27 @@ mod tests {
             let position = Duration::from_secs_f64(frames as f64 / 48_000.0);
             assert_eq!(nearest_frame(position, 48_000), frames);
         }
+    }
+
+    #[test]
+    fn demuxer_ticks_convert_to_frames_through_the_track_time_base() {
+        // The common case — WAV, FLAC, MP3 — where ticks already are frames.
+        let per_sample = TimeBase::try_new(1, 44_100).unwrap();
+        assert_eq!(ticks_to_frames(18_000, Some(per_sample), 44_100), 18_000);
+        // Matroska's default scale: millisecond ticks at 44.1 kHz.
+        let millis = TimeBase::try_new(1, 1_000).unwrap();
+        assert_eq!(ticks_to_frames(3_500, Some(millis), 44_100), 154_350);
+        // An ISO-BMFF media timescale that is a multiple of the rate divides
+        // out exactly.
+        let double = TimeBase::try_new(1, 88_200).unwrap();
+        assert_eq!(ticks_to_frames(22_050, Some(double), 44_100), 11_025);
+        // A time base coarser than one tick per sample still lands on the
+        // nearest frame.
+        let half = TimeBase::try_new(1, 22_050).unwrap();
+        assert_eq!(ticks_to_frames(5_512, Some(half), 44_100), 11_024);
+        // A track with no time base leaves nothing to convert.
+        assert_eq!(ticks_to_frames(18_000, None, 44_100), 18_000);
+        // A nonsensical timestamp saturates rather than wrapping.
+        assert_eq!(ticks_to_frames(u64::MAX, Some(millis), 44_100), u64::MAX);
     }
 }

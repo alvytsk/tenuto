@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   touch sequence instead. The branch needs a full checkpoint map with no
   evictable entry, which the 512-entry cap cannot produce, so no listener
   ever saw the old line.
+- Seeks in a container that timestamps audio in the container's own scale
+  instead of samples — Matroska audio (`.mka`) is the common case — landed
+  far off the requested position (a 3.5 s seek reported ~1.6 s). The seek
+  landing is now converted through the track's time base before the
+  refinement trim, so it lands on the exact frame as it already did in
+  WAV, FLAC and MP3.
 
 ## [0.4.0] - 2026-10-25
 

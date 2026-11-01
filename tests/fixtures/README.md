@@ -19,6 +19,7 @@ Every audio fixture in this directory, and what it is for:
 | `sine-5s.mp3` | 5 s, 128 kbps MP3 | H1 in MP3: audible playback while the body is still stalled mid-transfer |
 | `sine-5s.wav` | 5 s, PCM s16le | H1 in WAV, same reason |
 | `sine-5s.m4a` | 5 s, mono AAC, **tail-`moov`** | A tail-`moov` file opens over byte ranges and cannot open sequentially |
+| `sine-5s.mka` | 5 s, stereo FLAC in Matroska | A supported container whose track time base (1/1000) is not the sample rate: seeks must convert the demuxer timestamp instead of reading it as frames |
 | `sine-noxing.mp3` | 5 s, MP3, **no Xing/LAME header** | `Continuity::Unresolved` is reachable: nothing in the container or the transport declares a length |
 | `sine-long-noxing.mp3` | 600 s, mono CBR MP3, no Xing | A rescan long enough to *time* (M3.1's seek wedge) |
 | `sine-long-vbr-noxing.mp3` | 600 s, mono, genuinely VBR, no Xing | The byte-offset estimate's actual failure mode, not just its cost |
@@ -111,6 +112,22 @@ this container's demuxer can — every remote source starts at `Unknown` and
 is only promoted by a trial seek that actually lands (§6). The point of this
 fixture is narrower than that promotion: it proves the tail-`moov` file opens
 at all, which a sequential source cannot do.
+
+`sine-5s.mka` — 5 s, 440 Hz, 44100 Hz, stereo, FLAC in a Matroska container:
+
+    ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=5" \
+      -ac 2 -sample_fmt s16 -c:a flac tests/fixtures/sine-5s.mka
+
+Every other audio fixture here timestamps in samples, so its track time base
+is `1/44100` and demuxer timestamps double as frame counts. Matroska
+timestamps in the segment's own scale — milliseconds by spec default — so
+this track's time base is `1/1000` (`ffprobe` reports `time_base=1/1000`
+against `sample_rate=44100`). That divergence is the fixture's whole
+purpose: `tests/decode_fixtures.rs`'s
+`a_seek_on_a_container_whose_time_base_is_not_the_sample_rate_lands_on_target`
+proves `seek_refined` converts the seek landing through the track's time
+base instead of reading millisecond ticks as frames, which used to land a
+3.5 s seek at ~1.6 s. Generated with ffmpeg 9.0.2.
 
 `sine-22k-mono.mp3` — 5 s, 440 Hz, 22050 Hz, mono, MP3 with **no
 Xing/LAME header**:
