@@ -134,6 +134,17 @@ pub fn command(request: Request, view: &PlayerView) -> Option<AppCommand> {
 /// taken it before clients are told it was seeked.
 const SEEK_TOLERANCE: Duration = Duration::from_secs(1);
 
+/// The widest gap between two snapshots that playback is still extrapolated
+/// over when looking for a seek — ten front-end pumps at the slowest
+/// cadence. A seek reaches the bus within a pump or two of the request that
+/// caused it: the runtime drains it and publishes in the same pass. A wider
+/// gap means the front end stalled between pumps, and no seek can happen
+/// inside a stall — every seek arrives as a request the runtime answers —
+/// while playback drifts from wall time for honest reasons: a rebuffer, an
+/// underrun, the track ending. The fresh position is the truth there;
+/// extrapolating across the stall reports a phantom seek.
+const SEEK_WINDOW: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
     Metadata,
@@ -191,11 +202,15 @@ impl Published {
         if let (Some(l), Some(at)) = (last, self.last_at)
             && media(l) == media(&next)
         {
+            let elapsed = now.saturating_duration_since(at);
             let expected = match l.status {
-                Status::Playing => l.position + now.saturating_duration_since(at),
-                _ => l.position,
+                Status::Playing if elapsed <= SEEK_WINDOW => Some(l.position + elapsed),
+                // Beyond the window the front end stalled; the fresh
+                // position is the truth, whatever the wall clock says.
+                Status::Playing => None,
+                _ => Some(l.position),
             };
-            if expected.abs_diff(next.position) > SEEK_TOLERANCE {
+            if expected.is_some_and(|expected| expected.abs_diff(next.position) > SEEK_TOLERANCE) {
                 changes.push(Change::Seeked);
             }
         }
@@ -584,6 +599,34 @@ mod tests {
         let mut other = snap(Some(track("b")), Status::Paused, 1.0);
         other.position = Duration::from_secs(90);
         assert_eq!(p.apply_at(other, later(32)), vec![Change::Metadata]);
+    }
+
+    #[test]
+    fn a_stalled_front_end_does_not_report_a_phantom_seeked() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let playing = |secs: u64| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.position = Duration::from_secs(secs);
+            s
+        };
+        p.apply_at(playing(10), t0);
+        // At pump cadence, playback tracking the wall clock is no seek.
+        assert!(
+            p.apply_at(playing(10), t0 + Duration::from_millis(100))
+                .is_empty()
+        );
+        // The front end stalls 30 s between pumps. Playback carried on, but
+        // the stream rebuffered inside the stall, so the position is behind
+        // the wall clock; that divergence is not a seek.
+        let resumed = t0 + Duration::from_secs(30);
+        let changes = p.apply_at(playing(12), resumed);
+        assert!(!changes.contains(&Change::Seeked), "{changes:?}");
+        // Back at pump cadence, a real jump still reports one.
+        assert_eq!(
+            p.apply_at(playing(60), resumed + Duration::from_millis(100)),
+            vec![Change::Seeked]
+        );
     }
 
     #[test]

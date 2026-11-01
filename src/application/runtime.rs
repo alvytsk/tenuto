@@ -17,7 +17,7 @@ use crate::application::browse::TreeCollected;
 use crate::application::cover::{Covers, Shown};
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
 use crate::application::mpris::cover::CoverImage;
-use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
+use crate::application::mpris::{FailureLog, MediaControls, Snapshot, command, snapshot, spawn};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
 };
@@ -430,6 +430,9 @@ pub struct PlayerRuntime {
     dest_rows: Cell<Option<CachedRows>>,
     /// The runtime half of the desktop media-controls channel (M11).
     media_controls: Option<MediaControls>,
+    /// The last snapshot handed to the media controls: an unchanged state
+    /// publishes nothing, so an idle player never wakes the bus thread.
+    mpris_seen: Option<Snapshot>,
     /// The playing media's cover, for the front end and the media controls
     /// alike. Tracked while either shows it.
     covers: Covers,
@@ -489,6 +492,7 @@ impl PlayerRuntime {
             rows: Cell::new(None),
             dest_rows: Cell::new(None),
             media_controls: None,
+            mpris_seen: None,
             covers: Covers::new(default_loader(parts.hook)),
             covers_drawn: false,
             cover_seen: None,
@@ -497,10 +501,12 @@ impl PlayerRuntime {
         }
     }
 
-    /// Serves desktop media controls: requests are drained and a snapshot
-    /// is published on every [`pump`](Self::pump).
+    /// Serves desktop media controls: requests are drained on every
+    /// [`pump`](Self::pump), and a snapshot is published when it changed.
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
         self.media_controls = Some(controls);
+        // A fresh thread starts with nothing published.
+        self.mpris_seen = None;
     }
 
     /// The front end draws covers: [`Self::cover`] follows the playing media
@@ -781,6 +787,10 @@ impl PlayerRuntime {
             .iter()
             .flat_map(|controls| std::iter::from_fn(|| controls.try_recv()))
             .collect();
+        // A request can leave no trace in the state — a volume written back
+        // at the value it already had — yet the desktop still expects its
+        // `PropertiesChanged`, so one publish follows every batch.
+        let answered = !requests.is_empty();
         for request in requests {
             if let Some(cmd) = command(request, &self.view()) {
                 self.handle(cmd);
@@ -788,7 +798,7 @@ impl PlayerRuntime {
         }
         self.pump_engine();
         self.track_covers();
-        self.publish_snapshot();
+        self.publish_snapshot(answered);
     }
 
     /// The playing media: the detached one, else the active entry's.
@@ -839,13 +849,13 @@ impl PlayerRuntime {
         Some((media.clone(), source))
     }
 
-    fn publish_snapshot(&mut self) {
-        let Some(controls) = &self.media_controls else {
-            return;
-        };
-        if controls.is_closed() {
+    fn publish_snapshot(&mut self, answered: bool) {
+        if let Some(controls) = &self.media_controls
+            && controls.is_closed()
+        {
             // Dropped once the bus thread has exited (no bus, lost connection).
             self.media_controls = None;
+            self.mpris_seen = None;
             return;
         }
         let media = self.playing_media();
@@ -865,7 +875,15 @@ impl PlayerRuntime {
             .filter(|shown| Some(&shown.media) == media.as_ref())
             .and_then(|shown| shown.image.clone())
             .map(CoverImage);
-        controls.publish(snap);
+        // Publish only what changed, the shape `track_covers` uses: an
+        // unchanged snapshot would wake and diff the bus thread for
+        // nothing, ten-plus times a second, idle or not.
+        if answered || self.mpris_seen.as_ref() != Some(&snap) {
+            self.mpris_seen = Some(snap.clone());
+            if let Some(controls) = &self.media_controls {
+                controls.publish(snap);
+            }
+        }
     }
 
     fn pump_engine(&mut self) {

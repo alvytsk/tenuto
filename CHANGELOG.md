@@ -41,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   station logo) is downloaded and decoded once per track instead of twice,
   and the desktop widget gets a cover the player fetched ahead as soon as
   the track starts.
+- With desktop media controls on, the player state now reaches the desktop
+  bus only when it changes. An idle player no longer wakes the bus thread
+  on every front-end pass, ten-plus times a second; the widget sees real
+  changes just as fast, and a volume written from the widget is still
+  answered even when its value did not change.
+
+### Fixed
+
+- The desktop widget no longer reports a phantom seek when the front end
+  stalls between passes (a busy frame, a stalled terminal): playback that
+  drifted from wall time across the stall — a rebuffer, an underrun, the
+  track ending — is no longer announced as a `Seeked` jump.
 
 ### Fixed
 
