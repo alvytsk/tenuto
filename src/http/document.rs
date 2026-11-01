@@ -101,7 +101,12 @@ pub(super) async fn fetch_document(
 /// dependency: HTTP(S) only, a host present, no embedded userinfo. Feed and
 /// HTTP code must not depend on `app.rs`, so the same three checks are
 /// re-expressed here directly against a parsed `Url`.
-fn validate_source_policy(url: &Url) -> Result<(), RemoteFailure> {
+///
+/// Both transports in this module use it: `fetch_document` on its origin and
+/// every redirect hop, `service::fetch` on each media redirect hop, so a
+/// `Location` a user could never type as input is refused wherever it tries
+/// to enter.
+pub(super) fn validate_source_policy(url: &Url) -> Result<(), RemoteFailure> {
     let invalid = |reason: &'static str| RemoteFailure::InvalidSource {
         input: redact_url(url.as_str()),
         reason,

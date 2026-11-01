@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remote media follows the same redirect policy as feed documents: only
+  301/302/303/307/308 are redirects (a 304 or 305 with a `Location` header
+  is answered as the status it is), and every hop's target is re-checked
+  against the source rules, so a redirect to a URL with embedded
+  `user:password@` credentials is refused instead of fetched.
+- The `If-Range` validator of a remote recording is sent only to the URL
+  whose response supplied it, never forwarded to a redirect target — a
+  different origin cannot be trusted with another resource's validator.
 - With desktop media controls on, a remote cover (a podcast image, a
   station logo) is downloaded and decoded once per track instead of twice,
   and the desktop widget gets a cover the player fetched ahead as soon as

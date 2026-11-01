@@ -80,8 +80,19 @@ pub struct Validator {
     pub last_modified: Option<String>,
 }
 
+/// What one accepted response established about *the resource at one URL*:
+/// its total length, its validator, and the URL whose response supplied
+/// both.
+///
+/// The URL is what scopes the validator. An `ETag` identifies a
+/// representation of a single resource, so `If-Range` is sent only on a
+/// request hop that lands on exactly this URL — never forwarded across a
+/// redirect to a different one, which stands for a different resource the
+/// validator says nothing about (the document transport scopes its
+/// conditional headers the same way).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Established {
+    pub url: Url,
     pub total: Option<u64>,
     pub validator: Validator,
 }
@@ -101,14 +112,16 @@ pub enum Accepted {
 }
 
 /// What a validated response established: how its bytes may be used, the
-/// validator to compare against on any later request, its headers, and how
-/// many redirects were followed to reach it.
+/// validator to compare against on any later request, its headers, how many
+/// redirects were followed to reach it, and the URL of the hop that produced
+/// it — the terminal hop, which is the URL a later `If-Range` is scoped to.
 ///
 /// It lives here rather than beside the fetch that produces it because every
 /// field is a response-acceptance value, and the byte channel must be able to
 /// name the type without depending on the HTTP client.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FetchAccepted {
+    pub url: Url,
     pub accepted: Accepted,
     pub validator: Validator,
     pub headers: Headers,
