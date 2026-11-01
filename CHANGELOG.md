@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `If-Range` validator of a remote recording is sent only to the URL
   whose response supplied it, never forwarded to a redirect target — a
   different origin cannot be trusted with another resource's validator.
+- While the file browser is open, a directory's tick mark now follows
+  the playlist its adds land in — the browser's destination — rather
+  than whichever playlist is being viewed behind it.
+- The file browser no longer rebuilds the queue's rows on every keypress
+  while it is open, and the directory lookup behind a subdirectory's
+  tick mark now runs on the browser's worker thread instead of the
+  render loop, so a stalled network mount can no longer freeze the
+  interface while browsing.
 - With desktop media controls on, a remote cover (a podcast image, a
   station logo) is downloaded and decoded once per track instead of twice,
   and the desktop widget gets a cover the player fetched ahead as soon as

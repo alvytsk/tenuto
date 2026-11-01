@@ -90,6 +90,56 @@ fn the_view_reuses_its_rows_until_the_state_or_the_viewed_playlist_moves() {
 }
 
 #[test]
+fn the_browser_destination_rows_are_one_shared_handle_between_key_events() {
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(SHORT.into())],
+    });
+
+    // What every browser key event hands `sync_queue`: one handle until the
+    // state moves, so its pointer-equality cache hits between key events
+    // instead of rebuilding the rows on each of them.
+    assert!(Arc::ptr_eq(
+        &rig.runtime.rows_of(first),
+        &rig.runtime.rows_of(first)
+    ));
+    // Pointed at the viewed playlist, it is the very handle the frames
+    // draw from, so the render pass and the key events agree on it.
+    assert!(Arc::ptr_eq(
+        &rig.runtime.rows_of(first),
+        &rig.runtime.view().rows
+    ));
+
+    rig.runtime.handle(AppCommand::Enqueue {
+        dest: first,
+        items: vec![EnqueueItem::Path(FIVE.into())],
+    });
+    assert_eq!(
+        rig.runtime.rows_of(first).len(),
+        2,
+        "an edit rebuilds the rows"
+    );
+
+    // A destination other than the viewed playlist keeps a handle of its
+    // own, without evicting the frame cache the next view would rebuild
+    // from: the two never pay for each other.
+    rig.runtime
+        .handle(AppCommand::CreatePlaylist("Jazz".into()));
+    let jazz = rig.runtime.viewed();
+    let dest = rig.runtime.rows_of(first);
+    assert_eq!(dest.len(), 2);
+    assert_ne!(jazz, first);
+    assert!(Arc::ptr_eq(&rig.runtime.rows_of(first), &dest));
+    let frame = rig.runtime.view().rows;
+    assert!(
+        Arc::ptr_eq(&rig.runtime.view().rows, &frame),
+        "reading the destination did not evict the frame cache"
+    );
+}
+
+#[test]
 fn a_new_playlist_is_viewed_and_enqueue_goes_where_it_was_told() {
     let mut rig = rig_with(PersistedState::default());
     let first = rig.runtime.viewed();

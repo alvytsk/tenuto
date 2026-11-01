@@ -34,6 +34,7 @@ fn browser(rows: &[(&str, EntryKind)]) -> BrowserState {
         .collect();
     state.apply(BrowseResult::Directory {
         path: "/music".into(),
+        canonical: None,
         entries: Ok(entries),
     });
     state

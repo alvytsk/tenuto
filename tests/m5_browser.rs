@@ -65,6 +65,8 @@ fn listed(root: &Path) -> BrowserState {
     let mut state = BrowserState::new(root.to_path_buf(), dest());
     state.apply(BrowseResult::Directory {
         path: root.to_path_buf(),
+        // What the worker would have resolved for this listing.
+        canonical: std::fs::canonicalize(root).ok(),
         entries: Ok(entries),
     });
     state
@@ -185,6 +187,7 @@ fn enter_on_a_directory_requests_it_and_backspace_returns_to_the_parent() {
     // A late result for the directory just left is not shown.
     state.apply(BrowseResult::Directory {
         path: root.clone(),
+        canonical: None,
         entries: list_directory(&root).map_err(|error| error.to_string()),
     });
     assert!(state.loading);
@@ -192,6 +195,7 @@ fn enter_on_a_directory_requests_it_and_backspace_returns_to_the_parent() {
 
     state.apply(BrowseResult::Directory {
         path: z.clone(),
+        canonical: None,
         entries: list_directory(&z).map_err(|error| error.to_string()),
     });
     assert!(!state.loading);
@@ -240,6 +244,7 @@ fn an_error_listing_is_shown_as_a_value() {
     let mut state = BrowserState::new(root.clone(), dest());
     state.apply(BrowseResult::Directory {
         path: root,
+        canonical: None,
         entries: Err("No such file or directory".to_owned()),
     });
     assert!(!state.loading);
@@ -426,6 +431,7 @@ fn the_overlay_draws_safe_names_marks_and_dimmed_unplayable_episodes() {
 
     state.apply(BrowseResult::Directory {
         path: root.clone(),
+        canonical: None,
         entries: Ok(vec![
             DirEntry {
                 name: "albums".to_owned(),
@@ -501,13 +507,65 @@ fn the_worker_reports_failures_as_error_values() {
         matches!(
             &results[..],
             [
-                BrowseResult::Directory { path, entries: Err(_) },
+                BrowseResult::Directory {
+                    path,
+                    canonical: None,
+                    entries: Err(_),
+                },
                 BrowseResult::Feeds(Err(_)),
                 BrowseResult::Episodes { slug, episodes: Err(_) },
             ] if *path == missing && slug == "radio-t"
         ),
         "{results:?}"
     );
+}
+
+/// The listing answer carries the directory as the filesystem spells it,
+/// resolved on the worker thread: whoever consumes the answer must never
+/// resolve it itself, or the render loop would wait on the filesystem (a
+/// stale NFS mount would stall it).
+#[cfg(unix)]
+#[test]
+fn a_directory_answer_carries_the_canonical_path_the_worker_resolved() {
+    let (_dir, root) = sample_dir();
+    // Ask through a symlink so the navigated path and the canonical one
+    // visibly differ; the answer must name the canonical one.
+    let link_parent = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let link = link_parent.path().join("music");
+    std::os::unix::fs::symlink(&root, &link).unwrap_or_else(|error| panic!("symlink: {error}"));
+    let resolved = std::fs::canonicalize(&link).unwrap_or_else(|error| panic!("resolve: {error}"));
+
+    let worker = BrowseWorker::spawn(None);
+    worker.request(BrowseRequest::Directory(link.clone()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let answer = loop {
+        match worker.try_result() {
+            Some(answer) => break answer,
+            None => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the worker never answered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    };
+    match answer {
+        BrowseResult::Directory {
+            path,
+            canonical,
+            entries,
+        } => {
+            assert_eq!(path, link, "the answer names the navigated path");
+            assert_eq!(
+                canonical.as_deref(),
+                Some(resolved.as_path()),
+                "the answer carries the canonical path, resolved on the worker"
+            );
+            assert!(entries.is_ok(), "{entries:?}");
+        }
+        other => panic!("not a directory answer: {other:?}"),
+    }
 }
 
 /// A Podcasts tab showing `feeds`.
@@ -1636,6 +1694,38 @@ fn a_directory_reached_through_a_symlink_still_draws_the_tick() {
     assert!(state.ticked(0), "z/ holds a queued file");
 }
 
+/// `sync_queue` runs on the render path, so it must not resolve the cwd
+/// against the filesystem itself: the canonical path the listing answer
+/// carried is what decides which subdirectories hold queued files. Here
+/// that path names a directory the disk cannot confirm at all — the tick
+/// can appear only if the answer, not a fresh `canonicalize`, was
+/// consulted.
+#[test]
+fn subdirectory_ticks_follow_the_canonical_path_the_listing_answer_carried() {
+    let (_dir, root) = sample_dir();
+    let aliased = root.join("aliased");
+    let mut state = BrowserState::new(root.clone(), dest());
+    state.apply(BrowseResult::Directory {
+        path: root.clone(),
+        canonical: Some(aliased.clone()),
+        entries: Ok(vec![DirEntry {
+            name: "z".to_owned(),
+            path: root.join("z"),
+            kind: EntryKind::Directory,
+            media: None,
+        }]),
+    });
+    let deep = MediaId::LocalFile(
+        AbsolutePath::new(aliased.join("z").join("deep.flac"))
+            .unwrap_or_else(|error| panic!("absolute path: {error}")),
+    );
+    state.sync_queue(&Arc::new(vec![queue_row(views::ids()[0], deep)]));
+    assert!(
+        state.ticked(0),
+        "z/ holds a queued file under the cwd the answer resolved"
+    );
+}
+
 #[test]
 fn the_same_rows_are_synced_again_once_the_directory_moves() {
     let (_dir, root) = sample_dir();
@@ -1649,10 +1739,27 @@ fn the_same_rows_are_synced_again_once_the_directory_moves() {
     assert!(state.ticked(0), "z/ holds a queued file");
 
     // The subdirectory ticks are relative to `cwd`: unchanged rows under
-    // another directory must not keep the old ones.
-    state.cwd = root.join("elsewhere");
+    // another directory must not keep the old ones. The move arrives the
+    // way it does in the run loop — the cwd moves, a frame syncs while the
+    // listing is still in flight, then the answer lands — and the answer,
+    // not that mid-flight sync, decides the ticks.
+    let elsewhere = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    std::fs::create_dir(elsewhere.path().join("z"))
+        .unwrap_or_else(|error| panic!("mkdir: {error}"));
+    state.cwd = elsewhere.path().to_path_buf();
     state.sync_queue(&rows);
-    assert!(!state.ticked(0));
+    state.apply(BrowseResult::Directory {
+        path: elsewhere.path().to_path_buf(),
+        canonical: std::fs::canonicalize(elsewhere.path()).ok(),
+        entries: Ok(
+            list_directory(elsewhere.path()).unwrap_or_else(|error| panic!("list: {error}"))
+        ),
+    });
+    state.sync_queue(&rows);
+    assert!(
+        !state.ticked(0),
+        "this z/ holds nothing queued; the old directory's ticks are gone"
+    );
 }
 
 #[test]
