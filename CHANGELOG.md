@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Space resumes again after a pause that landed while the player was
+  blocked reading a remote source. The pause adopted the state the wait
+  hook had already announced without flipping the flag Space resolves
+  against, so every later Space was swallowed; only `p`, `s` or a new
+  load could resume. State and flag are now written in one place.
+
 ### Changed
 
 - With desktop media controls on, a remote cover (a podcast image, a

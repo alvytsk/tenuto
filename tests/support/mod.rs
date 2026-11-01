@@ -1254,7 +1254,7 @@ impl TestEngine {
 
     /// The states the engine went through and every failure it reported,
     /// for a panic that has to explain itself from a CI log alone.
-    fn history(&self) -> String {
+    pub fn history(&self) -> String {
         let failures: Vec<String> = lock(&self.inbox)
             .iter()
             .filter_map(|event| match event {

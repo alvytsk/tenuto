@@ -7,6 +7,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
+use tenuto::http::limits::Limits;
 use tenuto::media::capabilities::SeekSupport;
 use tenuto::playback::command::{Admission, PlaybackCommand};
 use tenuto::playback::event::PlaybackEvent;
@@ -356,6 +357,113 @@ fn pause_during_a_stalled_read_freezes_output_and_resume_continues() {
     assert!(
         engine.progress().position > frozen,
         "playback did not continue"
+    );
+
+    engine.finish();
+    server.shutdown();
+}
+
+#[test]
+fn space_resumes_after_a_pause_that_landed_via_the_wait_hook() {
+    // H1 (project review 2026-11-01): a `Pause` submitted while the worker
+    // is blocked inside a network read is announced by the wait hook itself,
+    // and the queued `Pause` that lands once the read completes used to
+    // write `Paused` without flipping `pausable` — so every later Space
+    // (`TogglePause`) resolved to a pause-submit the `Playing` guard
+    // swallowed. This is the resume the sibling test above never asks for:
+    // it resumes with an explicit `Play`, which bypasses the flag.
+    //
+    // A generous stall deadline, not the cached brisk service a plain
+    // `load_remote` shares: draining the ring below takes real wall time
+    // while the read stays genuinely blocked, and that has to fit inside
+    // the deadline or the stall timeout would end the session first.
+    //
+    // The body trickles rather than streaming: a load opens this URL more
+    // than once (probe, reopen, the playback open), every open writes the
+    // same script, and the abandoned connections' server threads would
+    // race the live one to the 32 KiB stall point and park on the gate it
+    // shares — a gate whose `release` frees exactly one parked connection.
+    // Trickle-paced, an abandoned connection is reset by its closed client
+    // a piece or two in, long before its own stall point; the live one is
+    // the only connection that ever parks, so the one `release()` below
+    // can only free it.
+    let server = TestServer::start(
+        Script::from_fixture("sine-5s.flac")
+            .trickle(4096, Duration::from_millis(20))
+            .stall_body_after(32 << 10),
+    );
+    let mut engine = TestEngine::start_idle();
+    engine.load_remote_with_limits(&server.url("/audio.flac"), Limits::default());
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Play),
+        Admission::Accepted
+    );
+    engine.await_state(PlaybackState::Playing);
+    engine.play_for(Duration::from_millis(100));
+    assert!(
+        server.wait_until_stalled(Duration::from_secs(5)),
+        "the read never blocked"
+    );
+
+    // Drain until the callback is handed silence twice: every delivered
+    // byte is decoded, the ring is empty, and the worker is parked inside
+    // the stalled read — the one state whose pauses can only land through
+    // the wait hook. No `settle`-backed helper from here until the stall
+    // is released: a worker blocked in a read cannot answer one.
+    engine.drain_ring_without_advancing_clock();
+    engine.let_time_pass_while_unresponsive(Duration::from_millis(300));
+    let frozen = engine.progress().position;
+    engine.let_time_pass_while_unresponsive(Duration::from_millis(200));
+    assert_eq!(
+        engine.progress().position,
+        frozen,
+        "starvation drifted the position before the pause"
+    );
+
+    // The pause can only land via the hook now; the proof is that the
+    // announcement arrives while the `Pause` itself is still queued behind
+    // the blocked read, waiting for its dispatch.
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::Pause),
+        Admission::Accepted
+    );
+    engine.await_state(PlaybackState::Paused);
+    assert!(
+        engine.pending_commands() > 0,
+        "the pause was dispatched by the loop, not landed via the wait hook"
+    );
+
+    // The read completes and the queued `Pause` is dispatched behind it,
+    // adopting the `Paused` state the hook already announced. An empty
+    // queue means the dispatch — and the `pausable` flip it must carry —
+    // has happened before Space is read. Events are drained throughout:
+    // the worker only admits commands while its outbox is empty, and only
+    // this thread empties the channel.
+    assert!(server.release());
+    let written_at_release = server.bytes_written();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while engine.pending_commands() > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the worker never took the pause queued behind the read; {}, bytes written since release: {}",
+            engine.history(),
+            server.bytes_written().saturating_sub(written_at_release)
+        );
+        while engine.try_event().is_some() {}
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // Space: `TogglePause`, resolved against the worker's own published
+    // state. It must resolve to a resume, not to a swallowed pause.
+    assert_eq!(
+        engine.handle().submit(PlaybackCommand::TogglePause),
+        Admission::Accepted
+    );
+    engine.await_state(PlaybackState::Playing);
+    engine.play_for(frozen + Duration::from_millis(200));
+    assert!(
+        engine.position() > frozen,
+        "Space did not resume playback after a hook-landed pause"
     );
 
     engine.finish();
