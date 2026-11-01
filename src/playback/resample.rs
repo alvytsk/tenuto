@@ -36,6 +36,10 @@ pub struct Converter {
     /// streaming caller drains that buffer between calls: its length says how
     /// much this call produced, never how much the conversion has produced.
     emitted_frames: u64,
+    /// Input frames consumed but never converted — dropped when the
+    /// resampler rejected a chunk — since creation or the last `reset`.
+    /// `finish` reports the total so the flush cannot mask the loss.
+    dropped_frames: u64,
 }
 
 impl Converter {
@@ -81,6 +85,7 @@ impl Converter {
             trim_remaining,
             input_frames_seen: 0,
             emitted_frames: 0,
+            dropped_frames: 0,
         })
     }
 
@@ -95,6 +100,7 @@ impl Converter {
         }
         self.input_frames_seen = 0;
         self.emitted_frames = 0;
+        self.dropped_frames = 0;
     }
 
     pub fn expected_output_frames(&self, input_frames: u64) -> u64 {
@@ -115,7 +121,11 @@ impl Converter {
         while self.buffered_frames() >= CHUNK {
             self.process_chunk(CHUNK, None, out);
             for plane in &mut self.input {
-                plane.drain(..CHUNK);
+                // The chunk is spent whether or not the resampler accepted
+                // it, and a rejected one can leave planes unequal — drain
+                // what each plane holds, never more.
+                let consumed = CHUNK.min(plane.len());
+                plane.drain(..consumed);
             }
         }
     }
@@ -129,6 +139,10 @@ impl Converter {
     /// between calls hands this an almost empty buffer, and a flush sized from
     /// that would append several chunks of pure silence and report frames the
     /// media does not contain.
+    ///
+    /// If resampler errors dropped input frames on the way here, the flush
+    /// pads this segment back up to its expected extent with silence, so the
+    /// loss is reported here rather than left invisible in the frame counts.
     pub fn finish(&mut self, out: &mut Vec<f32>) {
         if self.resampler.is_none() {
             return;
@@ -165,10 +179,27 @@ impl Converter {
             out.truncate(out.len().saturating_sub(samples));
             self.emitted_frames -= drop as u64;
         }
+        if self.dropped_frames > 0 {
+            tracing::warn!(
+                dropped = self.dropped_frames,
+                emitted = self.emitted_frames,
+                expected,
+                "the resampler dropped input frames; that much audio is \
+                 silence or missing at the end of this segment"
+            );
+        }
     }
 
     fn buffered_frames(&self) -> usize {
         self.input.first().map_or(0, Vec::len)
+    }
+
+    /// Count and log a chunk the resampler refused: its `frames` valid input
+    /// frames were consumed and will never be converted, so the loss has to
+    /// be visible instead of silent.
+    fn log_dropped_chunk(&mut self, frames: usize, what: &str, error: &impl std::fmt::Display) {
+        self.dropped_frames += frames as u64;
+        tracing::warn!(frames, %error, "{what}; dropping the chunk's audio");
     }
 
     fn process_chunk(&mut self, len: usize, partial: Option<usize>, out: &mut Vec<f32>) {
@@ -183,31 +214,49 @@ impl Converter {
         let Some(resampler) = self.resampler.as_mut() else {
             return;
         };
-        let Ok(input) = SequentialSliceOfVecs::new(&self.input[..], channels, len) else {
-            return;
+        // Valid input frames at stake in this chunk: the whole chunk mid-
+        // stream, only the real tail when flushing a partial one, none when
+        // the chunk is pure flush padding.
+        let frames = partial.map_or(len, |valid| valid.min(len));
+        let input = match SequentialSliceOfVecs::new(&self.input[..], channels, len) {
+            Ok(input) => input,
+            Err(error) => {
+                self.log_dropped_chunk(frames, "cannot wrap the resampler input planes", &error);
+                return;
+            }
         };
-        let Ok(mut output) =
-            SequentialSliceOfVecs::new_mut(&mut self.output[..], channels, output_capacity)
-        else {
-            return;
-        };
-        let Ok((_, produced)) = resampler.process_into_buffer(&input, &mut output, Some(&indexing))
-        else {
-            return;
-        };
-        let start = self.trim_remaining.min(produced);
-        self.trim_remaining -= start;
-        let usable = produced - start;
-        if usable == 0 {
-            return;
+        let mut output =
+            match SequentialSliceOfVecs::new_mut(&mut self.output[..], channels, output_capacity) {
+                Ok(output) => output,
+                Err(error) => {
+                    self.log_dropped_chunk(
+                        frames,
+                        "cannot wrap the resampler output planes",
+                        &error,
+                    );
+                    return;
+                }
+            };
+        match resampler.process_into_buffer(&input, &mut output, Some(&indexing)) {
+            Ok((_, produced)) => {
+                let start = self.trim_remaining.min(produced);
+                self.trim_remaining -= start;
+                let usable = produced - start;
+                if usable == 0 {
+                    return;
+                }
+                let planes: Vec<Vec<f32>> = self
+                    .output
+                    .iter()
+                    .map(|plane| plane[start..start + usable].to_vec())
+                    .collect();
+                self.interleave_planes(&planes, usable, out);
+                self.emitted_frames += usable as u64;
+            }
+            Err(error) => {
+                self.log_dropped_chunk(frames, "the resampler rejected the chunk", &error);
+            }
         }
-        let planes: Vec<Vec<f32>> = self
-            .output
-            .iter()
-            .map(|plane| plane[start..start + usable].to_vec())
-            .collect();
-        self.interleave_planes(&planes, usable, out);
-        self.emitted_frames += usable as u64;
     }
 
     fn interleave_planes(&self, planes: &[Vec<f32>], frames: usize, out: &mut Vec<f32>) {
@@ -237,12 +286,59 @@ impl Converter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use tracing_subscriber::prelude::*;
 
     fn sine(frames: usize, channels: usize) -> Vec<Vec<f32>> {
         (0..channels)
             .map(|_| (0..frames).map(|i| (i as f32 * 0.05).sin()).collect())
             .collect()
+    }
+
+    /// Captures every tracing event this thread emits as one
+    /// `name=value`-joined line, so tests can assert on the logs the
+    /// conversion produces rather than on internal state.
+    struct Capture(Arc<Mutex<Vec<String>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for Capture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = FieldText(String::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    struct FieldText(String);
+
+    impl tracing::field::Visit for FieldText {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            if field.name() == "message" {
+                self.0.push_str(&format!("{value:?}"));
+            } else {
+                self.0.push_str(&format!("{}={value:?}", field.name()));
+            }
+        }
+    }
+
+    fn captured_logs() -> (
+        tracing_subscriber::layer::Layered<Capture, tracing_subscriber::Registry>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&logs)));
+        (subscriber, logs)
     }
 
     #[test]
@@ -359,5 +455,54 @@ mod tests {
         let mut after = Vec::new();
         converter.push(&sine(1024, 2), &mut after);
         assert!(!after.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_chunk_is_logged_and_finish_reports_the_loss() {
+        // A decoder glitch can hand `push` planes of unequal length; the
+        // resampler's input adapter then rejects the chunk. The drop must be
+        // observable — a warn per dropped chunk, and a finish that reports
+        // the accumulated loss instead of letting the flush pad the
+        // shortfall with silence.
+        let (subscriber, logs) = captured_logs();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut converter = Converter::new(44_100, 48_000, 2, 2).unwrap();
+            let left: Vec<f32> = (0..2000).map(|i| (i as f32 * 0.05).sin()).collect();
+            let right: Vec<f32> = left[..500].to_vec();
+            let mut out = Vec::new();
+            converter.push(&[left, right], &mut out);
+            converter.finish(&mut out);
+        });
+        let lines = logs.lock().unwrap().join("\n");
+        assert!(
+            lines.contains("dropping the chunk's audio"),
+            "each dropped chunk must warn; captured: {lines}"
+        );
+        assert!(
+            lines.contains("frames=1024"),
+            "the warn must carry the dropped frame count; captured: {lines}"
+        );
+        assert!(
+            lines.contains("dropped=1024"),
+            "finish must report the accumulated loss; captured: {lines}"
+        );
+    }
+
+    #[test]
+    fn a_clean_conversion_emits_no_resampler_warnings() {
+        let (subscriber, logs) = captured_logs();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut converter = Converter::new(44_100, 48_000, 2, 2).unwrap();
+            let mut out = Vec::new();
+            for _ in 0..3 {
+                converter.push(&sine(1024, 2), &mut out);
+            }
+            converter.finish(&mut out);
+        });
+        let lines = logs.lock().unwrap();
+        assert!(
+            lines.is_empty(),
+            "a clean conversion must stay silent; captured: {lines:?}"
+        );
     }
 }

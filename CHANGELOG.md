@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   landing is now converted through the track's time base before the
   refinement trim, so it lands on the exact frame as it already did in
   WAV, FLAC and MP3.
+- A resampler error no longer drops a 1,024-frame chunk silently: every
+  dropped chunk now logs a warning carrying the frame count, and the end
+  of a conversion reports the accumulated loss that the closing flush
+  would otherwise have padded over with silence.
 
 ## [0.4.0] - 2026-10-25
 
