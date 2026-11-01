@@ -12,6 +12,9 @@ on:
   # Dispatch is the one way to re-audit without a Cargo.lock change: after
   # a RustSec database update, or before a release.
   workflow_dispatch:
+  # One advisory checker, deliberately: cargo-deny reads the same RustSec
+  # database, and its unmaintained failures would clash with advisories
+  # already tracked as open issues (#55–#57). Revisit once those close.
 
 # audit-check reports through a check run on push and pull_request, and
 # opens an issue per advisory on the scheduled run.
