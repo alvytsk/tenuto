@@ -11,6 +11,10 @@
 //! would prove nothing about the constructor, which is the thing that has to
 //! stay safe.
 //!
+//! The one exception is the eviction cap guard in `persistence::model`,
+//! whose branch `MAX_ENTRIES > 1` makes unreachable from outside; that one
+//! site is audited at the source (the last section of this file).
+//!
 //! Three separate policies are under audit here, and they are deliberately
 //! not the same policy:
 //!
@@ -911,4 +915,160 @@ fn a_malformed_file_logs_why_without_its_content() -> Fallible {
         );
     }
     Ok(())
+}
+
+// --- The eviction cap guard ---------------------------------------------
+
+/// The one log site that ever recorded a media identity by `Display`
+/// (project review 2026-11-01, Medium): the eviction cap guard's `warn!`
+/// logged `media = %checkpoint.media`, whose `Display` embeds the full URL
+/// with its query string — a `MediaId` never passes `redact_url`, so this
+/// was the crate's single audited break of the redaction rule
+/// (`docs/architecture.md` §10).
+///
+/// The guard's branch cannot be driven from outside: it fires only when
+/// every entry in a full checkpoint map is the current media or the one
+/// arriving, and a map of distinct keys with `MAX_ENTRIES > 1` always
+/// leaves a victim — `record`'s own doc says so, and the unit test beside
+/// `evict_one` pins the degenerate case directly. So this audit reads the
+/// source the way `m9_4_submission_door.rs` audits the submission door,
+/// and holds the model to three claims:
+///
+/// * the guard still reports, from **both** write paths — silencing a log
+///   line is not redacting it;
+/// * what it reports is the ordinal, the touch sequence the dropped
+///   checkpoint would have taken, which orders the drop against the
+///   `touch_seq` values in `state.json` without identifying the media;
+/// * no `tracing` macro anywhere in the model interpolates a value by
+///   `Display` (`%`) or `Debug` (`?`) — the only way a URL or a path
+///   inside a `MediaId` reaches a field, and the model's loggable data is
+///   exactly that: media identities, checkpoints and playlists.
+#[test]
+fn the_eviction_cap_guard_logs_an_ordinal_and_never_the_media() -> Fallible {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence/model.rs");
+    let source = std::fs::read_to_string(&path)?;
+
+    // The scan below anchors on the fully qualified `tracing::warn!` path,
+    // so the model must not import the macros: a bare `warn!(media = %…)`
+    // would evade it.
+    assert!(
+        !source.contains("use tracing::"),
+        "the model's log macros must stay fully qualified, or the scan below \
+         can miss a site, in {}",
+        path.display()
+    );
+
+    let macros = tracing_macros(&source);
+    assert!(
+        !macros.is_empty(),
+        "no log sites were found in {}; the audit is reading the wrong file",
+        path.display()
+    );
+
+    const GUARD: &str = "no entry could be evicted";
+    let guards: Vec<&str> = macros
+        .iter()
+        .map(String::as_str)
+        .filter(|text| text.contains(GUARD))
+        .collect();
+    assert_eq!(
+        guards.len(),
+        2,
+        "the cap guard must be reported by both write paths, `record` and \
+         `record_estimated`, in {}:\n{}",
+        path.display(),
+        macros.join("\n")
+    );
+
+    for guard in guards {
+        assert!(
+            guard.contains("media_ordinal = self.next_seq"),
+            "the cap guard must record the ordinal the dropped checkpoint \
+             would have taken, never the media identity:\n{guard}"
+        );
+    }
+
+    for macro_text in &macros {
+        let fields = with_strings_dropped(macro_text);
+        assert!(
+            !fields.contains('%') && !fields.contains('?'),
+            "a `Display` (`%`) or `Debug` (`?`) interpolation in a log macro \
+             would carry a media identity into the log:\n{macro_text}"
+        );
+    }
+    Ok(())
+}
+
+/// Every `tracing` macro invocation in a source file, as the raw text of
+/// the macro's argument list — from its opening parenthesis to the one
+/// that closes it. Only an invocation (`tracing::warn!(`) anchors a scan:
+/// a `use tracing::…` import or a bare path is not a log site and must not
+/// start one. Parens inside the list are tracked so a nested `write!` or a
+/// `format!` argument does not end the invocation early.
+fn tracing_macros(source: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("tracing::") {
+        let after_path = &rest[start + "tracing::".len()..];
+        let name_len = after_path
+            .chars()
+            .take_while(|glyph| glyph.is_ascii_alphanumeric() || *glyph == '_')
+            .count();
+        let after_name = &after_path[name_len..];
+        if !after_name.starts_with('!') {
+            // A path, not a macro invocation: skip past it and keep looking.
+            rest = after_name;
+            continue;
+        }
+        let Some(open) = after_name.find('(') else {
+            break;
+        };
+        let list = &after_name[open..];
+        let mut depth = 1usize;
+        let mut close = None;
+        for (index, byte) in list.as_bytes()[1..].iter().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => continue,
+            }
+            if depth == 0 {
+                close = Some(index + 1);
+                break;
+            }
+        }
+        match close {
+            Some(close) => {
+                found.push(list[..=close].to_string());
+                rest = &list[close + 1..];
+            }
+            // Unbalanced: no macro list can be recovered past this point.
+            None => break,
+        }
+    }
+    found
+}
+
+/// A macro's text with its string literals removed, so a `%` or `?` inside
+/// a message is not mistaken for a field sigil — only the field list is
+/// left to inspect.
+fn with_strings_dropped(macro_text: &str) -> String {
+    let mut fields = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for glyph in macro_text.chars() {
+        if in_string {
+            match glyph {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match glyph {
+            '"' => in_string = true,
+            other => fields.push(other),
+        }
+    }
+    fields
 }
