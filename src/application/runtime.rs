@@ -791,14 +791,20 @@ impl PlayerRuntime {
         // at the value it already had — yet the desktop still expects its
         // `PropertiesChanged`, so one publish follows every batch.
         let answered = !requests.is_empty();
+        let mut sought = false;
         for request in requests {
             if let Some(cmd) = command(request, &self.view()) {
+                // A drained seek marks the snapshot: the bus thread's seek
+                // check is window-bounded, and a seek queued from the
+                // widget while the front end was stalled would land outside
+                // the window and go unreported.
+                sought |= matches!(cmd, AppCommand::SeekBy(_) | AppCommand::SeekTo(_));
                 self.handle(cmd);
             }
         }
         self.pump_engine();
         self.track_covers();
-        self.publish_snapshot(answered);
+        self.publish_snapshot(answered, sought);
     }
 
     /// The playing media: the detached one, else the active entry's.
@@ -849,10 +855,12 @@ impl PlayerRuntime {
         Some((media.clone(), source))
     }
 
-    fn publish_snapshot(&mut self, answered: bool) {
-        if let Some(controls) = &self.media_controls
-            && controls.is_closed()
-        {
+    fn publish_snapshot(&mut self, answered: bool, sought: bool) {
+        let Some(controls) = &self.media_controls else {
+            // Off, or never attached: no snapshot is built or diffed.
+            return;
+        };
+        if controls.is_closed() {
             // Dropped once the bus thread has exited (no bus, lost connection).
             self.media_controls = None;
             self.mpris_seen = None;
@@ -875,10 +883,12 @@ impl PlayerRuntime {
             .filter(|shown| Some(&shown.media) == media.as_ref())
             .and_then(|shown| shown.image.clone())
             .map(CoverImage);
+        snap.sought = sought;
         // Publish only what changed, the shape `track_covers` uses: an
         // unchanged snapshot would wake and diff the bus thread for
-        // nothing, ten-plus times a second, idle or not.
-        if answered || self.mpris_seen.as_ref() != Some(&snap) {
+        // nothing, ten-plus times a second, idle or not. A drained request
+        // always publishes, and a drained seek always carries its mark.
+        if answered || sought || self.mpris_seen.as_ref() != Some(&snap) {
             self.mpris_seen = Some(snap.clone());
             if let Some(controls) = &self.media_controls {
                 controls.publish(snap);

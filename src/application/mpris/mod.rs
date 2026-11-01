@@ -47,6 +47,12 @@ pub struct Snapshot {
     pub cover: Option<CoverImage>,
     /// The playing playlist is shuffled.
     pub shuffle: bool,
+    /// The pass this snapshot came from drained a seek request, so a
+    /// position jump in it is real — reported even when the pass followed
+    /// a front-end stall wider than the seek window. Provenance the bus
+    /// thread cannot recover on its own, like `Published`'s
+    /// `volume_written`; the runtime sets it, [`snapshot`] never does.
+    pub sought: bool,
 }
 
 fn clean(text: &str) -> String {
@@ -86,6 +92,7 @@ pub fn snapshot(view: &PlayerView, media: Option<&MediaId>, podcast: Option<&str
             .map_or(Duration::ZERO, |n| n.position),
         cover: None,
         shuffle: view.tabs.iter().any(|t| t.playing && t.shuffled),
+        sought: false,
     }
 }
 
@@ -139,10 +146,15 @@ const SEEK_TOLERANCE: Duration = Duration::from_secs(1);
 /// cadence. A seek reaches the bus within a pump or two of the request that
 /// caused it: the runtime drains it and publishes in the same pass. A wider
 /// gap means the front end stalled between pumps, and no seek can happen
-/// inside a stall — every seek arrives as a request the runtime answers —
-/// while playback drifts from wall time for honest reasons: a rebuffer, an
+/// inside a stall without the runtime saying so (`Snapshot::sought`), while
+/// playback drifts from wall time for honest reasons: a rebuffer, an
 /// underrun, the track ending. The fresh position is the truth there;
 /// extrapolating across the stall reports a phantom seek.
+///
+/// Must stay ≤ `SEEK_TOLERANCE`: a position that only drifts, never seeks,
+/// falls behind the wall clock by at most the window itself, so this bound
+/// is what keeps an honest in-window gap from tripping the check.
+/// `the_seek_window_never_widens_past_the_tolerance` pins it.
 const SEEK_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,7 +211,14 @@ impl Published {
         if last.is_none_or(|l| l.shuffle != next.shuffle) {
             changes.push(Change::Shuffle);
         }
-        if let (Some(l), Some(at)) = (last, self.last_at)
+        // A seek the runtime drained is reported whatever the gap since
+        // the last snapshot: a widget seek queued while the front end was
+        // stalled lands in the first post-stall pass, outside the window,
+        // and the window would otherwise hide a real seek in exactly the
+        // regime it cannot judge.
+        let mut seeked = next.sought;
+        if !seeked
+            && let (Some(l), Some(at)) = (last, self.last_at)
             && media(l) == media(&next)
         {
             let elapsed = now.saturating_duration_since(at);
@@ -210,9 +229,11 @@ impl Published {
                 Status::Playing => None,
                 _ => Some(l.position),
             };
-            if expected.is_some_and(|expected| expected.abs_diff(next.position) > SEEK_TOLERANCE) {
-                changes.push(Change::Seeked);
-            }
+            seeked =
+                expected.is_some_and(|expected| expected.abs_diff(next.position) > SEEK_TOLERANCE);
+        }
+        if seeked {
+            changes.push(Change::Seeked);
         }
         self.volume_written = false;
         self.last = Some(next);
@@ -395,6 +416,7 @@ mod tests {
             position: Duration::ZERO,
             cover: None,
             shuffle: false,
+            sought: false,
         }
     }
 
@@ -627,6 +649,34 @@ mod tests {
             p.apply_at(playing(60), resumed + Duration::from_millis(100)),
             vec![Change::Seeked]
         );
+    }
+
+    #[test]
+    fn a_seek_drained_through_a_stall_still_reports_seeked() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let playing = |secs: u64, sought: bool| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.position = Duration::from_secs(secs);
+            s.sought = sought;
+            s
+        };
+        p.apply_at(playing(10, false), t0);
+        // The widget seeks while the front end is stalled. The runtime
+        // drains the request on the first pump after and marks that
+        // snapshot, so the jump is reported despite the stall's width.
+        let resumed = t0 + Duration::from_secs(30);
+        assert_eq!(p.apply_at(playing(42, true), resumed), vec![Change::Seeked]);
+        // The mark is spent: a later stall with no seek reports nothing.
+        assert!(
+            p.apply_at(playing(43, false), resumed + Duration::from_secs(30))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_seek_window_never_widens_past_the_tolerance() {
+        assert!(SEEK_WINDOW <= SEEK_TOLERANCE);
     }
 
     #[test]

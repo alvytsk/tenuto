@@ -241,6 +241,26 @@ fn a_same_value_volume_write_still_republishes() {
     let _ = rig.runtime.shutdown();
 }
 
+#[test]
+fn a_seek_from_the_desktop_marks_the_published_snapshot() {
+    let mut rig = rig_with(PersistedState::default());
+    play_five(&mut rig);
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    step(&mut rig);
+    // A seek queued from the widget — as one queued while the front end
+    // was stalled would be — is drained by the next pump, which marks the
+    // snapshot it publishes so the bus thread reports the jump even
+    // across a wide gap.
+    remote.requests.try_send(Request::Seek(5_000_000)).unwrap();
+    step(&mut rig);
+    assert!(remote.snapshots.borrow().clone().unwrap().sought);
+    // The mark is per pass: the next snapshot carries none.
+    step(&mut rig);
+    assert!(!remote.snapshots.borrow().clone().unwrap().sought);
+    let _ = rig.runtime.shutdown();
+}
+
 const SHORT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine.flac");
 
 fn png_bytes() -> Vec<u8> {

@@ -460,6 +460,7 @@ mod tests {
             position: Duration::from_secs(position),
             cover: None,
             shuffle: false,
+            sought: false,
         }
     }
 
