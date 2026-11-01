@@ -721,8 +721,14 @@ fn drain_events(
 /// resize invalidates the prepared cover, whose placement no longer matches
 /// the screen; every other event kind (focus, paste) is ignored here since
 /// the next loop pass redraws unconditionally.
+///
+/// The player view is built only where an event reads it: per key (a class
+/// that ends the pass, see [`drain_after`], and never for the browser, which
+/// follows its own destination's rows), and for the mouse only once
+/// [`handle_mouse`] has matched a kind that acts on one. A pass that drains
+/// nothing but mouse motion — the flood [`MAX_EVENTS_PER_PASS`] bounds —
+/// constructs no view at all.
 fn handle_event(front: &mut Front<'_>, hits: &HitMap, event: Event) -> io::Result<()> {
-    let view = front.runtime.view();
     let effects = match event {
         Event::Key(key) if routes_to_browser(&key, front.ui) => {
             let Some(browser) = &mut front.browsing.state else {
@@ -743,8 +749,8 @@ fn handle_event(front: &mut Front<'_>, hits: &HitMap, event: Event) -> io::Resul
             }
             return Ok(());
         }
-        Event::Key(key) => handle_key(key, front.ui, &view),
-        Event::Mouse(mouse) => handle_mouse(mouse, hits, front.ui, &view),
+        Event::Key(key) => handle_key(key, front.ui, &front.runtime.view()),
+        Event::Mouse(mouse) => handle_mouse(mouse, hits, front.ui, || front.runtime.view()),
         Event::Resize(..) => {
             front.artwork.covers.invalidate();
             Vec::new()

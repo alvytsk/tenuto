@@ -280,11 +280,11 @@ fn clicking_a_row_selects_it_then_a_second_click_plays_it() {
         .0;
     let (col, row) = centre(rect);
 
-    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone());
     assert!(app(&effects).is_empty(), "a first click only selects");
     assert_eq!(ui.selected, Some(row2));
 
-    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone());
     assert!(matches!(
         app(&effects)[..],
         [AppCommand::PlayEntry(id)] if *id == row2
@@ -304,7 +304,7 @@ fn scrolling_inside_the_queue_moves_the_selection() {
         mouse(MouseEventKind::ScrollDown, col, row),
         &hits,
         &mut ui,
-        &view,
+        || view.clone(),
     );
     assert!(effects.is_empty());
     assert_eq!(ui.selected, Some(view.rows[1].id));
@@ -323,7 +323,7 @@ fn clicking_play_pause_is_the_play_pause_command() {
         .expect("play/pause button")
         .0;
     let (col, row) = centre(rect);
-    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone());
     assert!(matches!(app(&effects)[..], [AppCommand::PlayPause]));
 }
 
@@ -343,7 +343,7 @@ fn clicking_a_seek_button_seeks_like_its_arrow_key() {
             .expect("seek button")
             .0;
         let (col, row) = centre(rect);
-        let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+        let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone());
         let pressed = handle_key(KeyEvent::from(key), &mut ui, &view);
         let step = |effects: &[Effect]| match app(effects)[..] {
             [AppCommand::SeekBy(step)] => Some(*step),
@@ -363,7 +363,7 @@ fn clicking_progress_seeks_a_loaded_decoded_track_but_not_an_undecoded_one() {
     let hits = draw_hits(&loaded, &UiState::new(true));
     let mut ui = UiState::new(true);
     let (col, row) = centre(hits.progress);
-    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &loaded);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, || loaded.clone());
     match &app(&effects)[..] {
         [AppCommand::SeekTo(target)] => {
             assert!(
@@ -380,7 +380,9 @@ fn clicking_progress_seeks_a_loaded_decoded_track_but_not_an_undecoded_one() {
     );
     let hits_unloaded = draw_hits(&unloaded, &UiState::new(true));
     let (col, row) = centre(hits_unloaded.progress);
-    let effects = handle_mouse(mouse_down(col, row), &hits_unloaded, &mut ui, &unloaded);
+    let effects = handle_mouse(mouse_down(col, row), &hits_unloaded, &mut ui, || {
+        unloaded.clone()
+    });
     assert!(
         effects.is_empty(),
         "no decoded duration means no seek: {effects:?}"
@@ -394,11 +396,11 @@ fn mouse_capture_off_ignores_every_event() {
     let mut ui = UiState::new(false);
     let row2 = view.rows[2].id;
     let (col, row) = centre(hits.rows.iter().find(|(_, id)| *id == row2).unwrap().0);
-    assert!(handle_mouse(mouse_down(col, row), &hits, &mut ui, &view).is_empty());
+    assert!(handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone()).is_empty());
     assert_eq!(ui.selected, None, "no selection without mouse capture");
 
     let (bcol, brow) = centre(hits.buttons[0].0);
-    assert!(handle_mouse(mouse_down(bcol, brow), &hits, &mut ui, &view).is_empty());
+    assert!(handle_mouse(mouse_down(bcol, brow), &hits, &mut ui, || view.clone()).is_empty());
 
     let (qcol, qrow) = (hits.queue.x + 1, hits.queue.y + 1);
     assert!(
@@ -406,7 +408,7 @@ fn mouse_capture_off_ignores_every_event() {
             mouse(MouseEventKind::ScrollDown, qcol, qrow),
             &hits,
             &mut ui,
-            &view
+            || view.clone()
         )
         .is_empty()
     );
@@ -419,7 +421,7 @@ fn an_open_overlay_blocks_every_mouse_event() {
     let mut ui = UiState::new(true);
     ui.overlay = Overlay::Help;
     let (col, row) = centre(hits.buttons[0].0);
-    assert!(handle_mouse(mouse_down(col, row), &hits, &mut ui, &view).is_empty());
+    assert!(handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone()).is_empty());
     assert_eq!(ui.overlay, Overlay::Help, "overlay untouched by the click");
 }
 
@@ -438,11 +440,102 @@ fn only_left_button_down_activates_or_selects() {
         MouseEventKind::Moved,
     ] {
         assert!(
-            handle_mouse(mouse(kind, col, row), &hits, &mut ui, &view).is_empty(),
+            handle_mouse(mouse(kind, col, row), &hits, &mut ui, || view.clone()).is_empty(),
             "{kind:?}"
         );
         assert_eq!(ui.selected, None, "{kind:?} must not select");
     }
+}
+
+#[test]
+fn mouse_events_that_cannot_act_build_no_player_view() {
+    let view = sample_view();
+    let hits = draw_hits(&view, &UiState::new(true));
+    let mut ui = UiState::new(true);
+    let row0 = view.rows[0].id;
+    let (col, row) = centre(hits.rows.iter().find(|(_, id)| *id == row0).unwrap().0);
+    let mut built = 0;
+    // The kinds `handle_mouse` drops without reading the view — a drain
+    // pass may hold `MAX_EVENTS_PER_PASS` of the motion ones alone.
+    for kind in [
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::Down(MouseButton::Middle),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Moved,
+    ] {
+        assert!(
+            handle_mouse(mouse(kind, col, row), &hits, &mut ui, || {
+                built += 1;
+                view.clone()
+            })
+            .is_empty(),
+            "{kind:?}"
+        );
+    }
+    // A click each guard blocks before the match never builds one either.
+    let mut no_capture = UiState::new(false);
+    assert!(
+        handle_mouse(mouse_down(col, row), &hits, &mut no_capture, || {
+            built += 1;
+            view.clone()
+        })
+        .is_empty()
+    );
+    let mut behind_overlay = UiState::new(true);
+    behind_overlay.overlay = Overlay::Help;
+    assert!(
+        handle_mouse(mouse_down(col, row), &hits, &mut behind_overlay, || {
+            built += 1;
+            view.clone()
+        })
+        .is_empty()
+    );
+    assert_eq!(built, 0, "an event that cannot act on the view builds none");
+}
+
+#[test]
+fn acting_mouse_events_build_the_view_once_and_act_on_it() {
+    let view = sample_view();
+    let hits = draw_hits(&view, &UiState::new(true));
+    let mut ui = UiState::new(true);
+    let rect = hits
+        .buttons
+        .iter()
+        .find(|(_, b)| *b == TransportButton::PlayPause)
+        .expect("play/pause button")
+        .0;
+    let (col, row) = centre(rect);
+    let mut built = 0;
+
+    let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, || {
+        built += 1;
+        view.clone()
+    });
+    assert!(
+        matches!(app(&clicked)[..], [AppCommand::PlayPause]),
+        "{clicked:?}"
+    );
+    assert_eq!(built, 1, "one construction, for the click that reads it");
+
+    ui.reconcile(&view, None);
+    let (qcol, qrow) = (hits.queue.x + 1, hits.queue.y + 1);
+    let scrolled = handle_mouse(
+        mouse(MouseEventKind::ScrollDown, qcol, qrow),
+        &hits,
+        &mut ui,
+        || {
+            built += 1;
+            view.clone()
+        },
+    );
+    assert!(scrolled.is_empty());
+    assert_eq!(
+        ui.selected,
+        Some(view.rows[1].id),
+        "the selection moved by the rows of the one view the scroll built"
+    );
+    assert_eq!(built, 2);
 }
 
 #[test]
@@ -549,7 +642,7 @@ fn clicking_a_playlist_tab_views_that_playlist() {
         .0;
     let (col, row) = centre(rect);
     let mut ui = UiState::new(true);
-    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let effects = handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone());
     assert!(matches!(app(&effects)[..], [AppCommand::View(id)] if *id == other));
 }
 
@@ -565,7 +658,7 @@ fn clicking_the_shuffle_button_toggles_shuffle_like_z() {
         .0;
     let (col, row) = centre(rect);
     let mut ui = UiState::new(true);
-    let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, &view);
+    let clicked = handle_mouse(mouse_down(col, row), &hits, &mut ui, || view.clone());
     let pressed = handle_key(KeyEvent::from(KeyCode::Char('z')), &mut ui, &view);
     assert!(matches!(app(&clicked)[..], [AppCommand::ToggleShuffle(id)] if *id == view.viewed));
     assert_eq!(app(&clicked).len(), app(&pressed).len());

@@ -33,9 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tick mark now runs on the browser's worker thread instead of the
   render loop, so a stalled network mount can no longer freeze the
   interface while browsing.
-- While the file browser is open, a directory's tick mark now follows
-  the playlist its adds land in — the browser's destination — rather
-  than whichever playlist is being viewed behind it.
+- The interface no longer rebuilds the whole player view for every input
+  event it drains: keys and the clicks and scrolls that act on it build a
+  fresh one, while a pass of mouse motion alone — the flood a terminal can
+  deliver hundreds of times a second — constructs none.
 - With desktop media controls on, a remote cover (a podcast image, a
   station logo) is downloaded and decoded once per track instead of twice,
   and the desktop widget gets a cover the player fetched ahead as soon as

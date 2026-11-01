@@ -1,8 +1,10 @@
 //! The keyboard and mouse maps (design doc M5 §7): a key or mouse event, the
 //! current [`UiState`] and the last drawn [`PlayerView`] (and, for the
 //! mouse, where that frame's clickable parts landed) in, a list of
-//! [`Effect`]s out. Nothing here touches the terminal or the runtime —
-//! `tui::run` is the only thing that executes an effect.
+//! [`Effect`]s out. The mouse takes the view as a builder and calls it only
+//! for a kind that reads it, so ignored kinds never pay for one. Nothing
+//! here touches the terminal or the runtime — `tui::run` is the only thing
+//! that executes an effect.
 
 use std::time::Duration;
 
@@ -80,23 +82,28 @@ pub fn routes_to_browser(key: &KeyEvent, ui: &UiState) -> bool {
 /// selects; `ScrollUp`/`ScrollDown` move the selection while the cursor is
 /// over `hits.queue`; every other kind — drag, release, move, right or
 /// middle click — is ignored.
+///
+/// `view` builds the player view, and is called only by a kind that reads
+/// it: the ignored kinds, and a click blocked by capture or an overlay,
+/// return without ever calling `view`, so a pass that drains nothing but
+/// mouse motion constructs no view at all.
 pub fn handle_mouse(
     event: MouseEvent,
     hits: &HitMap,
     ui: &mut UiState,
-    view: &PlayerView,
+    view: impl FnOnce() -> PlayerView,
 ) -> Vec<Effect> {
     if !ui.mouse_capture || ui.overlay != Overlay::None {
         return Vec::new();
     }
     match event.kind {
-        MouseEventKind::Down(MouseButton::Left) => left_click(event, hits, ui, view),
+        MouseEventKind::Down(MouseButton::Left) => left_click(event, hits, ui, &view()),
         MouseEventKind::ScrollUp if hits.queue.contains((event.column, event.row).into()) => {
-            move_selection(ui, view, Direction::Up);
+            move_selection(ui, &view(), Direction::Up);
             Vec::new()
         }
         MouseEventKind::ScrollDown if hits.queue.contains((event.column, event.row).into()) => {
-            move_selection(ui, view, Direction::Down);
+            move_selection(ui, &view(), Direction::Down);
             Vec::new()
         }
         _ => Vec::new(),
