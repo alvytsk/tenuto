@@ -919,6 +919,14 @@ fn a_malformed_file_logs_why_without_its_content() -> Fallible {
 
 // --- The eviction cap guard ---------------------------------------------
 
+/// Every identifier a log macro in `persistence::model` may mention: the
+/// ordinal field and the two spellings that build it. The model's loggable
+/// data is media identities, checkpoints and playlists, so growing this
+/// set is a decision rather than a convenience — extend it only with a
+/// spelling that provably cannot carry a media identity, and never with
+/// one that would need a `%` or `?` sigil.
+const SAFE_LOG_IDENTIFIERS: &[&str] = &["media_ordinal", "next_seq", "self"];
+
 /// The one log site that ever recorded a media identity by `Display`
 /// (project review 2026-11-01, Medium): the eviction cap guard's `warn!`
 /// logged `media = %checkpoint.media`, whose `Display` embeds the full URL
@@ -932,79 +940,290 @@ fn a_malformed_file_logs_why_without_its_content() -> Fallible {
 /// leaves a victim — `record`'s own doc says so, and the unit test beside
 /// `evict_one` pins the degenerate case directly. So this audit reads the
 /// source the way `m9_4_submission_door.rs` audits the submission door,
-/// and holds the model to three claims:
+/// and holds the model to four claims:
 ///
 /// * the guard still reports, from **both** write paths — silencing a log
 ///   line is not redacting it;
 /// * what it reports is the ordinal, the touch sequence the dropped
 ///   checkpoint would have taken, which orders the drop against the
 ///   `touch_seq` values in `state.json` without identifying the media;
-/// * no `tracing` macro anywhere in the model interpolates a value by
-///   `Display` (`%`) or `Debug` (`?`) — the only way a URL or a path
-///   inside a `MediaId` reaches a field, and the model's loggable data is
-///   exactly that: media identities, checkpoints and playlists.
+/// * no `tracing` macro anywhere in the model formats a value into the
+///   line by any spelling: not through a `Display` (`%`) or `Debug` (`?`)
+///   field sigil, and not through the message's own format machinery —
+///   every identifier a macro mentions, whether in a field name, a value
+///   expression, a trailing format argument, or captured inside a `{…}`
+///   placeholder (which is code, not message text), must be one of
+///   `SAFE_LOG_IDENTIFIERS`, and a `MediaId` has no safe spelling in that
+///   set;
+/// * the model imports `tracing` under no spelling, so a bare or aliased
+///   `warn!` cannot exist where the scan cannot see it.
+///
+/// [`the_audit_catches_the_media_returning_through_format_args`] pins the
+/// last two claims against the shapes that once slipped past the scan.
 #[test]
 fn the_eviction_cap_guard_logs_an_ordinal_and_never_the_media() -> Fallible {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence/model.rs");
     let source = std::fs::read_to_string(&path)?;
-
-    // The scan below anchors on the fully qualified `tracing::warn!` path,
-    // so the model must not import the macros: a bare `warn!(media = %…)`
-    // would evade it.
+    let findings = audit_model(&source);
     assert!(
-        !source.contains("use tracing::"),
-        "the model's log macros must stay fully qualified, or the scan below \
-         can miss a site, in {}",
-        path.display()
+        findings.is_empty(),
+        "the persistence model broke the redaction audit:\n{}",
+        findings.join("\n\n")
     );
+    Ok(())
+}
 
-    let macros = tracing_macros(&source);
-    assert!(
-        !macros.is_empty(),
-        "no log sites were found in {}; the audit is reading the wrong file",
-        path.display()
+/// Fix round 1. The audit's first scan rejected only `%` and `?` field
+/// sigils, and its doc comment claimed that was "the only way a URL or a
+/// path inside a `MediaId` reaches a field". It is not: `tracing` renders
+/// `format_args` into the message field, and the scan dropped string
+/// literals before looking, so it could not see `{}`. The task review
+/// demonstrated the guard logging the raw media with the ordinal field
+/// still in place — and the audit staying green.
+///
+/// Each row below mutates the real model source in memory — nothing is
+/// compiled and nothing is written back — and the audit must fail on every
+/// one. The first row is the review's own demonstration: the ordinal field
+/// is untouched, so the presence and ordinal rules are satisfied and the
+/// finding can only come from the identifier scan, which is exactly the
+/// blind spot being pinned. The last two rows pin the scanner itself: an
+/// implicit-capture `{media}` placeholder lives inside the message string
+/// and is kept only because placeholders are treated as code, and an
+/// aliased `use tracing as tr;` puts a site where the fully qualified
+/// anchor never looks.
+#[test]
+fn the_audit_catches_the_media_returning_through_format_args() -> Fallible {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence/model.rs");
+    let source = std::fs::read_to_string(&path)?;
+
+    const GUARD_MESSAGE: &str = "\"no entry could be evicted at the MAX_ENTRIES cap; dropping the incoming checkpoint rather than exceeding it\"";
+    let as_format_arg = "\"no entry could be evicted at the MAX_ENTRIES cap; dropping {} rather than exceeding it\", checkpoint.media";
+    // `rfind` targets the second guard, in `record_estimated`, where a
+    // bare `media` binding makes implicit capture valid Rust.
+    let Some(last) = source.rfind(GUARD_MESSAGE) else {
+        return Err("the guard message moved; update this mutation".into());
+    };
+    let mut implicit = String::with_capacity(source.len());
+    implicit.push_str(&source[..last]);
+    implicit.push_str(
+        "\"no entry could be evicted at the MAX_ENTRIES cap; dropping {media} rather than exceeding it\"",
     );
+    implicit.push_str(&source[last + GUARD_MESSAGE.len()..]);
 
-    const GUARD: &str = "no entry could be evicted";
-    let guards: Vec<&str> = macros
-        .iter()
-        .map(String::as_str)
-        .filter(|text| text.contains(GUARD))
-        .collect();
-    assert_eq!(
-        guards.len(),
-        2,
-        "the cap guard must be reported by both write paths, `record` and \
-         `record_estimated`, in {}:\n{}",
-        path.display(),
-        macros.join("\n")
-    );
+    let cases = [
+        (
+            "the guard formats the media as a trailing argument",
+            source.replacen(GUARD_MESSAGE, as_format_arg, 1),
+            "not in the audit's safe set",
+        ),
+        (
+            "a new site anywhere in the model formats the media",
+            format!(
+                "{source}\nfn audit_mutation() {{ \
+                 tracing::warn!(\"checkpoint rejected for {{}}\", checkpoint.media); }}\n"
+            ),
+            "not in the audit's safe set",
+        ),
+        (
+            "the guard captures the media inside the message itself",
+            implicit,
+            "not in the audit's safe set",
+        ),
+        (
+            "an aliased import puts a log site outside the scan",
+            format!(
+                "{source}\nuse tracing as tr;\n\
+                 fn audit_mutation() {{ tr::warn!(\"evicted {{}}\", media); }}\n"
+            ),
+            "imports `tracing`",
+        ),
+    ];
 
-    for guard in guards {
+    for (label, mutated, expected) in cases {
+        assert_ne!(mutated, source, "{label}: the mutation did not apply");
+        let findings = audit_model(&mutated);
         assert!(
-            guard.contains("media_ordinal = self.next_seq"),
-            "the cap guard must record the ordinal the dropped checkpoint \
-             would have taken, never the media identity:\n{guard}"
+            findings.iter().any(|finding| finding.contains(expected)),
+            "{label}: the audit stayed green:\n{}",
+            findings.join("\n\n")
         );
-    }
-
-    for macro_text in &macros {
-        let fields = with_strings_dropped(macro_text);
-        assert!(
-            !fields.contains('%') && !fields.contains('?'),
-            "a `Display` (`%`) or `Debug` (`?`) interpolation in a log macro \
-             would carry a media identity into the log:\n{macro_text}"
-        );
+        if label.starts_with("the guard formats") {
+            // The ordinal field is untouched in this row, so the finding
+            // above cannot come from the presence or ordinal rules: it is
+            // the identifier scan that catches it, not an incidental
+            // neighbour.
+            assert!(
+                !findings
+                    .iter()
+                    .any(|finding| finding.contains("must record the ordinal")),
+                "{label}: an incidental catch hid the blind spot:\n{}",
+                findings.join("\n\n")
+            );
+        }
     }
     Ok(())
 }
 
-/// Every `tracing` macro invocation in a source file, as the raw text of
-/// the macro's argument list — from its opening parenthesis to the one
-/// that closes it. Only an invocation (`tracing::warn!(`) anchors a scan:
-/// a `use tracing::…` import or a bare path is not a log site and must not
-/// start one. Parens inside the list are tracked so a nested `write!` or a
-/// `format!` argument does not end the invocation early.
+/// The redaction audit as a pure function of the model's source: one
+/// finding per broken rule, each quoting the text that broke it. Pure, so
+/// the mutation tests above can prove it fails when a rule is broken
+/// rather than only passing when it is kept.
+fn audit_model(source: &str) -> Vec<String> {
+    let code = with_comments_stripped(source);
+    let mut findings = Vec::new();
+
+    // The scan anchors on the fully qualified `tracing::warn!` path, so
+    // the model must not import `tracing` under any spelling: a bare
+    // `warn!` or an aliased `tr::warn!` would never be seen at all.
+    if code.contains("use tracing") {
+        findings.push(
+            "the model imports `tracing`; log macros must stay fully \
+             qualified (`tracing::warn!`), or the scan below cannot see them"
+                .to_string(),
+        );
+    }
+
+    let macros = tracing_macros(&code);
+    if macros.is_empty() {
+        findings.push(
+            "no `tracing` log sites were found; the audit is reading the \
+             wrong file"
+                .to_string(),
+        );
+        return findings;
+    }
+
+    const GUARD: &str = "no entry could be evicted";
+    let guards = macros.iter().filter(|text| text.contains(GUARD)).count();
+    if guards != 2 {
+        findings.push(format!(
+            "the cap guard must be reported by both write paths, `record` \
+             and `record_estimated`; found {guards} site(s)"
+        ));
+    }
+
+    for macro_text in &macros {
+        if macro_text.contains(GUARD) && !macro_text.contains("media_ordinal = self.next_seq") {
+            findings.push(format!(
+                "the cap guard must record the ordinal the dropped \
+                 checkpoint would have taken, never the media identity:\n\
+                 {macro_text}"
+            ));
+        }
+
+        // Everything that can name a value: fields, value expressions,
+        // trailing format arguments, and `{…}` placeholder specs kept out
+        // of the message.
+        let named = with_message_text_dropped(macro_text);
+        if let Some(sigil) = sigil_outside_placeholders(&named) {
+            findings.push(format!(
+                "a `{sigil}` sigil (Display or Debug) formats a value into \
+                 a log line:\n{macro_text}"
+            ));
+        }
+        for identifier in identifiers(&named) {
+            if !SAFE_LOG_IDENTIFIERS.contains(&identifier.as_str()) {
+                findings.push(format!(
+                    "`{identifier}` is not in the audit's safe set \
+                     (`SAFE_LOG_IDENTIFIERS`); a media identity has no safe \
+                     spelling in a log line:\n{macro_text}"
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// The source with comments removed — `//` lines and nested `/* … */`
+/// blocks — so a `tracing::warn!` in a doc example or a `use tracing` in a
+/// comment can neither anchor a scan nor be excused by one. String and
+/// char literals are tracked, so a `//` inside a message is message text;
+/// a lone `'` that opens no char literal is a lifetime and passes through.
+/// Raw strings do not appear in this file and are not specially handled.
+fn with_comments_stripped(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(glyph) = chars.next() {
+        match glyph {
+            '/' if chars.peek() == Some(&'/') => {
+                for rest in chars.by_ref() {
+                    if rest == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut depth = 1;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('/') if chars.peek() == Some(&'*') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        Some('*') if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            depth -= 1;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            }
+            '"' => {
+                out.push(glyph);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    match inner {
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                out.push(escaped);
+                            }
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '\'' => {
+                out.push(glyph);
+                // A char literal is 'x' or '/*escape*/'; a lifetime is a
+                // lone tick with no closing quote right behind it. Copy a
+                // literal through, so a `'"'` cannot open a string.
+                match chars.next() {
+                    Some('\\') => {
+                        out.push('\\');
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                        if let Some(closing) = chars.next() {
+                            out.push(closing);
+                        }
+                    }
+                    Some(inner) => {
+                        out.push(inner);
+                        if chars.peek() == Some(&'\'')
+                            && let Some(closing) = chars.next()
+                        {
+                            out.push(closing);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Every `tracing` macro invocation in comment-stripped source, as the raw
+/// text of the macro's argument list — from its opening parenthesis to the
+/// one that closes it. Only an invocation (`tracing::warn!(`) anchors a
+/// scan: a `use tracing::…` import or a bare path is not a log site and
+/// must not start one. Parens inside the list are tracked so a nested
+/// `write!` or `format!` argument does not end the invocation early.
 fn tracing_macros(source: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut rest = source;
@@ -1049,17 +1268,31 @@ fn tracing_macros(source: &str) -> Vec<String> {
     found
 }
 
-/// A macro's text with its string literals removed, so a `%` or `?` inside
-/// a message is not mistaken for a field sigil — only the field list is
-/// left to inspect.
-fn with_strings_dropped(macro_text: &str) -> String {
-    let mut fields = String::new();
+/// A macro's text reduced to what can name a value. String literals go,
+/// but the `{…}` placeholders inside them stay: a placeholder is code —
+/// `{media}` captures `media`, `{:?}` asks for `Debug` — so dropping it
+/// wholesale is how a format-args leak once passed this audit. Escaped
+/// `{{` and `}}` are message text and go with it. A `{` the string never
+/// closes keeps the remainder: the scanner would rather see too much than
+/// miss a name.
+fn with_message_text_dropped(macro_text: &str) -> String {
+    let mut kept = String::new();
     let mut in_string = false;
     let mut escaped = false;
-    for glyph in macro_text.chars() {
+    let mut chars = macro_text.chars().peekable();
+    while let Some(glyph) = chars.next() {
         if in_string {
             match glyph {
                 '\\' if !escaped => escaped = true,
+                '{' if !escaped => {
+                    kept.push('{');
+                    for inner in chars.by_ref() {
+                        kept.push(inner);
+                        if inner == '}' {
+                            break;
+                        }
+                    }
+                }
                 '"' if !escaped => in_string = false,
                 _ => escaped = false,
             }
@@ -1067,8 +1300,46 @@ fn with_strings_dropped(macro_text: &str) -> String {
         }
         match glyph {
             '"' => in_string = true,
-            other => fields.push(other),
+            other => kept.push(other),
         }
     }
-    fields
+    kept
+}
+
+/// The first `Display` (`%`) or `Debug` (`?`) field sigil outside a `{…}`
+/// placeholder. A `{:?}` inside a message is a format spec on an argument
+/// the identifier scan already vetted, not a `tracing` sigil, so it does
+/// not count.
+fn sigil_outside_placeholders(named: &str) -> Option<char> {
+    let mut inside_placeholder = false;
+    for glyph in named.chars() {
+        match glyph {
+            '{' => inside_placeholder = true,
+            '}' => inside_placeholder = false,
+            '%' | '?' if !inside_placeholder => return Some(glyph),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The identifiers in scanned text: maximal runs of ASCII letters, digits
+/// and `_`, each reported once, in order.
+fn identifiers(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for glyph in text.chars() {
+        if glyph.is_ascii_alphanumeric() || glyph == '_' {
+            current.push(glyph);
+        } else if !current.is_empty() {
+            if !found.contains(&current) {
+                found.push(current.clone());
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() && !found.contains(&current) {
+        found.push(current);
+    }
+    found
 }
