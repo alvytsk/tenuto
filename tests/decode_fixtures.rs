@@ -76,6 +76,43 @@ fn refined_seek_lands_at_the_requested_frame_not_the_packet_boundary() {
 }
 
 #[test]
+fn a_seek_on_a_container_whose_time_base_is_not_the_sample_rate_lands_on_target() {
+    // Matroska timestamps blocks in the segment's own scale — milliseconds
+    // by spec default — so this FLAC track's `time_base` is 1/1000, not
+    // 1/44100. The seek used to seed its cursor with the demuxer's
+    // timestamp verbatim, mixing millisecond ticks into frame arithmetic:
+    // a 3.5 s target read the landing as 3500 *frames* (~79 ms), the
+    // refinement loop then ran out of file long before its frame target,
+    // and the seek reported landing near 1.6 s. The timestamp must be
+    // converted through the track's time base so the landing is exact
+    // exactly like the FLAC fixture above.
+    let mut source = open("sine-5s.mka");
+    let target = Duration::from_millis(3_500);
+    let outcome = source.seek_refined(target, None, &mut || false).unwrap();
+    assert!(!outcome.refinement_truncated);
+    let delta = outcome.actual.as_millis().abs_diff(3_500);
+    assert!(delta <= 2, "landed at {:?}, wanted 3.5 s", outcome.actual);
+
+    // The landing must also be honest about the audio: draining the rest
+    // yields exactly the frames past the target, no loss, no duplication.
+    let mut whole = open("sine-5s.mka");
+    let mut total = 0u64;
+    while let Some(planes) = whole.next_planar().unwrap() {
+        total += planes[0].len() as u64;
+    }
+    let target_frames = frames_from_duration(target, source.sample_rate());
+    let mut remaining = 0u64;
+    while let Some(planes) = source.next_planar().unwrap() {
+        remaining += planes[0].len() as u64;
+    }
+    assert_eq!(
+        remaining,
+        total - target_frames,
+        "expected total - target frames remaining after the seek and drain"
+    );
+}
+
+#[test]
 fn a_mid_packet_seek_hands_out_the_retained_tail_exactly_once() {
     // 250 ms lands inside a FLAC block (blocks are ~92.9 ms at this sample
     // rate), so `seek_refined` must trim that block and retain its tail for

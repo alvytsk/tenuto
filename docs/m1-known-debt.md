@@ -69,8 +69,8 @@ recorded in the second half of this file.
   to one output latency ahead. Bounded by one output buffer and flagged `Degraded`.
 - The playback path opens and probes the file twice: once to validate before entering raw
   mode, once in the worker. Eliminating it means threading an opened source through `Load`.
-- Dead API: `EngineHandle::spawn`, `CpalOutput::drain_faults`, `DecodedSource::time_base`,
-  `CallbackCore::sample_rate`, `TestOutput::buffer_frames`.
+- Dead API: `EngineHandle::spawn`, `CpalOutput::drain_faults`, `CallbackCore::sample_rate`,
+  `TestOutput::buffer_frames`.
 
 ## CLI
 
