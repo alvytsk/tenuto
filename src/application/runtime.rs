@@ -17,7 +17,7 @@ use crate::application::browse::TreeCollected;
 use crate::application::cover::{Covers, Shown};
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
 use crate::application::mpris::cover::CoverImage;
-use crate::application::mpris::{FailureLog, MediaControls, command, snapshot, spawn};
+use crate::application::mpris::{FailureLog, MediaControls, Snapshot, command, snapshot, spawn};
 use crate::application::podcast::{
     PodcastResolution, SAVED_SOURCE_NOTICE, podcast_artwork, podcast_name, resolve_podcast,
 };
@@ -430,6 +430,15 @@ pub struct PlayerRuntime {
     dest_rows: Cell<Option<CachedRows>>,
     /// The runtime half of the desktop media-controls channel (M11).
     media_controls: Option<MediaControls>,
+    /// The last snapshot handed to the media controls: an unchanged state
+    /// publishes nothing, so an idle player never wakes the bus thread.
+    mpris_seen: Option<Snapshot>,
+    /// A seek was executed since the last publish — from the desktop's
+    /// widget or the player's own keys, both through [`Self::transport`].
+    /// Spent by the next publish, whose snapshot then carries
+    /// [`Snapshot::sought`]: the bus thread reports that jump whatever the
+    /// gap since its last snapshot.
+    seek_requested: bool,
     /// The playing media's cover, for the front end and the media controls
     /// alike. Tracked while either shows it.
     covers: Covers,
@@ -489,6 +498,8 @@ impl PlayerRuntime {
             rows: Cell::new(None),
             dest_rows: Cell::new(None),
             media_controls: None,
+            mpris_seen: None,
+            seek_requested: false,
             covers: Covers::new(default_loader(parts.hook)),
             covers_drawn: false,
             cover_seen: None,
@@ -497,10 +508,12 @@ impl PlayerRuntime {
         }
     }
 
-    /// Serves desktop media controls: requests are drained and a snapshot
-    /// is published on every [`pump`](Self::pump).
+    /// Serves desktop media controls: requests are drained on every
+    /// [`pump`](Self::pump), and a snapshot is published when it changed.
     pub fn attach_media_controls(&mut self, controls: MediaControls) {
         self.media_controls = Some(controls);
+        // A fresh thread starts with nothing published.
+        self.mpris_seen = None;
     }
 
     /// The front end draws covers: [`Self::cover`] follows the playing media
@@ -781,6 +794,10 @@ impl PlayerRuntime {
             .iter()
             .flat_map(|controls| std::iter::from_fn(|| controls.try_recv()))
             .collect();
+        // A request can leave no trace in the state — a volume written back
+        // at the value it already had — yet the desktop still expects its
+        // `PropertiesChanged`, so one publish follows every batch.
+        let answered = !requests.is_empty();
         for request in requests {
             if let Some(cmd) = command(request, &self.view()) {
                 self.handle(cmd);
@@ -788,7 +805,11 @@ impl PlayerRuntime {
         }
         self.pump_engine();
         self.track_covers();
-        self.publish_snapshot();
+        // Seeks mark themselves where they execute — a drained widget
+        // request and a pressed key land in the same `transport` — so the
+        // snapshot this pump publishes reports the jump whatever the gap.
+        let sought = std::mem::take(&mut self.seek_requested);
+        self.publish_snapshot(answered, sought);
     }
 
     /// The playing media: the detached one, else the active entry's.
@@ -839,13 +860,15 @@ impl PlayerRuntime {
         Some((media.clone(), source))
     }
 
-    fn publish_snapshot(&mut self) {
+    fn publish_snapshot(&mut self, answered: bool, sought: bool) {
         let Some(controls) = &self.media_controls else {
+            // Off, or never attached: no snapshot is built or diffed.
             return;
         };
         if controls.is_closed() {
             // Dropped once the bus thread has exited (no bus, lost connection).
             self.media_controls = None;
+            self.mpris_seen = None;
             return;
         }
         let media = self.playing_media();
@@ -865,7 +888,17 @@ impl PlayerRuntime {
             .filter(|shown| Some(&shown.media) == media.as_ref())
             .and_then(|shown| shown.image.clone())
             .map(CoverImage);
-        controls.publish(snap);
+        snap.sought = sought;
+        // Publish only what changed, the shape `track_covers` uses: an
+        // unchanged snapshot would wake and diff the bus thread for
+        // nothing, ten-plus times a second, idle or not. A drained request
+        // always publishes, and an executed seek always carries its mark.
+        if answered || sought || self.mpris_seen.as_ref() != Some(&snap) {
+            self.mpris_seen = Some(snap.clone());
+            if let Some(controls) = &self.media_controls {
+                controls.publish(snap);
+            }
+        }
     }
 
     fn pump_engine(&mut self) {
@@ -1106,6 +1139,10 @@ impl PlayerRuntime {
             (None, true) => (Duration::ZERO, None),
             (None, false) => return,
         };
+        // A relative seek the router takes is marked for the bus thread,
+        // whose window-bounded jump check would miss a landing that
+        // follows a stalled front end.
+        let seek = matches!(command, PlaybackCommand::SeekBy(_));
         let optimistic = self.router.route(engine, position, duration, now, command);
         // A prediction until the seek lands, so it reaches only the display.
         if let Some(position) = optimistic
@@ -1113,6 +1150,9 @@ impl PlayerRuntime {
         {
             mirror.position = position;
             mirror.provenance = PositionProvenance::Estimated;
+            if seek {
+                self.seek_requested = true;
+            }
         }
     }
 
@@ -1124,11 +1164,14 @@ impl PlayerRuntime {
         let seekable = self.mirror.as_ref().is_some_and(|mirror| {
             mirror.duration.is_some() && mirror.capabilities.seek != SeekSupport::Unsupported
         });
-        if seekable
-            && let Some(engine) = &self.engine
-            && engine.submit(PlaybackCommand::SeekTo(target)) != Admission::Accepted
-        {
-            self.status = Some(PLAYER_BUSY.to_owned());
+        if seekable && let Some(engine) = &self.engine {
+            if engine.submit(PlaybackCommand::SeekTo(target)) == Admission::Accepted {
+                // Accepted: the jump is real and the bus thread must hear
+                // of it whatever the gap since its last snapshot.
+                self.seek_requested = true;
+            } else {
+                self.status = Some(PLAYER_BUSY.to_owned());
+            }
         }
     }
 

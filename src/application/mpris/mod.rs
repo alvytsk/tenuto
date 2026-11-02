@@ -47,6 +47,14 @@ pub struct Snapshot {
     pub cover: Option<CoverImage>,
     /// The playing playlist is shuffled.
     pub shuffle: bool,
+    /// The pass this snapshot came from executed a seek — a desktop
+    /// request or the player's own keys, both through the one
+    /// `transport` door — so its jump is real, reported even when the
+    /// pass followed a front-end stall wider than the seek window.
+    /// Provenance the bus thread cannot recover on its own, like
+    /// `Published`'s `volume_written`; the runtime sets it,
+    /// [`snapshot`] never does.
+    pub sought: bool,
 }
 
 fn clean(text: &str) -> String {
@@ -86,6 +94,7 @@ pub fn snapshot(view: &PlayerView, media: Option<&MediaId>, podcast: Option<&str
             .map_or(Duration::ZERO, |n| n.position),
         cover: None,
         shuffle: view.tabs.iter().any(|t| t.playing && t.shuffled),
+        sought: false,
     }
 }
 
@@ -133,6 +142,25 @@ pub fn command(request: Request, view: &PlayerView) -> Option<AppCommand> {
 /// How far the position may stray from where playback alone would have
 /// taken it before clients are told it was seeked.
 const SEEK_TOLERANCE: Duration = Duration::from_secs(1);
+
+/// The widest gap between two snapshots that playback is still extrapolated
+/// over when looking for a seek — a few front-end pumps at any honest
+/// cadence. Every seek the runtime executes marks the snapshot that carries
+/// it (`Snapshot::sought`), from the desktop's widget and the player's own
+/// keys alike, so the extrapolation is only a backstop for jumps nothing
+/// commanded: a resume seek landing inside an already-loaded track. At pump
+/// cadence such a landing shows up within a pump or two. A wider gap means
+/// the front end stalled between pumps, and playback drifts from wall time
+/// for honest reasons: a rebuffer, an underrun, the track ending. The fresh
+/// position is the truth there; extrapolating across the stall reports a
+/// phantom seek.
+///
+/// Must stay well under `SEEK_TOLERANCE`: inside the window, drift can
+/// stray from the wall clock by at most the window itself, so only a jump
+/// far larger than any drift trips the check; past it, no extrapolation
+/// happens at all. `the_seek_window_never_widens_past_the_tolerance` pins
+/// the bound.
+const SEEK_WINDOW: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Change {
@@ -188,16 +216,29 @@ impl Published {
         if last.is_none_or(|l| l.shuffle != next.shuffle) {
             changes.push(Change::Shuffle);
         }
-        if let (Some(l), Some(at)) = (last, self.last_at)
+        // A seek the runtime drained is reported whatever the gap since
+        // the last snapshot: a widget seek queued while the front end was
+        // stalled lands in the first post-stall pass, outside the window,
+        // and the window would otherwise hide a real seek in exactly the
+        // regime it cannot judge.
+        let mut seeked = next.sought;
+        if !seeked
+            && let (Some(l), Some(at)) = (last, self.last_at)
             && media(l) == media(&next)
         {
+            let elapsed = now.saturating_duration_since(at);
             let expected = match l.status {
-                Status::Playing => l.position + now.saturating_duration_since(at),
-                _ => l.position,
+                Status::Playing if elapsed <= SEEK_WINDOW => Some(l.position + elapsed),
+                // Beyond the window the front end stalled; the fresh
+                // position is the truth, whatever the wall clock says.
+                Status::Playing => None,
+                _ => Some(l.position),
             };
-            if expected.abs_diff(next.position) > SEEK_TOLERANCE {
-                changes.push(Change::Seeked);
-            }
+            seeked =
+                expected.is_some_and(|expected| expected.abs_diff(next.position) > SEEK_TOLERANCE);
+        }
+        if seeked {
+            changes.push(Change::Seeked);
         }
         self.volume_written = false;
         self.last = Some(next);
@@ -380,6 +421,7 @@ mod tests {
             position: Duration::ZERO,
             cover: None,
             shuffle: false,
+            sought: false,
         }
     }
 
@@ -570,8 +612,14 @@ mod tests {
         p.apply_at(at(10, Status::Playing), t0);
         let later = |secs| t0 + Duration::from_secs(secs);
         assert!(p.apply_at(at(13, Status::Playing), later(3)).is_empty());
+        // At pump cadence a jump is a seek and is reported; a jump after a
+        // stall-wide gap is not: the fresh position is the truth there, and
+        // any seek the runtime executed marks its own snapshot instead.
         assert_eq!(
-            p.apply_at(at(60, Status::Playing), later(4)),
+            p.apply_at(
+                at(60, Status::Playing),
+                later(3) + Duration::from_millis(250)
+            ),
             vec![Change::Seeked]
         );
         p.apply_at(at(60, Status::Paused), later(4));
@@ -584,6 +632,98 @@ mod tests {
         let mut other = snap(Some(track("b")), Status::Paused, 1.0);
         other.position = Duration::from_secs(90);
         assert_eq!(p.apply_at(other, later(32)), vec![Change::Metadata]);
+    }
+
+    #[test]
+    fn a_stalled_front_end_does_not_report_a_phantom_seeked() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let playing = |secs: u64| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.position = Duration::from_secs(secs);
+            s
+        };
+        p.apply_at(playing(10), t0);
+        // At pump cadence, playback tracking the wall clock is no seek.
+        assert!(
+            p.apply_at(playing(10), t0 + Duration::from_millis(100))
+                .is_empty()
+        );
+        // The front end stalls 30 s between pumps. Playback carried on, but
+        // the stream rebuffered inside the stall, so the position is behind
+        // the wall clock; that divergence is not a seek.
+        let resumed = t0 + Duration::from_secs(30);
+        let changes = p.apply_at(playing(12), resumed);
+        assert!(!changes.contains(&Change::Seeked), "{changes:?}");
+        // Back at pump cadence, a real jump still reports one.
+        assert_eq!(
+            p.apply_at(playing(60), resumed + Duration::from_millis(100)),
+            vec![Change::Seeked]
+        );
+    }
+
+    #[test]
+    fn a_seek_drained_through_a_stall_still_reports_seeked() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let playing = |secs: u64, sought: bool| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.position = Duration::from_secs(secs);
+            s.sought = sought;
+            s
+        };
+        p.apply_at(playing(10, false), t0);
+        // The widget seeks while the front end is stalled. The runtime
+        // drains the request on the first pump after and marks that
+        // snapshot, so the jump is reported despite the stall's width.
+        let resumed = t0 + Duration::from_secs(30);
+        assert_eq!(p.apply_at(playing(42, true), resumed), vec![Change::Seeked]);
+        // The mark is spent: a later stall with no seek reports nothing.
+        assert!(
+            p.apply_at(playing(43, false), resumed + Duration::from_secs(30))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_stall_the_old_window_covered_does_not_report_a_phantom_seeked() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let playing = |secs: u64| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.position = Duration::from_secs(secs);
+            s
+        };
+        p.apply_at(playing(10), t0);
+        // A one-second stall — a width the window once extrapolated over —
+        // with a rebuffer that left the position half a second behind:
+        // divergence between wall clock and position, not a seek.
+        let changes = p.apply_at(playing(9), t0 + Duration::from_secs(1));
+        assert!(!changes.contains(&Change::Seeked), "{changes:?}");
+    }
+
+    #[test]
+    fn an_in_window_jump_far_beyond_drift_still_reports_seeked() {
+        let mut p = Published::default();
+        let t0 = Instant::now();
+        let playing = |secs: u64| {
+            let mut s = snap(Some(track("a")), Status::Playing, 1.0);
+            s.position = Duration::from_secs(secs);
+            s
+        };
+        p.apply_at(playing(10), t0);
+        // Within the window no drift can stray a second from the wall
+        // clock, so a two-second backward jump in one pump's width is a
+        // real seek and is reported.
+        assert_eq!(
+            p.apply_at(playing(8), t0 + Duration::from_millis(250)),
+            vec![Change::Seeked]
+        );
+    }
+
+    #[test]
+    fn the_seek_window_never_widens_past_the_tolerance() {
+        assert!(SEEK_WINDOW <= SEEK_TOLERANCE);
     }
 
     #[test]

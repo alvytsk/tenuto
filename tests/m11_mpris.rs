@@ -203,6 +203,84 @@ fn position_advances_in_successive_snapshots() {
     let _ = rig.runtime.shutdown();
 }
 
+#[test]
+fn idle_pumps_publish_nothing() {
+    let mut rig = rig_with(PersistedState::default());
+    play_five(&mut rig);
+    let (controls, mut remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    rig.runtime.handle(AppCommand::PlayPause);
+    pump_until(&mut rig, "paused", |v| v.phase == PlaybackPhase::Paused);
+    // Let any span trailing the pause land before watching the channel.
+    pump_for(&mut rig, Duration::from_millis(200));
+    // The widget stays open while paused: with the state unchanged, the
+    // runtime stops waking the bus thread every pump.
+    remote.snapshots.borrow_and_update();
+    pump_for(&mut rig, Duration::from_secs(1));
+    assert!(!remote.snapshots.has_changed().unwrap());
+    // A real change still reaches the bus at once.
+    rig.runtime.handle(AppCommand::PlayPause);
+    pump_until(&mut rig, "playing", |v| v.phase == PlaybackPhase::Playing);
+    assert!(remote.snapshots.has_changed().unwrap());
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_same_value_volume_write_still_republishes() {
+    let mut rig = rig_with(PersistedState::default());
+    let (controls, mut remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    step(&mut rig);
+    remote.snapshots.borrow_and_update();
+    let gain = remote.snapshots.borrow().clone().unwrap().volume;
+    // The desktop writes back the volume it already shows: no state
+    // changes, but the write still deserves its PropertiesChanged.
+    remote.requests.try_send(Request::SetVolume(gain)).unwrap();
+    step(&mut rig);
+    assert!(remote.snapshots.has_changed().unwrap());
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_seek_from_the_desktop_marks_the_published_snapshot() {
+    let mut rig = rig_with(PersistedState::default());
+    play_five(&mut rig);
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    step(&mut rig);
+    // A seek queued from the widget — as one queued while the front end
+    // was stalled would be — is drained by the next pump, which marks the
+    // snapshot it publishes so the bus thread reports the jump even
+    // across a wide gap.
+    remote.requests.try_send(Request::Seek(5_000_000)).unwrap();
+    step(&mut rig);
+    assert!(remote.snapshots.borrow().clone().unwrap().sought);
+    // The mark is per pass: the next snapshot carries none.
+    step(&mut rig);
+    assert!(!remote.snapshots.borrow().clone().unwrap().sought);
+    let _ = rig.runtime.shutdown();
+}
+
+#[test]
+fn a_keyboard_seek_marks_the_published_snapshot_too() {
+    let mut rig = rig_with(PersistedState::default());
+    play_five(&mut rig);
+    let (controls, remote) = channel();
+    rig.runtime.attach_media_controls(controls);
+    step(&mut rig);
+    // The player's own seek keys go through the same transport door as a
+    // desktop request, so a jump the front end executed right after a
+    // stall — where the window check has nothing to extrapolate over —
+    // is marked the same way and still reaches the desktop.
+    rig.runtime.handle(AppCommand::SeekBy(5));
+    step(&mut rig);
+    assert!(remote.snapshots.borrow().clone().unwrap().sought);
+    // The mark is per pass: the next snapshot carries none.
+    step(&mut rig);
+    assert!(!remote.snapshots.borrow().clone().unwrap().sought);
+    let _ = rig.runtime.shutdown();
+}
+
 const SHORT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sine.flac");
 
 fn png_bytes() -> Vec<u8> {
