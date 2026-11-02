@@ -165,6 +165,20 @@ pub fn step(rig: &mut Rig) {
     rig.runtime.pump();
 }
 
+/// Waits for a condition no clock step can reach: one owned by a thread off
+/// the clock (a metadata worker, the test server), which the runtime never
+/// pumps here — whatever such a thread has queued stays queued for the pump
+/// the test performs next. Real time passes in periods, the same nap `step`
+/// takes between its clock steps; like `pump_until`, reaching `PATIENCE` is
+/// a failure, never an exit.
+pub fn wait_off_clock(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + PATIENCE;
+    while !done() {
+        assert!(Instant::now() < deadline, "never happened: {what}");
+        std::thread::sleep(PERIOD);
+    }
+}
+
 /// Adds into whichever playlist the runtime is viewing — what a pre-M8
 /// `AppCommand::Enqueue(items)` meant, now that the command names its
 /// destination.

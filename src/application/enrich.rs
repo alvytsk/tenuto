@@ -30,6 +30,10 @@ const REQUEST_CAPACITY: usize = crate::queue::MAX_PLAYLIST_ENTRIES;
 /// `MAX_ENRICHMENT_PER_PUMP`: the runtime drains once per pump, so a smaller
 /// channel, not the pump's batch, would cap how fast a folder add is tagged.
 const RESULT_CAPACITY: usize = 64;
+// The prose above is a rule, not a coincidence, so make drift a compile
+// error: the m8 channel-full wait derives its threshold from
+// `MAX_ENRICHMENT_PER_PUMP` plus one in-flight result per worker.
+const _: () = assert!(RESULT_CAPACITY == super::runtime::MAX_ENRICHMENT_PER_PUMP);
 
 /// Reads a local file's tags. Shared by every worker, so it must be callable
 /// from several threads at once.
