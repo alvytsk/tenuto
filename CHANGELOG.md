@@ -45,9 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refinement trim, so it lands on the exact frame as it already did in
   WAV, FLAC and MP3.
 - A resampler error no longer drops a 1,024-frame chunk silently: every
-  dropped chunk now logs a warning carrying the frame count, and the end
-  of a conversion reports the accumulated loss that the closing flush
-  would otherwise have padded over with silence.
+  dropped chunk now logs a warning carrying the dropped input-frame
+  count, and the end of a conversion reports the accumulated loss that
+  the closing flush would otherwise have padded over with silence.
+  A rejected chunk can leave the input planes uneven; the drain now
+  takes only what each plane holds instead of panicking on the short
+  one.
 
 ## [0.4.0] - 2026-10-25
 

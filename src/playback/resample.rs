@@ -181,7 +181,7 @@ impl Converter {
         }
         if self.dropped_frames > 0 {
             tracing::warn!(
-                dropped = self.dropped_frames,
+                dropped_input_frames = self.dropped_frames,
                 emitted = self.emitted_frames,
                 expected,
                 "the resampler dropped input frames; that much audio is \
@@ -197,7 +197,7 @@ impl Converter {
     /// Count and log a chunk the resampler refused: its `frames` valid input
     /// frames were consumed and will never be converted, so the loss has to
     /// be visible instead of silent.
-    fn log_dropped_chunk(&mut self, frames: usize, what: &str, error: &impl std::fmt::Display) {
+    fn record_dropped_chunk(&mut self, frames: usize, what: &str, error: &impl std::fmt::Display) {
         self.dropped_frames += frames as u64;
         tracing::warn!(frames, %error, "{what}; dropping the chunk's audio");
     }
@@ -221,7 +221,7 @@ impl Converter {
         let input = match SequentialSliceOfVecs::new(&self.input[..], channels, len) {
             Ok(input) => input,
             Err(error) => {
-                self.log_dropped_chunk(frames, "cannot wrap the resampler input planes", &error);
+                self.record_dropped_chunk(frames, "cannot wrap the resampler input planes", &error);
                 return;
             }
         };
@@ -229,7 +229,7 @@ impl Converter {
             match SequentialSliceOfVecs::new_mut(&mut self.output[..], channels, output_capacity) {
                 Ok(output) => output,
                 Err(error) => {
-                    self.log_dropped_chunk(
+                    self.record_dropped_chunk(
                         frames,
                         "cannot wrap the resampler output planes",
                         &error,
@@ -254,7 +254,7 @@ impl Converter {
                 self.emitted_frames += usable as u64;
             }
             Err(error) => {
-                self.log_dropped_chunk(frames, "the resampler rejected the chunk", &error);
+                self.record_dropped_chunk(frames, "the resampler rejected the chunk", &error);
             }
         }
     }
@@ -480,10 +480,10 @@ mod tests {
         );
         assert!(
             lines.contains("frames=1024"),
-            "the warn must carry the dropped frame count; captured: {lines}"
+            "the warn must carry the dropped input frame count; captured: {lines}"
         );
         assert!(
-            lines.contains("dropped=1024"),
+            lines.contains("dropped_input_frames=1024"),
             "finish must report the accumulated loss; captured: {lines}"
         );
     }
