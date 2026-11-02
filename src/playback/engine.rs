@@ -1172,8 +1172,11 @@ impl Worker {
         }
     }
 
-    /// The one writer of the worker's state and of the traits that mirror
-    /// it. `pausable` is what `TogglePause` resolves against, so state and
+    /// The one writer of the worker's state and of `pausable`; of
+    /// `recovering`, the one clearing writer - `enter_reconnecting`
+    /// raises it ahead of the `Reconnecting` adoption, so a racing
+    /// `submit_pause` retires rather than freezes. `pausable` is what
+    /// `TogglePause` resolves against, so state and
     /// flag are written together or they drift: a `Paused` state behind a
     /// `true` pausable turned every later Space into a pause-submit the
     /// `Playing` guard swallowed, with no event and no resume (H1, project
