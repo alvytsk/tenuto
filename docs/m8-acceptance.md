@@ -128,7 +128,7 @@ Run 3: rows titled 4096 · pumps to drain 249 · worst single pump 1.583689ms ·
 
 No follow-up design (§11, §12) is warranted at the 4,096-entry cap: a mutation costs the application thread one ~2.2 ms clone, an enrichment pump costs it one clone and at most 64 lookups, and the writer coalesces the disk work behind both.
 
-## Manual pass in Ghostty — PENDING
+## Manual pass in Ghostty — PARTIAL (three visual rows left)
 
 Rows whose whole claim the automated evidence above already pins are checked, each with its witness (an agent verified them on 2026-11-01, from the worktree). The rest still need a human at a real terminal with a real music folder:
 
@@ -142,4 +142,4 @@ Rows whose whole claim the automated evidence above already pins are checked, ea
 - [ ] the strip at 80×28, at <50 columns, and with a very long name
 - [ ] the strip's alignment against the right-aligned track count at odd widths and large track counts; the highlighted (cream/bold) vs muted contrast of tabs on the border row; whether the Minimal tier's `name n/m` first row reads as a header rather than a track
 - [ ] the help overlay at a terminal 21–23 rows tall (80×24 under tmux): it is back to 21 rows including its border, so `q / Ctrl-C` and `? / Esc` stay on screen — and the paired lines still read clearly
-- [x] closing the browser right after `a` on a large folder: the add still lands, and the status line reports it. Checked 2026-11-01 against `a_tree_lands_once_the_browser_that_asked_for_it_has_closed` and its sibling in `src/tui/mod.rs`, and the tree-status pins in `tests/m8_runtime.rs` (`added 3`; `added 1000` at the 1,000-file size).
+- [x] closing the browser right after `a` on a large folder: the add still lands, and the status line reports it. Checked 2026-11-01 against `a_tree_lands_once_the_browser_that_asked_for_it_has_closed` and its sibling `draining_stops_when_the_handler_says_so_and_waits_once_when_idle`, both in `src/tui/mod.rs`, and the tree-status pins in `tests/m8_runtime.rs` (`added 3`; `added 1000` at the 1,000-file size).
