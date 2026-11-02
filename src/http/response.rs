@@ -84,12 +84,21 @@ pub struct Validator {
 /// its total length, its validator, and the URL whose response supplied
 /// both.
 ///
-/// The URL is what scopes the validator. An `ETag` identifies a
-/// representation of a single resource, so `If-Range` is sent only on a
-/// request hop that lands on exactly this URL — never forwarded across a
-/// redirect to a different one, which stands for a different resource the
-/// validator says nothing about (the document transport scopes its
-/// conditional headers the same way).
+/// The URL scopes where the validator is *sent*, not what it is checked
+/// against. An `ETag` identifies a representation of a single resource, so
+/// `If-Range` goes only on a request hop that lands on exactly this URL —
+/// never forwarded across a redirect to a different one, which stands for a
+/// different resource the validator says nothing about (the document
+/// transport scopes its conditional headers the same way). The response
+/// checks make no such distinction: `check_validator` and the total
+/// cross-check compare against `established` whatever URL a chain lands
+/// on, so a resume redirected to a different terminal URL can legitimately
+/// fail `ResourceChanged` on that resource's own validator.
+///
+/// The `url` field stays a live `Url` rather than a redacted string so a
+/// request hop can be compared against it exactly — but that also means
+/// its `Debug` carries a live URL, so nothing in this crate may log a
+/// complete `Established` `Debug` representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Established {
     pub url: Url,
@@ -119,6 +128,11 @@ pub enum Accepted {
 /// It lives here rather than beside the fetch that produces it because every
 /// field is a response-acceptance value, and the byte channel must be able to
 /// name the type without depending on the HTTP client.
+///
+/// Like `Established`, the `url` field stays a live `Url` so hop comparisons
+/// stay exact — but that also means its `Debug` carries a live URL, so
+/// nothing in this crate may log a complete `FetchAccepted` `Debug`
+/// representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FetchAccepted {
     pub url: Url,
