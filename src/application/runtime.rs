@@ -74,8 +74,10 @@ use crate::volume::Volume;
 pub const PLAYER_BUSY: &str = "Player is busy";
 /// Shown when `Session` already tracks its maximum of in-flight loads.
 pub const TOO_MANY_PENDING_LOADS: &str = "Too many pending loads";
-/// At most this many tag probes run at once (§8).
-const METADATA_WORKERS: usize = 2;
+/// At most this many tag probes run at once (§8). `pub` for the runtime
+/// tests, which wait on one finished result per worker past the result
+/// channel's capacity.
+pub const METADATA_WORKERS: usize = 2;
 /// At most this many finished tag probes are applied in one [`pump`]; the
 /// rest wait for the next one. The batch shares a single submit, so what
 /// this bounds is the per-result scan of every queued entry, not the clone.

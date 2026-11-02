@@ -525,6 +525,13 @@ fn a_refused_load_drained_with_a_later_adoption_does_not_stop_the_adopted_track(
         );
         step(&mut rig);
     }
+    // The loop also exits if both loads retire together, which would
+    // remove the very window under test — pin that it did not.
+    assert_eq!(
+        rig.runtime.session().pending_load_count(),
+        1,
+        "B's load must still be pending once A's refusal is drained"
+    );
     pump_until(&mut rig, "B playing", |view| is_playing(view, ids[1]));
     pump_for(&mut rig, Duration::from_millis(300));
     let view = rig.runtime.view();

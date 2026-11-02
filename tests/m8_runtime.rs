@@ -20,7 +20,7 @@ use runtime::{pump_for, pump_until, rig_with, rig_with_probe, row_ids, step, wai
 use tenuto::application::browse::TreeCollected;
 use tenuto::application::enrich::{TagProbe, default_probe};
 use tenuto::application::runtime::{
-    AppCommand, EnqueueItem, MAX_ENRICHMENT_PER_PUMP, PlayerRuntime,
+    AppCommand, EnqueueItem, MAX_ENRICHMENT_PER_PUMP, METADATA_WORKERS, PlayerRuntime,
 };
 use tenuto::lifecycle::hooks::TestHook;
 use tenuto::media::id::{AbsolutePath, MediaId};
@@ -485,10 +485,6 @@ fn instant_probe() -> TagProbe {
     })
 }
 
-/// How many metadata workers the runtime starts; matches the private
-/// `METADATA_WORKERS` in `application::runtime`.
-const METADATA_WORKERS: usize = 2;
-
 /// `instant_probe` that counts its calls, so a test can tell when the
 /// workers have filled their bounded result channel.
 fn counting_probe(calls: Arc<AtomicUsize>) -> TagProbe {
@@ -548,10 +544,12 @@ fn one_pump_applies_at_most_a_bounded_batch_of_results() {
     assert_eq!(rig.runtime.rows_of(first).len(), FILES);
     assert_eq!(rig.runtime.view().status.as_deref(), Some("added 1000"));
     // The workers' result channel holds one slot per result a pump may
-    // take, and each worker holds at most one finished job more — in the
-    // probe or blocked sending it. Once this many probes have run, the
-    // channel is full, and the pump below faces the largest backlog it
-    // can, however loaded the machine.
+    // take — `enrich.rs` pins its capacity equal to
+    // `MAX_ENRICHMENT_PER_PUMP` with a const assertion — and each worker
+    // holds at most one finished job more — in the probe or blocked
+    // sending it. Once this many probes have run, the channel is full,
+    // and the pump below faces the largest backlog it can, however
+    // loaded the machine.
     wait_off_clock("the metadata workers filled the result channel", || {
         probed.load(Ordering::SeqCst) >= MAX_ENRICHMENT_PER_PUMP + METADATA_WORKERS
     });
