@@ -16,9 +16,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Each job declares a timeout so a hung one cannot burn GitHub's 6-hour
+  # default. The values track the analogous jobs in release.yml and
+  # package.yml: 10 for a light check (`validate`, `release-scripts`),
+  # 30 for a full build without running tests (`doc`, `crate`, like
+  # `publish-crate`), 60 for the jobs that build the whole target
+  # surface (`clippy`) or run it (`test-linux`, `test-macos`, like
+  # `suite` and `build`).
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned Rust toolchain
@@ -28,6 +36,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - name: Install ALSA development headers
@@ -45,6 +54,7 @@ jobs:
   test-linux:
     name: Test (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - name: Install ALSA development headers
@@ -65,6 +75,7 @@ jobs:
     name: Test (macos-latest)
     runs-on: macos-latest
     continue-on-error: true
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned Rust toolchain
@@ -75,6 +86,7 @@ jobs:
   doc:
     name: Doc
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Install ALSA development headers
@@ -91,6 +103,7 @@ jobs:
     # A crate that cannot pass its own tests is not worth packaging.
     needs: test-linux
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Install ALSA development headers

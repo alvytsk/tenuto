@@ -9,6 +9,12 @@ on:
   pull_request:
     paths:
       - "Cargo.lock"
+  # Dispatch is the one way to re-audit without a Cargo.lock change: after
+  # a RustSec database update, or before a release.
+  workflow_dispatch:
+  # One advisory checker, deliberately: cargo-deny reads the same RustSec
+  # database, and its unmaintained failures would clash with advisories
+  # already tracked as open issues (#55–#57). Revisit once those close.
 
 # audit-check reports through a check run on push and pull_request, and
 # opens an issue per advisory on the scheduled run.
@@ -17,10 +23,15 @@ permissions:
   checks: write
   issues: write
 
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: rustsec/audit-check@v2

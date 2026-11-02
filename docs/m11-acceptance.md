@@ -27,10 +27,10 @@ tests above remove it.
 
 In the niri bar, for both `tui` and `play`:
 
-- [ ] A tagged local track, a podcast episode and a radio station each show the right title and artist.
-- [ ] Play/pause from the widget works and the widget's state follows the space key.
+- [ ] A tagged local track, a podcast episode and a radio station each show the right title and artist. What the widget is fed is pinned: `the_snapshot_describes_the_playing_track` and `a_podcast_episode_shows_the_podcast_name_as_artist` in `tests/m11_mpris.rs`, `snapshot_prefers_podcast_name_over_tag_artist` in `src/application/mpris/mod.rs`, and `a_detached_tagged_file_shows_its_tag_title_and_artist` for the `play` half; the look in the bar is what is left.
+- [ ] Play/pause from the widget works and the widget's state follows the space key. The request and race semantics are pinned: `a_play_pause_request_reaches_the_runtime`, `a_pause_after_the_engine_paused_does_not_resume`, `pause_does_nothing_when_nothing_is_loaded` and `pause_on_a_paused_station_leaves_it_paused` in `tests/m11_mpris.rs`, `pause_queues_pause_not_toggle` in `src/application/mpris/bus.rs`; `status_only_change_reports_playback_status` pins the state a following widget would read. The bar rendering is what is left.
 - [x] Next, previous, shuffle and seek from the widget work (checked in niri-bar 2026-10-18).
-- [ ] A tagged track, a Radio-T episode and a station each show their cover in the bar (spec §10.4); an untagged track shows none, and `~/.cache/tenuto/mpris/` holds at most one `cover-<pid>-<n>.png` per running instance, earlier runs' files removed at startup, the last cover removed on exit when possible.
-- [ ] The widget entry goes away on quit.
-- [ ] With `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, tenuto starts normally and writes nothing to the terminal (`tui` logs one warning to its log file).
-- [ ] With `TENUTO_MPRIS=off`, tenuto doesn't appear in the widget.
+- [ ] A tagged track, a Radio-T episode and a station each show their cover in the bar (spec §10.4); an untagged track shows none, and `~/.cache/tenuto/mpris/` holds at most one `cover-<pid>-<n>.png` per running instance, earlier runs' files removed at startup, the last cover removed on exit when possible. The cache-dir invariants are already pinned by `clear_covers_spares_a_live_process_and_removes_dead_and_own_files` in `src/application/mpris/cover.rs`; the look in the bar is what is left.
+- [ ] The widget entry goes away on quit. No automated evidence pins the bus name's release on exit; wholly manual.
+- [ ] With `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, tenuto starts normally and writes nothing to the terminal (`tui` logs one warning to its log file). The `play` half is pinned by `play_without_a_bus_writes_nothing_new_to_stderr` in `tests/m11_mpris_process.rs`; the `tui` half and its log warning are what is left.
+- [ ] With `TENUTO_MPRIS=off`, tenuto doesn't appear in the widget. Every subprocess and PTY suite already runs with `TENUTO_MPRIS=off` (the harness note above), so normal running under it is pinned everywhere; the widget's absence is what is left.
