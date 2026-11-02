@@ -1172,19 +1172,40 @@ impl Worker {
         }
     }
 
-    fn set_state(&mut self, state: PlaybackState) {
+    /// The one writer of the worker's state and of `pausable`; of
+    /// `recovering`, the one clearing writer - `enter_reconnecting`
+    /// raises it ahead of the `Reconnecting` adoption, so a racing
+    /// `submit_pause` retires rather than freezes. `pausable` is what
+    /// `TogglePause` resolves against, so state and
+    /// flag are written together or they drift: a `Paused` state behind a
+    /// `true` pausable turned every later Space into a pause-submit the
+    /// `Playing` guard swallowed, with no event and no resume (H1, project
+    /// review 2026-11-01).
+    ///
+    /// Returns whether the state changed. The announcement is `set_state`'s
+    /// half, kept separate for the two hook-landing pause writes: the wait
+    /// hook announced `Paused` itself when it parked the transport inside a
+    /// blocked read, and that announcement is allowed to stand alone.
+    fn adopt_state(&mut self, state: PlaybackState) -> bool {
         // M10 §7: every exit from Reconnecting ends a finite recovery.
         if state != PlaybackState::Reconnecting {
             self.traits.recovering.store(false, Ordering::Release);
         }
         if self.state == state {
-            return;
+            return false;
         }
         self.state = state;
         self.traits.pausable.store(
             matches!(state, PlaybackState::Playing | PlaybackState::Reconnecting),
             Ordering::Release,
         );
+        true
+    }
+
+    fn set_state(&mut self, state: PlaybackState) {
+        if !self.adopt_state(state) {
+            return;
+        }
         let session_rev = self.session_rev;
         // Only a `Loading` announcement carries a token: it is the one state
         // change a load itself causes, so `play()`'s remote-reopen `Loading`
@@ -2042,7 +2063,9 @@ impl Worker {
         // returns immediately after, but a stale value contradicts the
         // comment describing it.
         self.descriptor = None;
-        self.state = PlaybackState::Idle;
+        // Quiet, not `set_state`: nothing is left to announce to, but the
+        // traits still clear through the one writer.
+        self.adopt_state(PlaybackState::Idle);
         if !captured_exactly {
             // The published quality checks `degraded` before it looks at
             // `state`, so this is what keeps a capture that timed out from
@@ -2375,8 +2398,10 @@ impl Worker {
                             },
                         };
                         // The attempt may have torn the old transport down
-                        // and announced nothing; stay in Reconnecting.
-                        self.state = PlaybackState::Reconnecting;
+                        // and announced nothing; stay in Reconnecting —
+                        // quietly, which for this no-change re-assert is
+                        // exactly what `adopt_state` does.
+                        self.adopt_state(PlaybackState::Reconnecting);
                         if retryable(&failure, self.capabilities.continuity) {
                             self.enter_reconnecting(failure);
                         } else {
@@ -2982,10 +3007,12 @@ impl Worker {
         self.outage = None;
         // Idempotent with respect to the hook: if it already parked the
         // transport for a freeze and announced `Paused` itself, that
-        // announcement already stands, so this only updates local state
-        // rather than parking (redundantly) and re-emitting.
+        // announcement already stands, so this only adopts the state
+        // rather than parking (redundantly) and re-emitting. Through
+        // `adopt_state`, never a bare field write, so `pausable` flips
+        // with the state (H1: a stuck-`true` flag made Space unresumable).
         if lock(&self.facts).frozen_by_hook {
-            self.state = PlaybackState::Paused;
+            self.adopt_state(PlaybackState::Paused);
             return;
         }
         let parked = {
@@ -3068,9 +3095,12 @@ impl Worker {
         self.source_interrupt.retire();
         self.retire_remote_source();
         self.session_rev += 1;
-        self.traits.recovering.store(false, Ordering::Release);
         if announced {
-            self.state = PlaybackState::Paused;
+            // The hook already announced this pause from inside the blocked
+            // read; adopt the state quietly — `adopt_state` still clears
+            // `recovering` and flips `pausable`, which a bare field write
+            // would skip (H1).
+            self.adopt_state(PlaybackState::Paused);
         } else {
             self.set_state(PlaybackState::Paused);
         }
