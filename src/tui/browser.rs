@@ -622,6 +622,10 @@ impl BrowserState {
         self.start_loading();
         self.entries.clear();
         self.cwd = path.clone();
+        // The old directory's canonical spelling must not stand in for the
+        // new one: until this listing's answer lands, the navigated `cwd`
+        // itself is the best there is.
+        self.cwd_canonical = None;
         vec![BrowserEffect::Request(BrowseRequest::Directory(path))]
     }
 
