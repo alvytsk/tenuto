@@ -240,7 +240,7 @@ Each thread has strict ownership. The names below are the OS thread names.
 | Artwork worker | `tenuto-artwork` | Owned by the runtime's `Covers`, one per process. One latest-wins slot: resolve and decode the playing cover, or the loading entry's ahead of it, within 10 MiB encoded and 16 million pixels, inside `run_contained` | Encode for the terminal or open its own connection |
 | Spectrum worker | `tenuto-spectrum` | Read the output taps, run the 2048-sample Hann FFT, publish at most 20 frames per second into a latest-value slot | Block or allocate on the callback's behalf. Catch its own panics |
 | MPRIS thread | `tenuto-mpris` | The session-bus connection and its own current-thread Tokio runtime. Publishes the latest snapshot and queues requests for the runtime. Writes each new cover as a PNG in `<XDG cache>/tenuto/mpris/` and publishes it as `mpris:artUrl`, never holding the snapshot lock during the write | Call into the runtime or `Session` |
-| Browse worker | `tenuto-browse` | One request at a time: a directory level, the subscription list, one feed's cached episodes, and since M6 the subscribe, refresh and unsubscribe mutations through `library` | Recurse into a library or touch `Session` |
+| Browse worker | `tenuto-browse` | One request at a time: a directory level — listing it and resolving its canonical path — plus the subscription list, one feed's cached episodes, and since M6 the subscribe, refresh and unsubscribe mutations through `library` | Recurse into a library or touch `Session` |
 
 Tokio exists for HTTP sources, and on Linux for `tenuto-mpris`, which builds its own current-thread runtime. A local-file session without a desktop bus runs no Tokio runtime on the playback path.
 
