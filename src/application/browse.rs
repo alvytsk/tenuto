@@ -242,6 +242,11 @@ pub enum BrowseRequest {
 pub enum BrowseResult {
     Directory {
         path: PathBuf,
+        /// The directory as the filesystem spells it, resolved
+        /// (`canonicalize`) on the worker thread so no consumer of this
+        /// answer ever waits on the filesystem for it; `None` when it
+        /// could not be resolved, leaving `path` the best spelling.
+        canonical: Option<PathBuf>,
         entries: Result<Vec<DirEntry>, String>,
     },
     Feeds(Result<Vec<FeedSummary>, String>),
@@ -320,6 +325,7 @@ fn answer_with(request: BrowseRequest, message: &str) -> BrowseResult {
     match request {
         BrowseRequest::Directory(path) => BrowseResult::Directory {
             path,
+            canonical: None,
             entries: Err(message.to_owned()),
         },
         BrowseRequest::Feeds => BrowseResult::Feeds(Err(message.to_owned())),
@@ -349,7 +355,12 @@ fn answer(
     match request {
         BrowseRequest::Directory(path) => {
             let entries = list_directory(&path).map_err(|error| error.to_string());
-            BrowseResult::Directory { path, entries }
+            let canonical = std::fs::canonicalize(&path).ok();
+            BrowseResult::Directory {
+                path,
+                canonical,
+                entries,
+            }
         }
         BrowseRequest::Feeds => match library {
             Some(stores) => BrowseResult::Feeds(

@@ -91,6 +91,11 @@ pub struct BrowserState {
     queued_dirs: HashSet<OsString>,
     /// The rows and `cwd` the last sync read, so an unchanged pair skips it.
     synced: Option<(Arc<Vec<QueueRow>>, PathBuf)>,
+    /// The cwd as the filesystem spells it, carried by the listing answer
+    /// (`BrowseResult::Directory`'s `canonical`): the worker resolved it, so
+    /// the render path that syncs never waits on the filesystem itself. The
+    /// navigated `cwd` above stands in until an answer for it lands.
+    cwd_canonical: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +135,7 @@ impl BrowserState {
             queued: HashMap::new(),
             queued_dirs: HashSet::new(),
             synced: None,
+            cwd_canonical: None,
         }
     }
 
@@ -139,7 +145,8 @@ impl BrowserState {
     /// ponytail: a queued file is matched to a directory by its canonical
     /// path, so a directory reached through a symlink never draws the tick.
     /// Called every frame; it rebuilds only when the runtime handed out new
-    /// rows or the Files tab moved to another directory.
+    /// rows, the Files tab moved to another directory, or that directory's
+    /// listing answer landed.
     pub fn sync_queue(&mut self, rows: &Arc<Vec<QueueRow>>) {
         if let Some((synced, cwd)) = &self.synced
             && Arc::ptr_eq(synced, rows)
@@ -150,10 +157,15 @@ impl BrowserState {
         self.synced = Some((Arc::clone(rows), self.cwd.clone()));
         self.queued = rows.iter().map(|row| (row.media.clone(), row.id)).collect();
         self.queued_dirs.clear();
-        // Queued media carries its canonical path; `cwd` is the path as
-        // navigated, which a symlink (or macOS's `/var` -> `/private/var`)
-        // can spell differently. Resolved once per sync, not per frame.
-        let cwd = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+        // Queued media carries its canonical path; the listing answer
+        // carried the cwd's, resolved on the worker — never here, for this
+        // runs on the render path and must not wait on the filesystem (a
+        // stale mount would stall it). Until an answer lands, the
+        // navigated spelling is the best there is.
+        let cwd = self
+            .cwd_canonical
+            .clone()
+            .unwrap_or_else(|| self.cwd.clone());
         for row in rows.iter() {
             let MediaId::LocalFile(path) = &row.media else {
                 continue;
@@ -203,9 +215,19 @@ impl BrowserState {
     pub fn apply(&mut self, result: BrowseResult) -> Option<BrowseRequest> {
         let mut follow_up = None;
         match result {
-            BrowseResult::Directory { path, entries } => {
+            BrowseResult::Directory {
+                path,
+                canonical,
+                entries,
+            } => {
                 if self.tab == BrowserTab::Files && path == self.cwd {
+                    self.cwd_canonical = canonical;
                     self.entries = self.settle(entries);
+                    // The entries changed, and a sync may already have run
+                    // against this cwd with the previous directory's
+                    // spelling (a frame synced while the listing was in
+                    // flight); the next one re-reads the resolved cwd.
+                    self.synced = None;
                 }
             }
             BrowseResult::Feeds(feeds) => {
@@ -600,6 +622,10 @@ impl BrowserState {
         self.start_loading();
         self.entries.clear();
         self.cwd = path.clone();
+        // The old directory's canonical spelling must not stand in for the
+        // new one: until this listing's answer lands, the navigated `cwd`
+        // itself is the best there is.
+        self.cwd_canonical = None;
         vec![BrowserEffect::Request(BrowseRequest::Directory(path))]
     }
 

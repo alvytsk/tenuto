@@ -423,6 +423,11 @@ pub struct PlayerRuntime {
     /// `Session::state_edits` and the playlist they were built from, so a
     /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
     rows: Cell<Option<CachedRows>>,
+    /// Another playlist's rows beside the viewed one's — the open
+    /// browser's destination — cached by the same key so the browser's
+    /// key events and the render loop's frames read one shared handle
+    /// without either evicting the other's cache.
+    dest_rows: Cell<Option<CachedRows>>,
     /// The runtime half of the desktop media-controls channel (M11).
     media_controls: Option<MediaControls>,
     /// The playing media's cover, for the front end and the media controls
@@ -482,6 +487,7 @@ impl PlayerRuntime {
             restored,
             viewed,
             rows: Cell::new(None),
+            dest_rows: Cell::new(None),
             media_controls: None,
             covers: Covers::new(default_loader(parts.hook)),
             covers_drawn: false,
@@ -536,19 +542,36 @@ impl PlayerRuntime {
     /// The viewed playlist's rows, rebuilt only when the state or the viewed
     /// playlist moved since the last call.
     fn viewed_rows(&self) -> Arc<Vec<QueueRow>> {
-        let key = (self.session.state_edits(), self.viewed);
-        let rows = match self.rows.take() {
-            Some((edits, viewed, rows)) if (edits, viewed) == key => rows,
-            _ => Arc::new(queue_rows(self.session.state(), self.viewed)),
-        };
-        self.rows.set(Some((key.0, key.1, Arc::clone(&rows))));
-        rows
+        Self::rows_from(&self.rows, &self.session, self.viewed)
     }
 
-    /// One named playlist's rows, for a caller that needs a playlist other
-    /// than the viewed one.
-    pub fn rows_of(&self, playlist: PlaylistId) -> Vec<QueueRow> {
-        queue_rows(self.session.state(), playlist)
+    /// One named playlist's rows as a shared handle — the one the open
+    /// browser's key events and the render loop's browser sync both hand
+    /// to `BrowserState::sync_queue`, whose pointer-equality cache then
+    /// hits between key events instead of rebuilding per event. The
+    /// viewed playlist gets the frames' own handle; any other playlist is
+    /// cached beside it, so the two never rebuild for each other.
+    pub fn rows_of(&self, playlist: PlaylistId) -> Arc<Vec<QueueRow>> {
+        if playlist == self.viewed {
+            return self.viewed_rows();
+        }
+        Self::rows_from(&self.dest_rows, &self.session, playlist)
+    }
+
+    /// `playlist`'s rows out of `slot`, rebuilt only when the state or the
+    /// playlist moved since the slot was last filled.
+    fn rows_from(
+        slot: &Cell<Option<CachedRows>>,
+        session: &Session,
+        playlist: PlaylistId,
+    ) -> Arc<Vec<QueueRow>> {
+        let key = (session.state_edits(), playlist);
+        let rows = match slot.take() {
+            Some((edits, cached, rows)) if (edits, cached) == key => rows,
+            _ => Arc::new(queue_rows(session.state(), playlist)),
+        };
+        slot.set(Some((key.0, key.1, Arc::clone(&rows))));
+        rows
     }
 
     /// The engine's spectrum analysis worker; `None` until the first load

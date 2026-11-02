@@ -391,7 +391,11 @@ fn run_loop(
         let view = runtime.view();
         ui.reconcile(&view, None);
         if let Some(browser) = &mut browsing.state {
-            browser.sync_queue(&view.rows);
+            // The destination's rows, the same shared handle the browser's
+            // key events sync from (see `handle_event`), so the two paths
+            // agree on one handle and an unchanged queue costs this pass a
+            // pointer comparison, not a rebuild.
+            browser.sync_queue(&runtime.rows_of(browser.dest));
         }
         if let Err(error) = update_spectrum(runtime, terminal, &view, &mut spectrum) {
             return Ending::Failed(LifecycleError::Terminal(error));
@@ -728,8 +732,11 @@ fn handle_event(front: &mut Front<'_>, hits: &HitMap, event: Event) -> io::Resul
             };
             // The destination's rows, not the viewed playlist's: while the
             // two usually agree, the browser's ticks and Enter-to-remove
-            // must always follow where its own adds land (M8 §8).
-            browser.sync_queue(&Arc::new(front.runtime.rows_of(browser.dest)));
+            // must always follow where its own adds land (M8 §8). The
+            // runtime hands out one shared handle for them, so the
+            // pointer-equality cache inside `sync_queue` hits between key
+            // events instead of rebuilding the rows on each of them.
+            browser.sync_queue(&front.runtime.rows_of(browser.dest));
             let effects = browser.handle_key(key);
             for effect in effects {
                 apply_browser_effect(effect, front)?;
