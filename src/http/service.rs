@@ -194,6 +194,10 @@ struct Opened {
     accepted: Accepted,
     headers: Headers,
     redirects: u8,
+    /// The URL of the accepted response — the chain's terminal hop. A
+    /// validator this response supplies is scoped to this URL, so it must
+    /// travel back to whoever builds the next request.
+    url: Url,
 }
 
 /// What stays fixed across every request one fetch task makes: the opening
@@ -238,7 +242,12 @@ impl Fetch {
                 .get(current.clone())
                 .header(RANGE, format!("bytes={start}-"))
                 .header(ACCEPT_ENCODING, "identity");
+            // The validator is scoped to the URL whose response supplied it:
+            // it is sent only on a hop landing on that URL, never forwarded
+            // across a redirect to a different resource (which may well sit
+            // on a different origin).
             if let Some(established) = established
+                && current == established.url
                 && let Some(if_range) = if_range_value(&established.validator)
             {
                 builder = builder.header(IF_RANGE, if_range);
@@ -265,21 +274,34 @@ impl Fetch {
             };
 
             let status = response.status().as_u16();
-            let location = if (300..400).contains(&status) {
-                response
-                    .headers()
-                    .get(LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string)
-            } else {
-                None
-            };
+            // The redirect set is the document transport's (§3.2): only
+            // these five statuses are redirects. Anything else in the 3xx
+            // range — 304 and 305 included, whatever `Location` header it
+            // carries — falls through to `accept` below, which answers for
+            // the status itself.
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                break response;
+            }
 
+            // The body of a redirect response is never read: only the
+            // `Location` header is consulted, and `response` is dropped
+            // when the loop continues.
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
             let Some(location) = location else {
                 break response;
             };
 
             let target = accept_redirect(&current, &location, redirects + 1, &seen, limits)?;
+            // The source policy, re-run on every hop target: `accept_redirect`
+            // checks the hop cap, loops, scheme and downgrade, but not the
+            // shape of the target itself, so a `Location` a user could never
+            // type — one embedding credentials — must be refused here rather
+            // than fetched.
+            super::document::validate_source_policy(&target)?;
             // §11: redirect count, one line per hop rather than a single total
             // at the end - bounded by `limits.max_redirects`, never per-chunk, so
             // this cannot grow into the per-frame noise §11 rules out.
@@ -296,11 +318,15 @@ impl Fetch {
         let status = response.status().as_u16();
         let headers = Headers::from_map(response.headers());
         let accepted = accept(status, &headers, start, start == 0, established)?;
+        // `current` is the URL of the response being accepted: it only moves
+        // when a hop is followed, and a hop followed means the loop continued
+        // rather than broke.
         Ok(Some(Opened {
             response,
             accepted,
             headers,
             redirects,
+            url: current,
         }))
     }
 }
@@ -346,6 +372,7 @@ async fn run_fetch(
         accepted,
         headers,
         redirects,
+        url,
     } = match opened {
         Ok(Some(opened)) => opened,
         Ok(None) => return,
@@ -368,14 +395,18 @@ async fn run_fetch(
 
     let validator = validator_from(&headers);
     // What every resumed request compares its response against: the
-    // caller's own established facts when it had them, else this response's.
+    // caller's own established facts when it had them, else this response's
+    // — in which case they are scoped to the URL that produced them, so the
+    // resumed request re-sends its validator only where it is meaningful.
     let established = established.unwrap_or(Established {
+        url: url.clone(),
         total,
         validator: validator.clone(),
     });
     interrupt.publish_headers(
         generation,
         Ok(FetchAccepted {
+            url,
             accepted,
             validator,
             headers,

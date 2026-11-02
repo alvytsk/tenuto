@@ -203,9 +203,9 @@ pub struct HttpMediaSource {
     limits: Limits,
     opening_deadline: OpeningDeadline,
     opening_limits: Arc<OpeningLimits>,
-    /// The validator and total bytes established by whichever response is
-    /// current — carried into every later request's `If-Range` and cross-
-    /// checked against every later response (§7).
+    /// The URL, validator and total bytes established by whichever response
+    /// is current — carried into every later request, where its `If-Range`
+    /// is sent only on a hop that lands on that same URL (§7).
     established: Established,
     pos: u64,
     byte_len: Option<u64>,
@@ -325,6 +325,11 @@ impl HttpMediaSource {
             ),
         };
         let established = Established {
+            // Scoped to the hop that actually answered — the terminal hop of
+            // the opening chain, which may sit behind redirects — so a later
+            // seek re-sends its validator only to that URL and never to the
+            // redirecting origin in front of it.
+            url: accepted.url.clone(),
             total: byte_len,
             validator: accepted.validator,
         };

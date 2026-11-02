@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use support::server::{Script, TestServer};
+use support::server::{DocumentReply, Script, TestServer};
 use tenuto::http::channel::{ByteChannel, HeaderOutcome, ReadOutcome, SourceInterrupt, WaitHook};
 use tenuto::http::error::{Operation, Phase, RangeRejection, RedirectRejection, RemoteFailure};
 use tenuto::http::limits::Limits;
@@ -208,6 +208,198 @@ fn an_https_to_http_downgrade_is_refused() {
         "{outcome:?}"
     );
     server.shutdown();
+}
+
+/// One path-routed reply for the `Script::documents` router, which serves any
+/// client — media fetch included — by path, so a media redirect chain can be
+/// staged hop by hop with a status of the test's choosing (the media-side
+/// `redirect_chain`/`redirect_to` helpers hard-code 302).
+fn route(path: &str, status: u16, headers: Vec<(&str, &str)>, body: &[u8]) -> DocumentReply {
+    DocumentReply {
+        path: path.to_string(),
+        status,
+        headers: headers
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect(),
+        body: body.to_vec(),
+        conditional: false,
+        header_delay: Duration::ZERO,
+    }
+}
+
+#[test]
+fn only_the_five_redirect_statuses_are_followed() {
+    // The document transport's rule (§3.2), which media must match: only
+    // 301/302/303/307/308 are redirects. 302 is already pinned by
+    // `redirects_are_followed_up_to_the_limit_and_the_query_survives`; the
+    // other four are checked here, followed by the two the old media loop
+    // wrongly followed — 304 and 305 answer "not a redirect" even when a
+    // `Location` header is present, so the fetch must answer for the status
+    // itself instead of chasing the header.
+    let service = service(Limits::default());
+    for status in [301u16, 303, 307, 308] {
+        let server = TestServer::start(Script::documents(vec![
+            route("/a", status, vec![("Location", "/b")], b""),
+            route("/b", 200, vec![], b"final"),
+        ]));
+        let (channel, _interrupt, accepted) = open(&service, url(&server.url("/a")), 0);
+        match accepted {
+            Ok(accepted) => assert_eq!(accepted.redirects, 1, "status {status}"),
+            Err(outcome) => panic!("status {status} must be followed: {outcome:?}"),
+        }
+        assert_eq!(drain(&channel), b"final", "status {status}");
+        assert_eq!(server.requests().len(), 2, "status {status}");
+        server.shutdown();
+    }
+
+    for status in [304u16, 305] {
+        let server = TestServer::start(Script::documents(vec![
+            route("/a", status, vec![("Location", "/b")], b""),
+            route("/b", 200, vec![], b"never reached"),
+        ]));
+        let (_channel, _interrupt, outcome) = open(&service, url(&server.url("/a")), 0);
+        assert!(
+            matches!(
+                outcome,
+                Err(HeaderOutcome::Failed(RemoteFailure::Status {
+                    status: refused,
+                    ..
+                })) if refused == status
+            ),
+            "status {status} must not be followed: {outcome:?}"
+        );
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "status {status}: the Location was chased anyway"
+        );
+        server.shutdown();
+    }
+}
+
+#[test]
+fn a_redirect_status_without_a_location_is_a_status_failure() {
+    // The document transport's own playbook: a redirect status whose headers
+    // name no target is answered as the status it is, never guessed at.
+    let server = TestServer::start(Script::documents(vec![route("/a", 302, vec![], b"")]));
+    let service = service(Limits::default());
+    let (_channel, _interrupt, outcome) = open(&service, url(&server.url("/a")), 0);
+    assert!(
+        matches!(
+            outcome,
+            Err(HeaderOutcome::Failed(RemoteFailure::Status {
+                status: 302,
+                ..
+            }))
+        ),
+        "{outcome:?}"
+    );
+    server.shutdown();
+}
+
+#[test]
+fn a_redirect_target_with_embedded_credentials_is_refused() {
+    // The document transport re-runs the source policy on every hop target;
+    // the media transport must refuse the same URL it would refuse as input.
+    // `accept_redirect` alone passes this Location (http, no downgrade, no
+    // loop), so without the re-validation the credentials-bearing target
+    // below would simply be fetched — and `/b` is a perfectly good media
+    // route, so on the old behavior this fetch *succeeds*.
+    let target = TestServer::start(Script::serving(b"final".to_vec()));
+    let origin = TestServer::start(Script::documents(vec![route(
+        "/a",
+        302,
+        vec![(
+            "Location",
+            &format!("http://alice:hunter2@127.0.0.1:{}/b", target.port()),
+        )],
+        b"",
+    )]));
+    let service = service(Limits::default());
+    let (_channel, _interrupt, outcome) = open(&service, url(&origin.url("/a")), 0);
+    match outcome {
+        Err(HeaderOutcome::Failed(failure @ RemoteFailure::InvalidSource { .. })) => {
+            // The target is attacker-chosen text; the rendered failure must
+            // carry neither the credentials nor the query.
+            let rendered = format!("{failure}");
+            assert!(
+                rendered.contains("credentials"),
+                "the reason must name the credentials: {rendered}"
+            );
+            assert!(
+                !rendered.contains("hunter2") && !rendered.contains("alice"),
+                "the embedded credentials reached a diagnostic: {rendered}"
+            );
+        }
+        Err(other) => panic!(
+            "a credentials-bearing redirect target must fail as InvalidSource, got {other:?}"
+        ),
+        Ok(accepted) => panic!("the credentials-bearing target was fetched: {accepted:?}"),
+    }
+    assert!(
+        target.requests().is_empty(),
+        "the refused target was requested anyway: {:?}",
+        target.requests()
+    );
+    origin.shutdown();
+    target.shutdown();
+}
+
+#[test]
+fn the_range_validator_is_not_forwarded_across_a_cross_origin_redirect() {
+    // A validator identifies a representation of *one* resource, so — as the
+    // document transport already refuses for its conditional headers — the
+    // media transport must not hand B's `If-Range` validator to A, the
+    // redirecting origin that never produced it. The hop that did produce it
+    // still receives it: scoping is by URL, not a blanket drop, so the
+    // in-place resume below keeps its changed-content protection where it is
+    // sound.
+    //
+    // B serves a ranged body with a strong ETag and truncates its first
+    // response, so the fetch resumes in place: A is asked again, redirects to
+    // B again, and the resumed request is the one whose headers matter.
+    const KIB: usize = 1024;
+    let target = TestServer::start(
+        Script::serving(vec![7u8; 512 * KIB])
+            .truncate_body_after(200 * KIB)
+            .truncate_only_first_response(),
+    );
+    let origin = TestServer::start(Script::documents(vec![route(
+        "/audio",
+        302,
+        vec![(
+            "Location",
+            &format!("http://127.0.0.1:{}/audio", target.port()),
+        )],
+        b"",
+    )]));
+    let service = service(Limits::default());
+    let (channel, _interrupt, accepted) = open(&service, url(&origin.url("/audio")), 0);
+    assert!(accepted.is_ok(), "opening should succeed: {accepted:?}");
+    assert_eq!(drain(&channel), vec![7u8; 512 * KIB]);
+
+    let origin_requests = origin.requests();
+    assert_eq!(origin_requests.len(), 2, "one opening hop, one resume hop");
+    for (index, request) in origin_requests.iter().enumerate() {
+        assert!(
+            request.header("if-range").is_none(),
+            "hop {index} forwarded the target's validator to the redirecting origin: {request:?}"
+        );
+    }
+    let target_requests = target.requests();
+    assert_eq!(
+        target_requests.len(),
+        2,
+        "one opening body, one resumed body"
+    );
+    assert_eq!(
+        target_requests[1].header("if-range"),
+        Some("\"v1\""),
+        "the hop that established the validator must still receive it: {target_requests:?}"
+    );
+    origin.shutdown();
+    target.shutdown();
 }
 
 #[test]

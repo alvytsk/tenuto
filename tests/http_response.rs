@@ -157,6 +157,7 @@ fn a_body_length_that_contradicts_the_interval_is_rejected() {
 #[test]
 fn a_total_that_conflicts_with_the_established_one_is_a_resource_change() {
     let established = Established {
+        url: url("https://example.com/a.mp3"),
         total: Some(8192),
         validator: Validator {
             strong_etag: Some("\"v1\"".into()),
@@ -185,6 +186,7 @@ fn a_total_that_conflicts_with_the_established_one_is_a_resource_change() {
 fn a_changed_strong_validator_fails_as_resource_changed() {
     // H11. The length can be identical; the validator is what settles it.
     let established = Established {
+        url: url("https://example.com/a.mp3"),
         total: Some(8192),
         validator: Validator {
             strong_etag: Some("\"v1\"".into()),
@@ -216,6 +218,7 @@ fn weak_and_last_modified_validators_are_compared_even_though_they_are_never_sen
     // the metadata away, which would let a same-length replacement through
     // silently.
     let weak = Established {
+        url: url("https://example.com/a.mp3"),
         total: Some(8192),
         validator: Validator {
             strong_etag: None,
@@ -239,6 +242,7 @@ fn weak_and_last_modified_validators_are_compared_even_though_they_are_never_sen
     );
 
     let dated = Established {
+        url: url("https://example.com/a.mp3"),
         total: Some(8192),
         validator: Validator {
             strong_etag: None,
@@ -284,6 +288,7 @@ fn a_reopened_origin_whose_length_contradicts_the_established_total_fails() {
     // declared length is the only evidence there is — and a server with no
     // validator headers offers nothing else.
     let established = Established {
+        url: url("https://example.com/a.mp3"),
         total: Some(8192),
         validator: Validator {
             strong_etag: None,

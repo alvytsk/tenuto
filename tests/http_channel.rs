@@ -8,6 +8,7 @@ use tenuto::http::channel::{
 };
 use tenuto::http::error::{Operation, RemoteFailure};
 use tenuto::http::response::{Accepted, FetchAccepted, Headers, Validator};
+use url::Url;
 
 const STALL: Duration = Duration::from_secs(5);
 
@@ -529,8 +530,12 @@ fn a_stall_deadline_that_elapses_fails_rather_than_returning_eof() {
 // as every other wait, because a private mutex/condvar for it would be a
 // fourth waiter that `wake_all` never reaches. ---
 
+/// A literal absolute URL always parses — the same shape `http_fetch.rs`
+/// keeps for its own `url` helper.
+#[allow(clippy::unwrap_used)]
 fn sample_accepted() -> FetchAccepted {
     FetchAccepted {
+        url: Url::parse("http://127.0.0.1:1/audio").unwrap(),
         accepted: Accepted::Sequential { len: Some(100) },
         validator: Validator::default(),
         headers: Headers::from_pairs(&[]),

@@ -372,7 +372,7 @@ A seek's deadline bounds source I/O, not demuxer work over the 64 KiB `MediaSour
 | Redirects | 5 |
 | Whole document (feeds) | 8 MiB |
 
-The buffer plus one chunk is the application's bound. HTTP/2 stream and connection windows are set from the same two numbers. HTTP/1.1 has no equivalent knob in reqwest, so that path's library buffering is not part of the stated cap. Redirect policy is shared by media and document fetches: hop cap, loop detection, scheme check, and refusal of an HTTPS to HTTP downgrade.
+The buffer plus one chunk is the application's bound. HTTP/2 stream and connection windows are set from the same two numbers. HTTP/1.1 has no equivalent knob in reqwest, so that path's library buffering is not part of the stated cap. Redirect policy is shared by media and document fetches: hop cap, loop detection, scheme check, refusal of an HTTPS to HTTP downgrade, only 301/302/303/307/308 followed, and each hop's target re-validated against the source policy (a host must be present, and embedded userinfo is refused). Conditional validators are scoped to one URL: `If-Range` is sent only on a hop that lands on the URL whose response supplied the validator, so a redirect — cross-origin or not — never carries it to a resource it does not describe.
 
 ### 7.5 Live media
 

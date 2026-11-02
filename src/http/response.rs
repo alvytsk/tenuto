@@ -80,8 +80,28 @@ pub struct Validator {
     pub last_modified: Option<String>,
 }
 
+/// What one accepted response established about *the resource at one URL*:
+/// its total length, its validator, and the URL whose response supplied
+/// both.
+///
+/// The URL scopes where the validator is *sent*, not what it is checked
+/// against. An `ETag` identifies a representation of a single resource, so
+/// `If-Range` goes only on a request hop that lands on exactly this URL —
+/// never forwarded across a redirect to a different one, which stands for a
+/// different resource the validator says nothing about (the document
+/// transport scopes its conditional headers the same way). The response
+/// checks make no such distinction: `check_validator` and the total
+/// cross-check compare against `established` whatever URL a chain lands
+/// on, so a resume redirected to a different terminal URL can legitimately
+/// fail `ResourceChanged` on that resource's own validator.
+///
+/// The `url` field stays a live `Url` rather than a redacted string so a
+/// request hop can be compared against it exactly — but that also means
+/// its `Debug` carries a live URL, so nothing in this crate may log a
+/// complete `Established` `Debug` representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Established {
+    pub url: Url,
     pub total: Option<u64>,
     pub validator: Validator,
 }
@@ -101,14 +121,21 @@ pub enum Accepted {
 }
 
 /// What a validated response established: how its bytes may be used, the
-/// validator to compare against on any later request, its headers, and how
-/// many redirects were followed to reach it.
+/// validator to compare against on any later request, its headers, how many
+/// redirects were followed to reach it, and the URL of the hop that produced
+/// it — the terminal hop, which is the URL a later `If-Range` is scoped to.
 ///
 /// It lives here rather than beside the fetch that produces it because every
 /// field is a response-acceptance value, and the byte channel must be able to
 /// name the type without depending on the HTTP client.
+///
+/// Like `Established`, the `url` field stays a live `Url` so hop comparisons
+/// stay exact — but that also means its `Debug` carries a live URL, so
+/// nothing in this crate may log a complete `FetchAccepted` `Debug`
+/// representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FetchAccepted {
+    pub url: Url,
     pub accepted: Accepted,
     pub validator: Validator,
     pub headers: Headers,
