@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The checkpoint cap's guard warning no longer names the media it drops. A
   media identity's spelling embeds the full URL with its query string,
   which no tenuto log line may carry; the warning reports the drop's
-  ordinal instead. The branch needs a full checkpoint map with no
+  touch sequence instead. The branch needs a full checkpoint map with no
   evictable entry, which the 512-entry cap cannot produce, so no listener
   ever saw the old line.
 

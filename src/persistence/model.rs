@@ -359,7 +359,8 @@ impl PersistedState {
     /// `MAX_ENTRIES > 1`, since the current entry is the only protected one and
     /// the incoming media is by definition not yet in the map — the incoming
     /// checkpoint is dropped rather than let the map grow past the cap, and the
-    /// fact is logged instead of swallowed: as an ordinal, never as the media,
+    /// fact is logged instead of swallowed: as the touch sequence the
+    /// dropped checkpoint would have taken, never as the media,
     /// because a `MediaId`'s `Display` embeds the full URL with its query
     /// string and the redaction rule (`docs/architecture.md` §10) keeps both
     /// out of every log line.
@@ -373,7 +374,7 @@ impl PersistedState {
                     "MAX_ENTRIES ({MAX_ENTRIES}) left no evictable entry; the cap would be exceeded"
                 );
                 tracing::warn!(
-                    media_ordinal = self.next_seq,
+                    dropped_touch_seq = self.next_seq,
                     "no entry could be evicted at the MAX_ENTRIES cap; dropping the incoming checkpoint rather than exceeding it"
                 );
                 return;
@@ -427,11 +428,12 @@ impl PersistedState {
                     false,
                     "MAX_ENTRIES ({MAX_ENTRIES}) left no evictable entry; the cap would be exceeded"
                 );
-                // The ordinal rather than the media, for the same §10 reason
+                // The touch sequence rather than the media, for the same
+                // §10 reason
                 // as `record`'s guard above; the tests in `m4_diagnostics.rs`
                 // hold both sites to it.
                 tracing::warn!(
-                    media_ordinal = self.next_seq,
+                    dropped_touch_seq = self.next_seq,
                     "no entry could be evicted at the MAX_ENTRIES cap; dropping the incoming checkpoint rather than exceeding it"
                 );
                 return;

@@ -920,12 +920,12 @@ fn a_malformed_file_logs_why_without_its_content() -> Fallible {
 // --- The eviction cap guard ---------------------------------------------
 
 /// Every identifier a log macro in `persistence::model` may mention: the
-/// ordinal field and the two spellings that build it. The model's loggable
+/// dropped-checkpoint touch-seq field and the two spellings that build it. The model's loggable
 /// data is media identities, checkpoints and playlists, so growing this
 /// set is a decision rather than a convenience — extend it only with a
 /// spelling that provably cannot carry a media identity, and never with
 /// one that would need a `%` or `?` sigil.
-const SAFE_LOG_IDENTIFIERS: &[&str] = &["media_ordinal", "next_seq", "self"];
+const SAFE_LOG_IDENTIFIERS: &[&str] = &["dropped_touch_seq", "next_seq", "self"];
 
 /// The one log site that ever recorded a media identity by `Display`
 /// (project review 2026-11-01, Medium): the eviction cap guard's `warn!`
@@ -944,7 +944,7 @@ const SAFE_LOG_IDENTIFIERS: &[&str] = &["media_ordinal", "next_seq", "self"];
 ///
 /// * the guard still reports, from **both** write paths — silencing a log
 ///   line is not redacting it;
-/// * what it reports is the ordinal, the touch sequence the dropped
+/// * what it reports is the touch sequence the dropped
 ///   checkpoint would have taken, which orders the drop against the
 ///   `touch_seq` values in `state.json` without identifying the media;
 /// * no `tracing` macro anywhere in the model formats a value into the
@@ -961,7 +961,7 @@ const SAFE_LOG_IDENTIFIERS: &[&str] = &["media_ordinal", "next_seq", "self"];
 /// [`the_audit_catches_the_media_returning_through_format_args`] pins the
 /// last two claims against the shapes that once slipped past the scan.
 #[test]
-fn the_eviction_cap_guard_logs_an_ordinal_and_never_the_media() -> Fallible {
+fn the_eviction_cap_guard_logs_a_touch_seq_and_never_the_media() -> Fallible {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/persistence/model.rs");
     let source = std::fs::read_to_string(&path)?;
     let findings = audit_model(&source);
@@ -978,13 +978,14 @@ fn the_eviction_cap_guard_logs_an_ordinal_and_never_the_media() -> Fallible {
 /// path inside a `MediaId` reaches a field". It is not: `tracing` renders
 /// `format_args` into the message field, and the scan dropped string
 /// literals before looking, so it could not see `{}`. The task review
-/// demonstrated the guard logging the raw media with the ordinal field
+/// demonstrated the guard logging the raw media with the touch-seq field
 /// still in place — and the audit staying green.
 ///
 /// Each row below mutates the real model source in memory — nothing is
 /// compiled and nothing is written back — and the audit must fail on every
-/// one. The first row is the review's own demonstration: the ordinal field
-/// is untouched, so the presence and ordinal rules are satisfied and the
+/// one. The first row is the review's own demonstration: the touch-seq
+/// field is untouched, so the presence and touch-seq rules are satisfied
+/// and the
 /// finding can only come from the identifier scan, which is exactly the
 /// blind spot being pinned. The last two rows pin the scanner itself: an
 /// implicit-capture `{media}` placeholder lives inside the message string
@@ -1048,14 +1049,15 @@ fn the_audit_catches_the_media_returning_through_format_args() -> Fallible {
             findings.join("\n\n")
         );
         if label.starts_with("the guard formats") {
-            // The ordinal field is untouched in this row, so the finding
-            // above cannot come from the presence or ordinal rules: it is
+            // The touch-seq field is untouched in this row, so the
+            // finding above cannot come from the presence or touch-seq
+            // rules: it is
             // the identifier scan that catches it, not an incidental
             // neighbour.
             assert!(
                 !findings
                     .iter()
-                    .any(|finding| finding.contains("must record the ordinal")),
+                    .any(|finding| finding.contains("must record the touch sequence")),
                 "{label}: an incidental catch hid the blind spot:\n{}",
                 findings.join("\n\n")
             );
@@ -1103,9 +1105,9 @@ fn audit_model(source: &str) -> Vec<String> {
     }
 
     for macro_text in &macros {
-        if macro_text.contains(GUARD) && !macro_text.contains("media_ordinal = self.next_seq") {
+        if macro_text.contains(GUARD) && !macro_text.contains("dropped_touch_seq = self.next_seq") {
             findings.push(format!(
-                "the cap guard must record the ordinal the dropped \
+                "the cap guard must record the touch sequence the dropped \
                  checkpoint would have taken, never the media identity:\n\
                  {macro_text}"
             ));
