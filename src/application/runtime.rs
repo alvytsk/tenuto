@@ -892,7 +892,7 @@ impl PlayerRuntime {
         // Publish only what changed, the shape `track_covers` uses: an
         // unchanged snapshot would wake and diff the bus thread for
         // nothing, ten-plus times a second, idle or not. A drained request
-        // always publishes, and a drained seek always carries its mark.
+        // always publishes, and an executed seek always carries its mark.
         if answered || sought || self.mpris_seen.as_ref() != Some(&snap) {
             self.mpris_seen = Some(snap.clone());
             if let Some(controls) = &self.media_controls {

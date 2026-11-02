@@ -52,9 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The desktop widget no longer reports a phantom seek when the front end
   stalls between passes (a busy frame, a stalled terminal): playback that
   drifted from wall time across the stall — a rebuffer, an underrun, the
-  track ending — is no longer announced as a `Seeked` jump. A seek made
-  from the widget is still reported promptly, even when it was queued
-  while the front end was stalled.
+  track ending — is no longer announced as a `Seeked` jump. A seek —
+  made from the widget or on the player's own keys — is still reported
+  promptly, even when it lands in the first pass after the front end
+  stalled.
 
 ### Fixed
 
