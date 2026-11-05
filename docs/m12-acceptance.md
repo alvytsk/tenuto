@@ -158,8 +158,9 @@ Against the m8 record's baselines:
   the same shape and level: 64 pumps, worst single pump 2.070452 ms,
   summed 101.869631 ms. The shape and the level both predate m12; the
   sharing's own effect on this fixture is within run-to-run noise, and the
-  total drain cost fell (all pumps summed 101.9–104.3 ms here against the
-  record's 172.9–178.3 ms).
+  total drain cost fell (all pumps summed 103.8–104.3 ms here against
+  the record's 172.9–178.3 ms; the probe's own 101.869631 ms sits just
+  under that).
 - `serialize` and the atomic writes: 7.63–7.80 / 6.59–7.08 / 10.9–11.1 ms
   against the record's 8.0–8.1 / 7.3–7.5 / 11.5–11.7 ms — the machine is
   marginally faster today. `bytes on disk` is identical at 3,226,621, and
