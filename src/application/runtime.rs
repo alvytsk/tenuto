@@ -79,8 +79,8 @@ pub const TOO_MANY_PENDING_LOADS: &str = "Too many pending loads";
 /// channel's capacity.
 pub const METADATA_WORKERS: usize = 2;
 /// At most this many finished tag probes are applied in one [`pump`]; the
-/// rest wait for the next one. The batch shares a single submit, so what
-/// this bounds is the per-result scan of every queued entry, not the clone.
+/// rest wait for the next one. The batch shares a single submit, and what
+/// this bounds is the per-result scan of every queued entry.
 ///
 // ponytail: a fixed batch rather than a time budget. Ceiling: after a folder
 // add of thousands of files the tags trickle in over several frames instead

@@ -468,7 +468,7 @@ What is played and what is checkpointed are different values on purpose. A podca
 
 `state.json` is one atomic snapshot: current media, one checkpoint per media identity capped at 512, volume, every playlist with its own cursor, which playlist is playing, and the two ID allocators (M8 §4) — the playlists capped together at 4,096 entries and 32 playlists. The writer creates a temporary file in the destination directory, writes it, fsyncs it, renames it over the destination, and fsyncs the parent directory where supported.
 
-`Session` captures a checkpoint every 5 s while playing and on pause, stop, track change and successful seek. The writer coalesces over 2 s. Worst-case loss is bounded end to end by those two numbers. A single accepted update sequence orders snapshots. Timestamps never do. There is no merge algorithm.
+`Session` captures a checkpoint every 5 s while playing and on pause, stop, track change and successful seek. The writer coalesces over 2 s. Worst-case loss is bounded end to end by those two numbers. A single accepted update sequence orders snapshots. Timestamps never do. There is no merge algorithm. Snapshots share unchanged subtrees: the checkpoint map and each playlist are `Arc`-backed and mutated copy-on-write, so a submit costs refcount updates and a mutation clones only the subtree it touches — never while no snapshot is retained.
 
 Schema rules:
 
