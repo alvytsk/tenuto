@@ -689,6 +689,10 @@ mod playlist_tests {
         assert_eq!(state.playlists().len(), 1);
         assert_eq!(state.playlists()[0].name(), "Default");
         assert_eq!(state.playlists().playing(), state.playlists()[0].id());
+        // The set shares its one slot: a clone keeps pointing at the same
+        // playlist, exactly as it does for the checkpoint map.
+        let clone = state.clone();
+        assert!(Arc::ptr_eq(&state.playlists()[0], &clone.playlists()[0]));
     }
 
     #[test]
