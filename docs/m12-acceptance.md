@@ -7,9 +7,10 @@ mutated copy-on-write: a submit costs refcount updates instead of a
 multi-millisecond copy, `state.json` stays byte-for-byte what it was, and a
 held snapshot never changes underneath the writer.
 
-Branch `m12-snapshot-sharing`, base commit `17507bb` — the sharing is in
-`8950874` (the checkpoint map) and `17507bb` (each playlist); the runs
-below are taken on that code.
+Branch `m12-snapshot-sharing`, based on `8708081` (main). The runs below
+are taken on `17507bb` — all sharing code in (`8950874` the checkpoint
+map, `17507bb` each playlist), and the source there is identical to the
+branch head except comment rewrites.
 
 ## Automated evidence
 

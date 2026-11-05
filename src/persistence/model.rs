@@ -498,6 +498,7 @@ mod tests {
 
     use super::*;
     use crate::media::id::AbsolutePath;
+    use crate::queue::{DisplayMetadata, NewQueueEntry, QueueSource};
 
     fn id(name: &str) -> MediaId {
         match AbsolutePath::new(format!("/music/{name}.flac").into()) {
@@ -512,6 +513,17 @@ mod tests {
             position: Duration::from_secs(secs),
             updated_at: OffsetDateTime::UNIX_EPOCH,
         }
+    }
+
+    fn entry(name: &str) -> NewQueueEntry {
+        let path = AbsolutePath::new(format!("/music/{name}.flac").into())
+            .unwrap_or_else(|error| panic!("absolute: {error}"));
+        NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata::default(),
+        )
+        .unwrap_or_else(|error| panic!("valid: {error}"))
     }
 
     /// The guarantee the sharing rests on: a plain `clone` of the state keeps
@@ -532,7 +544,9 @@ mod tests {
 
     /// The write path is copy-on-write: once a snapshot is retained, the next
     /// `record` builds a fresh map instead of mutating the shared one, so the
-    /// snapshot keeps its own bytes and its sharing base stays whole.
+    /// snapshot keeps its own bytes, its sharing base stays whole, and no
+    /// playlist is copied either: every slot keeps the `Arc` the snapshot
+    /// shares.
     #[test]
     fn recording_disturbs_neither_the_retained_snapshot_nor_its_sharing_base() {
         let mut state = PersistedState::default();
@@ -558,6 +572,52 @@ mod tests {
             "the snapshot's retained entry keeps its old touch_seq"
         );
         assert!(state.entry_for(&id("fresh")).is_some());
+        assert_eq!(
+            state.playlists().len(),
+            snapshot.playlists().len(),
+            "the write touched no playlist slot"
+        );
+        assert!(
+            state
+                .playlists()
+                .iter()
+                .zip(snapshot.playlists().iter())
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the write must not have copied any playlist slot"
+        );
+    }
+
+    /// A volume nudge is a leaf write (§3): it touches the gain and nothing
+    /// else — the checkpoint map keeps its `Arc` and no playlist slot is
+    /// copied, so a retained snapshot still shares every subtree.
+    #[test]
+    fn a_volume_nudge_copies_nothing() {
+        let mut state = PersistedState::default();
+        state.record(&checkpoint("a", 10), false);
+        let playing = state.playlists().playing();
+        state.enqueue(playing, vec![entry("track")]).expect("fits");
+
+        let snapshot = state.clone();
+        state.set_volume(Volume::new(0.5));
+
+        assert_ne!(state.volume(), snapshot.volume(), "the volume changed");
+        assert!(
+            Arc::ptr_eq(&state.checkpoints, &snapshot.checkpoints),
+            "the volume nudge must not copy the checkpoint map"
+        );
+        assert_eq!(
+            state.playlists().len(),
+            snapshot.playlists().len(),
+            "the volume nudge touched no playlist slot"
+        );
+        assert!(
+            state
+                .playlists()
+                .iter()
+                .zip(snapshot.playlists().iter())
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the volume nudge must not copy any playlist slot"
+        );
     }
 
     /// Evicting at the cap is copy-on-write too: with no current media the
