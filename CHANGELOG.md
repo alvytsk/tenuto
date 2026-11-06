@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on every front-end pass, ten-plus times a second; the widget sees real
   changes just as fast, and a volume written from the widget is still
   answered even when its value did not change.
+- Submitting state no longer deep-clones it: the checkpoint map and each
+  playlist are `Arc`-shared copy-on-write, so a snapshot costs refcount
+  updates instead of a multi-millisecond copy on the app thread, while
+  `state.json` stays byte-for-byte what it was. The one-submit-per-burst
+  metadata batching stays, now justified by writer-thread churn rather
+  than clone cost.
 
 ### Fixed
 

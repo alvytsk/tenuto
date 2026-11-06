@@ -129,6 +129,17 @@ impl DisplayUpdate {
         }
         changed
     }
+
+    /// Whether [`Self::apply_to`](Self::apply_to) would change anything:
+    /// the same comparisons, read-only. The set probes before it takes the
+    /// writable borrow, so a matching resend never clones the playlist.
+    pub(in crate::playlist) fn would_change(&self, display: &DisplayMetadata) -> bool {
+        (self.title.is_some() && display.title.as_ref() != self.title.as_ref())
+            || (self.artist.is_some() && display.artist.as_ref() != self.artist.as_ref())
+            || (self.album.is_some() && display.album.as_ref() != self.album.as_ref())
+            || (self.year.is_some() && display.year.as_ref() != self.year.as_ref())
+            || (self.duration.is_some() && display.duration != self.duration)
+    }
 }
 
 fn replace(field: &mut Option<String>, update: &Option<String>) -> bool {
@@ -286,6 +297,25 @@ impl Queue {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
+    /// Whether [`Self::move_entry`](Self::move_entry) with the same
+    /// arguments would change the order: an edge, or an id the queue does
+    /// not hold, is `false`. Read-only, so the set can probe before it
+    /// takes a writable borrow — a held arrow key at a list edge never
+    /// clones the playlist per keypress.
+    pub(in crate::playlist) fn move_would_change(
+        &self,
+        id: QueueEntryId,
+        direction: Direction,
+    ) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        match direction {
+            Direction::Up => index > 0,
+            Direction::Down => index + 1 < self.entries.len(),
+        }
+    }
+
     /// Appends `batch` with IDs from `ids`, all or nothing. Capacity is the
     /// caller's check: the cap is global (M8 P7), and a queue cannot see it.
     pub(in crate::playlist) fn enqueue(
@@ -381,6 +411,100 @@ impl Queue {
 #[cfg(test)]
 mod exhaustion_tests {
     use super::*;
+
+    #[test]
+    fn move_would_change_agrees_with_move_entry() {
+        let path = AbsolutePath::new("/music/a.flac".into()).expect("absolute");
+        let item = NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata::default(),
+        )
+        .expect("entry");
+        let mut queue = Queue::default();
+        let mut ids = IdAllocator::default();
+        let queued = queue
+            .enqueue(vec![item.clone(), item.clone(), item], &mut ids)
+            .expect("fits");
+        let top = queued[0];
+        let middle = queued[1];
+        let bottom = queued[2];
+
+        // The top edge: neither the probe nor the move changes anything.
+        assert!(!queue.move_would_change(top, Direction::Up));
+        assert_eq!(queue.move_entry(top, Direction::Up), Ok(false));
+
+        // The middle: both agree the order would change, and it does.
+        assert!(queue.move_would_change(middle, Direction::Up));
+        assert_eq!(queue.move_entry(middle, Direction::Up), Ok(true));
+        assert_eq!(
+            queue
+                .entries()
+                .iter()
+                .map(QueueEntry::id)
+                .collect::<Vec<_>>(),
+            vec![middle, top, bottom],
+            "the middle and the top actually swapped"
+        );
+
+        // The bottom edge: neither the probe nor the move changes anything.
+        assert!(!queue.move_would_change(bottom, Direction::Down));
+        assert_eq!(queue.move_entry(bottom, Direction::Down), Ok(false));
+
+        // An absent id: the probe answers false and never swallows the
+        // move's own error.
+        let absent = QueueEntryId::from_raw(999);
+        assert!(!queue.move_would_change(absent, Direction::Up));
+        assert_eq!(
+            queue.move_entry(absent, Direction::Up),
+            Err(QueueError::UnknownEntry(absent))
+        );
+    }
+
+    #[test]
+    fn would_change_agrees_with_apply_to() {
+        let display = DisplayMetadata {
+            title: Some("A".into()),
+            artist: Some("B".into()),
+            duration: Some(DisplayDuration {
+                value: Duration::from_secs(9),
+                source: DurationSource::Declared,
+            }),
+            ..DisplayMetadata::default()
+        };
+
+        // Equal fields: both refuse, and nothing is written.
+        let same = DisplayUpdate {
+            title: Some("A".into()),
+            duration: display.duration,
+            ..DisplayUpdate::default()
+        };
+        let mut written = display.clone();
+        assert_eq!(same.would_change(&display), same.apply_to(&mut written));
+        assert!(!same.would_change(&display));
+        assert_eq!(written, display, "an equal update leaves the display alone");
+
+        // A differing title: both agree it would change, and it does.
+        let differing = DisplayUpdate {
+            title: Some("C".into()),
+            ..DisplayUpdate::default()
+        };
+        let mut written = display.clone();
+        assert_eq!(
+            differing.would_change(&display),
+            differing.apply_to(&mut written)
+        );
+        assert!(differing.would_change(&display));
+        assert_eq!(written.title.as_deref(), Some("C"));
+
+        // Absent update fields: both refuse, and nothing is written.
+        let absent = DisplayUpdate::default();
+        let mut written = display.clone();
+        assert_eq!(absent.would_change(&display), absent.apply_to(&mut written));
+        assert!(!absent.would_change(&display));
+        assert_eq!(written, display, "absent fields leave everything alone");
+    }
+
     #[test]
     fn exhaustion_rejects_the_whole_batch_without_reusing_an_id() {
         let path = AbsolutePath::new("/music/a.flac".into()).expect("absolute");

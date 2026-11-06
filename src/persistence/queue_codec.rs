@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -175,8 +176,9 @@ pub(crate) struct PlaylistDto {
 }
 
 /// Schema 4's `playlists` array. Total, like [`encode`]: an in-memory
-/// [`Playlist`] is already valid.
-pub(crate) fn encode_playlists(playlists: &[Playlist]) -> Vec<PlaylistDto> {
+/// [`Playlist`] is already valid. The slots are the set's shared `Arc`s;
+/// encoding only reads through them.
+pub(crate) fn encode_playlists(playlists: &[Arc<Playlist>]) -> Vec<PlaylistDto> {
     playlists
         .iter()
         .map(|playlist| PlaylistDto {

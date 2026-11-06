@@ -29,6 +29,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use url::Url;
 
@@ -44,8 +45,11 @@ use crate::media::id::MediaId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlaylistSet {
-    /// Never empty (S1).
-    playlists: Vec<Playlist>,
+    /// Never empty (S1). Each slot is `Arc`-shared copy-on-write against
+    /// the writer's retained snapshots: editing one playlist clones that
+    /// one slot (`Arc::make_mut`) and every other slot keeps pointing at
+    /// what it held.
+    playlists: Vec<Arc<Playlist>>,
     /// Always names a member (S4).
     playing: PlaylistId,
     /// The one allocator for every entry ID (S2).
@@ -59,7 +63,7 @@ impl Default for PlaylistSet {
     fn default() -> Self {
         let playing = PlaylistId::from_raw(1);
         Self {
-            playlists: vec![Playlist::new(playing, DEFAULT_NAME.to_owned())],
+            playlists: vec![Arc::new(Playlist::new(playing, DEFAULT_NAME.to_owned()))],
             playing,
             entry_ids: IdAllocator::default(),
             playlist_ids: IdAllocator::starting_at(Some(2)),
@@ -68,11 +72,11 @@ impl Default for PlaylistSet {
 }
 
 /// Read-only slice access: `len()` counts playlists; `iter()` and indexing
-/// read them in order. There is no `DerefMut`.
+/// read them in order, through each slot's `Arc`. There is no `DerefMut`.
 impl Deref for PlaylistSet {
-    type Target = [Playlist];
+    type Target = [Arc<Playlist>];
 
-    fn deref(&self) -> &[Playlist] {
+    fn deref(&self) -> &[Arc<Playlist>] {
         &self.playlists
     }
 }
@@ -131,7 +135,8 @@ impl PlaylistSet {
     }
 
     pub fn playlist(&self, id: PlaylistId) -> Option<&Playlist> {
-        self.index_of(id).map(|index| &self.playlists[index])
+        self.index_of(id)
+            .map(|index| self.playlists[index].as_ref())
     }
 
     pub fn playing_playlist(&self) -> &Playlist {
@@ -142,7 +147,7 @@ impl PlaylistSet {
         self.playlists
             .iter()
             .find(|playlist| playlist.queue().get(entry).is_some())
-            .map(Playlist::id)
+            .map(|playlist| playlist.id())
     }
 
     pub fn find_entry(&self, entry: QueueEntryId) -> Option<&QueueEntry> {
@@ -180,7 +185,7 @@ impl PlaylistSet {
 
     fn playlist_mut(&mut self, id: PlaylistId) -> Option<&mut Playlist> {
         let index = self.index_of(id)?;
-        self.playlists.get_mut(index)
+        Some(Arc::make_mut(&mut self.playlists[index]))
     }
 
     fn entry_mut(&mut self, entry: QueueEntryId) -> Option<&mut QueueEntry> {
@@ -210,7 +215,7 @@ impl PlaylistSet {
                 available,
             });
         }
-        let playlist = &mut self.playlists[index];
+        let playlist = Arc::make_mut(&mut self.playlists[index]);
         let ids = playlist.queue.enqueue(batch, &mut self.entry_ids)?;
         if !ids.is_empty()
             && let Some(shuffle) = playlist.shuffle
@@ -233,7 +238,7 @@ impl PlaylistSet {
             .reserve(1)
             .map_err(|_| PlaylistError::IdExhausted)?;
         let id = PlaylistId::from_raw(*raw.start());
-        self.playlists.push(Playlist::new(id, name));
+        self.playlists.push(Arc::new(Playlist::new(id, name)));
         Ok(id)
     }
 
@@ -254,13 +259,20 @@ impl PlaylistSet {
         Ok(())
     }
 
-    /// Whether the order actually changed; an edge is a no-op.
+    /// Whether the order actually changed; an edge is a no-op. The edge
+    /// test runs before the writable borrow is taken, so a held arrow key
+    /// at the top or bottom of a full playlist never clones it per
+    /// keypress.
     pub fn move_entry(
         &mut self,
         id: QueueEntryId,
         direction: Direction,
     ) -> Result<bool, QueueError> {
         let owner = self.owner_of(id).ok_or(QueueError::UnknownEntry(id))?;
+        let playlist = self.playlist(owner).ok_or(QueueError::UnknownEntry(id))?;
+        if !playlist.queue().move_would_change(id, direction) {
+            return Ok(false);
+        }
         self.playlist_mut(owner)
             .ok_or(QueueError::UnknownEntry(id))?
             .queue
@@ -289,6 +301,10 @@ impl PlaylistSet {
     /// Deleting the playing playlist moves `playing` to the successor and
     /// reports that playlist's cursor media (or `None`) as the new persisted
     /// current media; any other delete leaves it `Unchanged`.
+    ///
+    /// `Vec::remove` moves the slot's `Arc` out; there is no `Arc::make_mut`
+    /// here, so deleting never clones the playlist it deletes nor any
+    /// survivor.
     pub fn delete(&mut self, id: PlaylistId) -> Result<Deletion, PlaylistError> {
         self.check_delete(id)?;
         let index = self.index_of(id).ok_or(PlaylistError::Unknown(id))?;
@@ -322,12 +338,20 @@ impl PlaylistSet {
     }
 
     /// One entry's display: each present field that differs is written, an
-    /// absent one is kept. Whether anything changed.
+    /// absent one is kept. Whether anything changed. The read-only probe
+    /// runs before the writable borrow, so a matching resend never clones
+    /// the entry's playlist.
     pub fn update_display(
         &mut self,
         entry: QueueEntryId,
         update: &DisplayUpdate,
     ) -> Result<bool, QueueError> {
+        let found = self
+            .find_entry(entry)
+            .ok_or(QueueError::UnknownEntry(entry))?;
+        if !update.would_change(found.display()) {
+            return Ok(false);
+        }
         let found = self
             .entry_mut(entry)
             .ok_or(QueueError::UnknownEntry(entry))?;
@@ -335,20 +359,24 @@ impl PlaylistSet {
     }
 
     /// `Ok(false)` when the URL already matches; `SourceMismatch` for an
-    /// entry that is not a podcast episode.
+    /// entry that is not a podcast episode. The equality check runs before
+    /// the writable borrow, so a matching resend never clones.
     pub fn set_podcast_fallback(
         &mut self,
         entry: QueueEntryId,
         url: Url,
     ) -> Result<bool, QueueError> {
         let found = self
-            .entry_mut(entry)
+            .find_entry(entry)
             .ok_or(QueueError::UnknownEntry(entry))?;
         if let QueueSource::Podcast { fallback } = found.source()
             && *fallback == url
         {
             return Ok(false);
         }
+        let found = self
+            .entry_mut(entry)
+            .ok_or(QueueError::UnknownEntry(entry))?;
         found.set_source(QueueSource::Podcast { fallback: url })?;
         Ok(true)
     }
@@ -611,7 +639,7 @@ impl Recovery {
             let id = PlaylistId::from_raw(fresh(&mut self.playlist_ids).unwrap_or(1));
             return RecoveredSet {
                 set: PlaylistSet {
-                    playlists: vec![Playlist::new(id, DEFAULT_NAME.to_owned())],
+                    playlists: vec![Arc::new(Playlist::new(id, DEFAULT_NAME.to_owned()))],
                     playing: id,
                     entry_ids: self.entry_ids,
                     playlist_ids: self.playlist_ids,
@@ -644,7 +672,7 @@ impl Recovery {
         };
         RecoveredSet {
             set: PlaylistSet {
-                playlists: self.playlists,
+                playlists: self.playlists.into_iter().map(Arc::new).collect(),
                 playing,
                 entry_ids: self.entry_ids,
                 playlist_ids: self.playlist_ids,
@@ -652,5 +680,235 @@ impl Recovery {
             current_media: effect,
             repairs,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::media::id::{AbsolutePath, EpisodeKey, FeedId};
+
+    /// A local-file entry, shaped like `model.rs`'s `playlist_tests` helper.
+    fn entry(name: &str) -> NewQueueEntry {
+        let path = AbsolutePath::new(format!("/music/{name}.flac").into()).expect("absolute");
+        NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            crate::queue::DisplayMetadata::default(),
+        )
+        .expect("valid")
+    }
+
+    /// A podcast episode whose enclosure is `fallback`, for the fallback
+    /// paths that need a real URL to compare against.
+    fn podcast_entry(fallback: Url) -> NewQueueEntry {
+        let feed = FeedId::new("m12".into()).expect("feed id");
+        let episode = EpisodeKey::resolve(Some("guid-m12"), None, None).expect("episode key");
+        NewQueueEntry::new(
+            MediaId::PodcastEpisode { feed, episode },
+            QueueSource::Podcast { fallback },
+            crate::queue::DisplayMetadata::default(),
+        )
+        .expect("valid")
+    }
+
+    /// Indices whose slots stopped sharing between `before` and `after`:
+    /// exactly the playlists a mutation cloned.
+    fn diverged(before: &PlaylistSet, after: &PlaylistSet) -> Vec<usize> {
+        before
+            .playlists
+            .iter()
+            .zip(&after.playlists)
+            .enumerate()
+            .filter_map(|(index, (old, new))| (!Arc::ptr_eq(old, new)).then_some(index))
+            .collect()
+    }
+
+    /// Where `id` sits in `set`.
+    fn slot(set: &PlaylistSet, id: PlaylistId) -> usize {
+        set.index_of(id).expect("playlist is present")
+    }
+
+    #[test]
+    fn a_clone_shares_every_playlist() {
+        let mut set = PlaylistSet::default();
+        let p1 = set.playing();
+        let p2 = set.create("Two").expect("room");
+        set.enqueue(p1, vec![entry("a")]).expect("fits");
+        set.enqueue(p2, vec![entry("b"), entry("c")]).expect("fits");
+
+        let clone = set.clone();
+
+        assert!(
+            diverged(&set, &clone).is_empty(),
+            "a clone shares every playlist"
+        );
+    }
+
+    #[test]
+    fn renaming_one_playlist_clones_only_that_playlist() {
+        let mut set = PlaylistSet::default();
+        let p1 = set.playing();
+        let p2 = set.create("Two").expect("room");
+        set.enqueue(p2, vec![entry("b")]).expect("fits");
+        let clone = set.clone();
+
+        set.rename(p1, "Renamed").expect("valid name");
+
+        assert_eq!(
+            diverged(&set, &clone),
+            vec![slot(&set, p1)],
+            "only the renamed playlist is cloned"
+        );
+    }
+
+    #[test]
+    fn enqueuing_clones_only_the_destination() {
+        let mut set = PlaylistSet::default();
+        let p1 = set.playing();
+        let p2 = set.create("Two").expect("room");
+        set.enqueue(p1, vec![entry("a")]).expect("fits");
+        let clone = set.clone();
+
+        set.enqueue(p2, vec![entry("b")]).expect("fits");
+
+        assert_eq!(
+            diverged(&set, &clone),
+            vec![slot(&set, p2)],
+            "only the destination playlist is cloned"
+        );
+    }
+
+    #[test]
+    fn a_move_at_an_edge_clones_nothing() {
+        let mut set = PlaylistSet::default();
+        let only = set.enqueue(set.playing(), vec![entry("a")]).expect("fits")[0];
+        let clone = set.clone();
+
+        assert_eq!(set.move_entry(only, Direction::Up), Ok(false));
+        assert!(
+            diverged(&set, &clone).is_empty(),
+            "an Up move at the top edge clones nothing"
+        );
+
+        // The bottom edge on a one-entry set behaves the same way.
+        let mut solo = PlaylistSet::default();
+        let id = solo
+            .enqueue(solo.playing(), vec![entry("a")])
+            .expect("fits")[0];
+        let solo_clone = solo.clone();
+        assert_eq!(solo.move_entry(id, Direction::Down), Ok(false));
+        assert!(
+            diverged(&solo, &solo_clone).is_empty(),
+            "a Down move at the bottom edge clones nothing"
+        );
+    }
+
+    #[test]
+    fn a_real_move_clones_the_owner_and_shares_the_rest() {
+        let mut set = PlaylistSet::default();
+        let p1 = set.playing();
+        let p2 = set.create("Two").expect("room");
+        let in_p1 = set.enqueue(p1, vec![entry("a"), entry("b")]).expect("fits");
+        set.enqueue(p2, vec![entry("c")]).expect("fits");
+        let clone = set.clone();
+
+        assert_eq!(set.move_entry(in_p1[1], Direction::Up), Ok(true));
+        assert_eq!(
+            diverged(&set, &clone),
+            vec![slot(&set, p1)],
+            "only the owner of the moved entry is cloned"
+        );
+
+        // Value-level: the held snapshot still iterates in the old order,
+        // the live set in the moved one.
+        let order_of = |set: &PlaylistSet| -> Vec<u64> {
+            set.playlist(p1)
+                .expect("present")
+                .queue()
+                .entries()
+                .iter()
+                .map(|entry| entry.id().get())
+                .collect()
+        };
+        assert_eq!(order_of(&clone), [in_p1[0].get(), in_p1[1].get()]);
+        assert_eq!(order_of(&set), [in_p1[1].get(), in_p1[0].get()]);
+    }
+
+    #[test]
+    fn a_matching_metadata_resend_clones_nothing() {
+        let mut set = PlaylistSet::default();
+        let id = set.enqueue(set.playing(), vec![entry("a")]).expect("fits")[0];
+        let update = DisplayUpdate {
+            title: Some("Titled".into()),
+            ..DisplayUpdate::default()
+        };
+        assert_eq!(set.update_display(id, &update), Ok(true));
+        let clone = set.clone();
+
+        assert_eq!(set.update_display(id, &update), Ok(false));
+        assert!(
+            diverged(&set, &clone).is_empty(),
+            "a matching resend clones nothing"
+        );
+    }
+
+    #[test]
+    fn a_matching_fallback_url_clones_nothing() {
+        let mut set = PlaylistSet::default();
+        let stored: Url = "https://podcasts.example.org/original.mp3"
+            .parse()
+            .expect("url");
+        let set_to: Url = "https://podcasts.example.org/resolved.mp3"
+            .parse()
+            .expect("url");
+        let id = set
+            .enqueue(set.playing(), vec![podcast_entry(stored)])
+            .expect("fits")[0];
+
+        assert_eq!(set.set_podcast_fallback(id, set_to.clone()), Ok(true));
+        let clone = set.clone();
+        assert_eq!(set.set_podcast_fallback(id, set_to), Ok(false));
+        assert!(
+            diverged(&set, &clone).is_empty(),
+            "a matching fallback URL clones nothing"
+        );
+    }
+
+    #[test]
+    fn a_non_podcast_entry_still_reports_source_mismatch() {
+        let mut set = PlaylistSet::default();
+        let id = set.enqueue(set.playing(), vec![entry("a")]).expect("fits")[0];
+        let url: Url = "https://podcasts.example.org/resolved.mp3"
+            .parse()
+            .expect("url");
+
+        assert_eq!(
+            set.set_podcast_fallback(id, url),
+            Err(QueueError::SourceMismatch)
+        );
+    }
+
+    #[test]
+    fn deletion_moves_arcs_without_make_mut() {
+        let mut set = PlaylistSet::default();
+        let p2 = set.create("Two").expect("room");
+        set.enqueue(p2, vec![entry("b")]).expect("fits");
+        let clone = set.clone();
+
+        set.delete(p2).expect("another playlist exists");
+
+        assert_eq!(set.playlists.len(), 1, "the deleted playlist is gone");
+        assert!(
+            Arc::ptr_eq(&set.playlists[0], &clone.playlists[0]),
+            "the survivor's slot moved out of the vec, never cloned"
+        );
+        assert_eq!(
+            clone.playlists.len(),
+            2,
+            "the retained snapshot still holds both playlists"
+        );
     }
 }

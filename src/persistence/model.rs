@@ -2,6 +2,7 @@
 //! session-wide facts the file carries.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,11 @@ pub struct PersistedState {
     schema_version: u32,
     current_media: Option<MediaId>,
     volume: f32,
-    checkpoints: BTreeMap<MediaId, PersistedCheckpoint>,
+    /// The per-media checkpoint map (D2), `Arc`-shared copy-on-write against
+    /// the writer's retained snapshots: a clone keeps pointing at the same
+    /// map, and the next write clones it (`Arc::make_mut`) rather than
+    /// disturbing the bytes a snapshot holds.
+    checkpoints: Arc<BTreeMap<MediaId, PersistedCheckpoint>>,
     /// Every playlist, which one is playing, and both ID allocators (M9.1).
     /// Private: every change goes through the forwarding methods below, and
     /// nothing outside hands out `&mut PlaylistSet`.
@@ -149,7 +154,7 @@ impl RawState {
                 schema_version: self.schema_version,
                 current_media: recovered.current_media,
                 volume: self.volume,
-                checkpoints: self.checkpoints,
+                checkpoints: Arc::new(self.checkpoints),
                 playlists: recovered.set,
                 next_seq,
             },
@@ -198,7 +203,7 @@ impl Default for PersistedState {
             schema_version: SCHEMA_VERSION,
             current_media: None,
             volume: Volume::FULL.as_gain(),
-            checkpoints: BTreeMap::new(),
+            checkpoints: Arc::new(BTreeMap::new()),
             playlists: PlaylistSet::default(),
             next_seq: 1,
         }
@@ -366,8 +371,12 @@ impl PersistedState {
     /// out of every log line.
     pub fn record(&mut self, checkpoint: &PlaybackCheckpoint, completed: bool) {
         let fresh = !self.checkpoints.contains_key(&checkpoint.media);
-        if fresh && self.checkpoints.len() >= MAX_ENTRIES {
-            let evicted = self.evict_one(&checkpoint.media);
+        // Copy-on-write against retained snapshots: this clones the shared
+        // map once per write, and leaves a clone's base untouched on the
+        // unreachable guard path below.
+        let map = Arc::make_mut(&mut self.checkpoints);
+        if fresh && map.len() >= MAX_ENTRIES {
+            let evicted = Self::evict_one(map, self.current_media.as_ref(), &checkpoint.media);
             if !evicted {
                 debug_assert!(
                     false,
@@ -382,7 +391,7 @@ impl PersistedState {
         }
         let touch_seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.checkpoints.insert(
+        map.insert(
             checkpoint.media.clone(),
             PersistedCheckpoint {
                 position: Some(checkpoint.position),
@@ -421,8 +430,10 @@ impl PersistedState {
         completed: bool,
     ) {
         let fresh = !self.checkpoints.contains_key(&media);
-        if fresh && self.checkpoints.len() >= MAX_ENTRIES {
-            let evicted = self.evict_one(&media);
+        // Copy-on-write, exactly as `record` above
+        let map = Arc::make_mut(&mut self.checkpoints);
+        if fresh && map.len() >= MAX_ENTRIES {
+            let evicted = Self::evict_one(map, self.current_media.as_ref(), &media);
             if !evicted {
                 debug_assert!(
                     false,
@@ -441,18 +452,15 @@ impl PersistedState {
         }
         let touch_seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        let entry = self
-            .checkpoints
-            .entry(media)
-            .or_insert_with(|| PersistedCheckpoint {
-                // No established position exists yet for a fresh entry (§4.1,
-                // §4.2): an estimate must never bootstrap one into being.
-                position: None,
-                completed: false,
-                touch_seq,
-                updated_at,
-                estimated: None,
-            });
+        let entry = map.entry(media).or_insert_with(|| PersistedCheckpoint {
+            // No established position exists yet for a fresh entry (§4.1,
+            // §4.2): an estimate must never bootstrap one into being.
+            position: None,
+            completed: false,
+            touch_seq,
+            updated_at,
+            estimated: None,
+        });
         entry.estimated = Some(estimated);
         entry.completed = completed;
         entry.touch_seq = touch_seq;
@@ -460,18 +468,23 @@ impl PersistedState {
     }
 
     /// The lowest `touch_seq` among entries that are neither current nor the
-    /// one arriving. Returns whether a victim was found and removed; `record`
-    /// treats a `false` result as the cap guard firing.
-    fn evict_one(&mut self, incoming: &MediaId) -> bool {
-        let victim = self
-            .checkpoints
+    /// one arriving. Returns whether a victim was found and removed;
+    /// `record` and `record_estimated` treat a `false` result as the cap
+    /// guard firing. Runs on the writable map the caller obtained from
+    /// `Arc::make_mut`, never on a base a snapshot still shares.
+    fn evict_one(
+        map: &mut BTreeMap<MediaId, PersistedCheckpoint>,
+        current_media: Option<&MediaId>,
+        incoming: &MediaId,
+    ) -> bool {
+        let victim = map
             .iter()
-            .filter(|(key, _)| Some(*key) != self.current_media.as_ref() && *key != incoming)
+            .filter(|(key, _)| Some(*key) != current_media && *key != incoming)
             .min_by_key(|(_, entry)| entry.touch_seq)
             .map(|(key, _)| key.clone());
         match victim {
             Some(victim) => {
-                self.checkpoints.remove(&victim);
+                map.remove(&victim);
                 true
             }
             None => false,
@@ -481,14 +494,208 @@ impl PersistedState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::media::id::AbsolutePath;
+    use crate::queue::{DisplayMetadata, NewQueueEntry, QueueSource};
 
     fn id(name: &str) -> MediaId {
         match AbsolutePath::new(format!("/music/{name}.flac").into()) {
             Ok(path) => MediaId::LocalFile(path),
             Err(error) => panic!("a literal absolute path must parse: {error}"),
         }
+    }
+
+    fn checkpoint(name: &str, secs: u64) -> PlaybackCheckpoint {
+        PlaybackCheckpoint {
+            media: id(name),
+            position: Duration::from_secs(secs),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn entry(name: &str) -> NewQueueEntry {
+        let path = AbsolutePath::new(format!("/music/{name}.flac").into())
+            .unwrap_or_else(|error| panic!("absolute: {error}"));
+        NewQueueEntry::new(
+            MediaId::LocalFile(path.clone()),
+            QueueSource::LocalFile(path),
+            DisplayMetadata::default(),
+        )
+        .unwrap_or_else(|error| panic!("valid: {error}"))
+    }
+
+    /// The guarantee the sharing rests on: a plain `clone` of the state keeps
+    /// pointing at the same checkpoint map, so retaining a snapshot against
+    /// the writer costs nothing beyond the `Arc`.
+    #[test]
+    fn a_clone_shares_the_checkpoint_map() {
+        let mut state = PersistedState::default();
+        state.record(&checkpoint("a", 10), false);
+
+        let snapshot = state.clone();
+
+        assert!(
+            Arc::ptr_eq(&state.checkpoints, &snapshot.checkpoints),
+            "a clone must share the checkpoint map"
+        );
+    }
+
+    /// The write path is copy-on-write: once a snapshot is retained, the next
+    /// `record` builds a fresh map instead of mutating the shared one, so the
+    /// snapshot keeps its own bytes, its sharing base stays whole, and no
+    /// playlist is copied either: every slot keeps the `Arc` the snapshot
+    /// shares.
+    #[test]
+    fn recording_disturbs_neither_the_retained_snapshot_nor_its_sharing_base() {
+        let mut state = PersistedState::default();
+        state.record(&checkpoint("old", 10), false);
+        state.record(&checkpoint("other", 20), false);
+
+        let snapshot = state.clone();
+        assert!(
+            Arc::ptr_eq(&state.checkpoints, &snapshot.checkpoints),
+            "the live map is shared with the snapshot before the write"
+        );
+
+        state.record(&checkpoint("fresh", 30), false);
+
+        assert!(
+            !Arc::ptr_eq(&state.checkpoints, &snapshot.checkpoints),
+            "the write must not mutate the map the snapshot shares"
+        );
+        assert_eq!(snapshot.len(), 2, "the snapshot saw none of the write");
+        assert_eq!(
+            snapshot.entry_for(&id("old")).map(|entry| entry.touch_seq),
+            Some(1),
+            "the snapshot's retained entry keeps its old touch_seq"
+        );
+        assert!(state.entry_for(&id("fresh")).is_some());
+        assert_eq!(
+            state.playlists().len(),
+            snapshot.playlists().len(),
+            "the write touched no playlist slot"
+        );
+        assert!(
+            state
+                .playlists()
+                .iter()
+                .zip(snapshot.playlists().iter())
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the write must not have copied any playlist slot"
+        );
+    }
+
+    /// A volume nudge is a leaf write (§3): it touches the gain and nothing
+    /// else — the checkpoint map keeps its `Arc` and no playlist slot is
+    /// copied, so a retained snapshot still shares every subtree.
+    #[test]
+    fn a_volume_nudge_copies_nothing() {
+        let mut state = PersistedState::default();
+        state.record(&checkpoint("a", 10), false);
+        let playing = state.playlists().playing();
+        state.enqueue(playing, vec![entry("track")]).expect("fits");
+
+        let snapshot = state.clone();
+        state.set_volume(Volume::new(0.5));
+
+        assert_ne!(state.volume(), snapshot.volume(), "the volume changed");
+        assert!(
+            Arc::ptr_eq(&state.checkpoints, &snapshot.checkpoints),
+            "the volume nudge must not copy the checkpoint map"
+        );
+        assert_eq!(
+            state.playlists().len(),
+            snapshot.playlists().len(),
+            "the volume nudge touched no playlist slot"
+        );
+        assert!(
+            state
+                .playlists()
+                .iter()
+                .zip(snapshot.playlists().iter())
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the volume nudge must not copy any playlist slot"
+        );
+    }
+
+    /// Evicting at the cap is copy-on-write too: with no current media the
+    /// victim is `m0`, the lowest `touch_seq` in the map, and the fresh
+    /// `record` that evicts it leaves the retained snapshot holding all
+    /// [`MAX_ENTRIES`] entries — the victim included.
+    #[test]
+    fn record_at_the_cap_leaves_a_retained_snapshot_whole() {
+        let mut state = PersistedState::default();
+        for index in 0..MAX_ENTRIES {
+            state.record(&checkpoint(&format!("m{index}"), index as u64), false);
+        }
+        let snapshot = state.clone();
+
+        state.record(&checkpoint("fresh", 1), false);
+
+        assert_eq!(
+            snapshot.len(),
+            MAX_ENTRIES,
+            "the snapshot keeps all its entries"
+        );
+        assert_eq!(
+            snapshot.entry_for(&id("m0")).map(|entry| entry.touch_seq),
+            Some(1),
+            "the snapshot still holds the entry the live map evicted"
+        );
+        assert_eq!(state.len(), MAX_ENTRIES, "the live map stays at the cap");
+        assert!(
+            state.entry_for(&id("m0")).is_none(),
+            "the victim is gone from the live map"
+        );
+        assert_eq!(
+            state.entry_for(&id("fresh")).map(|entry| entry.touch_seq),
+            Some(MAX_ENTRIES as u64 + 1),
+            "the fresh entry takes the next sequence after the recorded ones"
+        );
+    }
+
+    /// The estimated write path at the cap behaves the same: the snapshot
+    /// keeps the evicted victim, and the fresh estimate-only entry in the
+    /// live map carries `estimated` with no `position` — an estimate never
+    /// bootstraps one.
+    #[test]
+    fn record_estimated_at_the_cap_leaves_a_retained_snapshot_whole() {
+        let mut state = PersistedState::default();
+        for index in 0..MAX_ENTRIES {
+            state.record(&checkpoint(&format!("m{index}"), index as u64), false);
+        }
+        let snapshot = state.clone();
+
+        state.record_estimated(
+            id("fresh"),
+            Duration::from_secs(90),
+            OffsetDateTime::UNIX_EPOCH,
+            false,
+        );
+
+        assert_eq!(
+            snapshot.len(),
+            MAX_ENTRIES,
+            "the snapshot keeps all its entries"
+        );
+        assert_eq!(
+            snapshot.entry_for(&id("m0")).map(|entry| entry.touch_seq),
+            Some(1),
+            "the snapshot still holds the entry the live map evicted"
+        );
+        assert_eq!(state.len(), MAX_ENTRIES, "the live map stays at the cap");
+        assert!(
+            state.entry_for(&id("m0")).is_none(),
+            "the victim is gone from the live map"
+        );
+        let fresh = state
+            .entry_for(&id("fresh"))
+            .expect("the fresh entry is present");
+        assert_eq!(fresh.touch_seq, MAX_ENTRIES as u64 + 1);
+        assert_eq!(fresh.position, None);
+        assert_eq!(fresh.estimated, Some(Duration::from_secs(90)));
     }
 
     /// `evict_one` must report "no victim" rather than evict the current entry,
@@ -498,9 +705,9 @@ mod tests {
     /// remain), so the guard is pinned directly against the private helper.
     #[test]
     fn evict_one_reports_no_victim_when_the_only_entry_is_current() {
-        let mut state = PersistedState::default();
+        let mut map = BTreeMap::new();
         let only = id("only");
-        state.checkpoints.insert(
+        map.insert(
             only.clone(),
             PersistedCheckpoint {
                 position: Some(Duration::ZERO),
@@ -510,13 +717,12 @@ mod tests {
                 estimated: None,
             },
         );
-        state.current_media = Some(only.clone());
 
-        let evicted = state.evict_one(&id("incoming"));
+        let evicted = PersistedState::evict_one(&mut map, Some(&only), &id("incoming"));
 
         assert!(!evicted, "the current entry must never be evicted");
-        assert_eq!(state.checkpoints.len(), 1, "nothing was removed");
-        assert!(state.entry_for(&only).is_some());
+        assert_eq!(map.len(), 1, "nothing was removed");
+        assert!(map.contains_key(&only));
     }
 }
 
@@ -543,6 +749,10 @@ mod playlist_tests {
         assert_eq!(state.playlists().len(), 1);
         assert_eq!(state.playlists()[0].name(), "Default");
         assert_eq!(state.playlists().playing(), state.playlists()[0].id());
+        // The set shares its one slot: a clone keeps pointing at the same
+        // playlist, exactly as it does for the checkpoint map.
+        let clone = state.clone();
+        assert!(Arc::ptr_eq(&state.playlists()[0], &clone.playlists()[0]));
     }
 
     #[test]

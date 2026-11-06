@@ -175,8 +175,11 @@ impl Deref for Tracked {
 }
 
 pub struct Session {
-    /// The authoritative state. `Action::Submit` carries a clone, which becomes
-    /// the writer's property; the session never shares a reference into it.
+    /// The authoritative state. `Action::Submit` hands the writer a
+    /// shared-subtree snapshot: unchanged subtrees are `Arc`-shared, and
+    /// every later mutation copies on write against the writer's claim, so
+    /// what the writer observes never changes underneath it. The session
+    /// never shares a reference into the live state.
     state: Tracked,
     session_rev: u64,
     playback: PlaybackState,
@@ -656,10 +659,11 @@ impl Session {
     }
 
     /// [`update_display`](Self::update_display) for a batch, with **one**
-    /// submit for the whole of it rather than one per update: the snapshot a
-    /// submit carries is a full clone of the state, so the metadata workers'
-    /// results — which arrive in bursts of hundreds after a folder add — must
-    /// not pay for one clone each.
+    /// submit for the whole of it rather than one per update: the metadata
+    /// workers' results arrive in bursts of hundreds after a folder add, and
+    /// each submit pokes the writer's keep-latest slot and can wake the
+    /// writer thread. Snapshots are cheap to clone now, but one submit per
+    /// burst keeps that churn bounded.
     pub fn update_displays(&mut self, updates: &[(MediaId, DisplayUpdate)]) -> Action {
         let mut changed = false;
         for (media, update) in updates {
@@ -1025,8 +1029,8 @@ impl Session {
 
     /// The whole of `Loaded`'s adoption: the checkpoint/identity mutations
     /// `on_loaded` still owns, then the queue and metadata moves, then the
-    /// submission — built only once every earlier mutation has landed, so it
-    /// is never a snapshot cloned before them (D19).
+    /// submission — built only once every earlier mutation has landed, so
+    /// the submission observes every one of them (D19).
     #[allow(clippy::too_many_arguments)] // one call site, unpacking `Loaded`'s own fields.
     fn adopt_loaded(
         &mut self,
