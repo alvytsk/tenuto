@@ -2313,6 +2313,10 @@ impl Worker {
                 } else {
                     let position = self.position;
                     tracing::info!(reason = %failure, ?position, "connection lost; reconnecting");
+                    eprintln!(
+                        "PROBE outage reason={failure} position={position:?} caps={:?} state={:?}",
+                        self.capabilities.seek, self.state
+                    );
                     self.traits.recovering.store(true, Ordering::Release);
                 }
                 // The output transport stays up so the ring plays out; only
@@ -3480,6 +3484,13 @@ impl Worker {
             });
         };
         let seeked = source.position() != target;
+        if self.state == PlaybackState::Reconnecting {
+            let decoder = source.position();
+            eprintln!(
+                "PROBE recovery-land target={target:?} decoder={decoder:?} seeked={seeked} approach={approach:?} caps={:?} pos={:?}",
+                self.capabilities.seek, self.position
+            );
+        }
         let (actual, provenance, truncated) = if seeked {
             let budget = match approach {
                 Approach::Seek => Some(SEEK_BUDGET),
@@ -3525,6 +3536,7 @@ impl Worker {
             let capabilities = source.capabilities();
             self.set_capabilities(capabilities);
             self.emit_capabilities(capabilities);
+            eprintln!("PROBE proof native {capabilities:?}");
         }
         Landed::At(Landing { actual, truncated })
     }
