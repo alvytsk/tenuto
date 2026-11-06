@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   takes only what each plane holds instead of panicking on the short
   one.
 
+### Security
+
+- Updated `mpris-server` to 0.11.0, which serves the desktop media
+  controls over `zbus` 6 instead of `zbus` 5 and so drops the standalone
+  `zvariant`, `zvariant_derive` and `zbus_names` crates for
+  RUSTSEC-2026-0370, -0371 and -0372.
+
 ## [0.4.0] - 2026-10-25
 
 ### Added

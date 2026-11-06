@@ -402,8 +402,12 @@ fn supersede_a_burst(how: Superseding) {
     match how {
         Superseding::Load | Superseding::StalledLoad => {
             if let Superseding::StalledLoad = how {
-                pump_for(&mut rig, Duration::from_millis(400));
-                assert_eq!(rig.runtime.view().phase, PlaybackPhase::Loading);
+                // Condition, not a fixed window: the header delay guarantees
+                // a wide Loading span once the load is accepted, but a fixed
+                // pump window races that acceptance under runner load (#82).
+                pump_until(&mut rig, "the stalled load is in flight", |view| {
+                    view.phase == PlaybackPhase::Loading
+                });
             }
             pump_until(&mut rig, "B playing", |view| is_playing(view, ids[1]));
             pump_for(&mut rig, Duration::from_millis(300));
@@ -555,8 +559,12 @@ fn removing_the_active_entry_does_not_cancel_a_newer_load_in_flight() {
     pump_until(&mut rig, "A playing", |view| is_playing(view, ids[0]));
 
     rig.runtime.handle(AppCommand::PlayEntry(ids[1]));
-    pump_for(&mut rig, Duration::from_millis(200));
-    assert_eq!(rig.runtime.view().phase, PlaybackPhase::Loading);
+    // Condition, not a fixed window (#82): under runner load a fixed 200 ms
+    // can fire before the load is even accepted. The fixture's header delay
+    // keeps the Loading span wide once acceptance lands, so wait for it.
+    pump_until(&mut rig, "B's load is in flight", |view| {
+        view.phase == PlaybackPhase::Loading
+    });
     rig.runtime.handle(AppCommand::Remove(ids[0]));
     pump_until(&mut rig, "B playing", |view| is_playing(view, ids[1]));
     assert_eq!(rig.runtime.view().active, Some(ids[1]));
