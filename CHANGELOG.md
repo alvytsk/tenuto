@@ -7,13 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Space resumes again after a pause that landed while the player was
-  blocked reading a remote source. The pause adopted the state the wait
-  hook had already announced without flipping the flag Space resolves
-  against, so every later Space was swallowed; only `p`, `s` or a new
-  load could resume. State and flag are now written in one place.
+## [0.5.0] - 2026-11-07
 
 ### Changed
 
@@ -55,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Space resumes again after a pause that landed while the player was
+  blocked reading a remote source. The pause adopted the state the wait
+  hook had already announced without flipping the flag Space resolves
+  against, so every later Space was swallowed; only `p`, `s` or a new
+  load could resume. State and flag are now written in one place.
 - The desktop widget no longer reports a phantom seek when the front end
   stalls between passes (a busy frame, a stalled terminal): playback that
   drifted from wall time across the stall — a rebuffer, an underrun, the
@@ -62,9 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   made from the widget or on the player's own keys — is still reported
   promptly, even when it lands in the first pass after the front end
   stalled.
-
-### Fixed
-
 - The checkpoint cap's guard warning no longer names the media it drops. A
   media identity's spelling embeds the full URL with its query string,
   which no tenuto log line may carry; the warning reports the drop's
