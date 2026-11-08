@@ -1468,6 +1468,17 @@ impl Worker {
         match fault {
             // Rerouted or refused realtime: playback continues, but the timing
             // base underneath the timeline may have jumped.
+            OutputFault::Recoverable(
+                cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied,
+            ) => self.degraded = true,
+            // An underrun counts no frames: the timeline freezes at what was
+            // really heard, which stays exact, so a benign `Xrun` must not
+            // latch degraded quality onto the whole generation. The warning
+            // still counts through `device_warnings`.
+            OutputFault::Recoverable(cpal::ErrorKind::Xrun) => {}
+            // Any future recoverable kind (`ErrorKind` is non-exhaustive)
+            // degrades: without host-specific knowledge it may well have
+            // disturbed the timing base, and position honesty wins.
             OutputFault::Recoverable(_) => self.degraded = true,
             OutputFault::Rebuild(kind) => {
                 let resume = self.state == PlaybackState::Playing;
@@ -3967,7 +3978,12 @@ mod tests {
     /// A worker over `NullOutput` whose loop never runs, the progress slot
     /// its hook publishes to, and the receiver its events reach. The spectrum
     /// thread is stopped at once: the worker only needs the port.
-    fn idle_worker() -> (Worker, Arc<Mutex<Progress>>, Receiver<PlaybackEvent>) {
+    fn idle_worker() -> (
+        Worker,
+        Arc<Mutex<Progress>>,
+        Receiver<PlaybackEvent>,
+        crossbeam_channel::Sender<OutputFault>,
+    ) {
         let (events_out, events) = outbox::channel();
         let progress = Arc::new(Mutex::new(Progress {
             session_rev: 0,
@@ -3978,7 +3994,7 @@ mod tests {
             buffering: false,
             load: None,
         }));
-        let (_faults_tx, faults) = crossbeam_channel::unbounded();
+        let (faults_tx, faults) = crossbeam_channel::unbounded();
         let (_commands_tx, commands) = crossbeam_channel::bounded(1);
         let (liveness, _liveness_rx) = crossbeam_channel::bounded(0);
         let (_wake_tx, wake) = crossbeam_channel::bounded(1);
@@ -4001,7 +4017,7 @@ mod tests {
             device_clock,
             port,
         );
-        (worker, progress, events)
+        (worker, progress, events, faults_tx)
     }
 
     /// Outbox spec §4.3. A read that blocks after a command emitted must not
@@ -4011,7 +4027,7 @@ mod tests {
     /// session would checkpoint that position over the seek.
     #[test]
     fn an_event_flushed_by_a_blocked_read_carries_progress_from_its_emission() {
-        let (mut worker, progress, events) = idle_worker();
+        let (mut worker, progress, events, _faults_tx) = idle_worker();
         worker.state = PlaybackState::Stopped;
         worker.session_rev = 7;
         worker.position = Duration::from_secs(1);
@@ -4049,7 +4065,7 @@ mod tests {
     /// so the next interval offers the same totals again.
     #[test]
     fn a_refused_warning_is_offered_again_at_the_next_interval() {
-        let (mut worker, _progress, events) = idle_worker();
+        let (mut worker, _progress, events, _faults_tx) = idle_worker();
         // Fill the channel to its ordinary limit (64 - 9 reserved = 55).
         for n in 0..55 {
             worker.outbox.emit(PlaybackEvent::Warning {
@@ -4225,7 +4241,7 @@ mod tests {
     /// handshake/link suites' concern, not this one's.
     #[test]
     fn a_generation_does_not_wrap_onto_a_live_mark_after_65_536_bumps() {
-        let (mut worker, _progress, _events) = idle_worker();
+        let (mut worker, _progress, _events, _faults_tx) = idle_worker();
         worker.generation = 1;
         worker.heard_mark = Some((1, Duration::from_millis(500)));
 
@@ -4238,6 +4254,34 @@ mod tests {
             worker.heard_mark.map(|(marked, _)| marked),
             Some(worker.generation),
             "a mark from generation 1 must not match after 65,536 bumps"
+        );
+    }
+
+    /// An underrun counts no frames: the timeline freezes at what was really
+    /// heard, which stays exact, so a benign `Xrun` must not latch degraded
+    /// quality onto the whole generation. A rerouted device or denied
+    /// realtime scheduling still does — their timing base can jump.
+    #[test]
+    fn an_xrun_does_not_latch_degraded_quality() {
+        let (mut worker, _progress, _events, faults_tx) = idle_worker();
+        worker.degraded = false;
+
+        faults_tx
+            .send(OutputFault::Recoverable(cpal::ErrorKind::Xrun))
+            .expect("faults queue accepts an Xrun");
+        worker.service_faults();
+        assert!(
+            !worker.degraded,
+            "an underrun must not degrade the position quality"
+        );
+
+        faults_tx
+            .send(OutputFault::Recoverable(cpal::ErrorKind::DeviceChanged))
+            .expect("faults queue accepts a DeviceChanged");
+        worker.service_faults();
+        assert!(
+            worker.degraded,
+            "a rerouted device still degrades the position quality"
         );
     }
 }

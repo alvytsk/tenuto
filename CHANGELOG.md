@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position mark recorded a lifetime ago. The real-time wire keeps its
   16-bit field, where in-flight state lives for a handful of generations
   at most.
+- One benign underrun no longer degrades the position quality for the
+  whole generation: an underrun counts no frames, so the position stays
+  exactly at what was really heard. A rerouted device or denied realtime
+  scheduling still degrades it.
 
 ## [0.5.0] - 2026-11-07
 
