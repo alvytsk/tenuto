@@ -115,15 +115,23 @@ impl CallbackCore {
     fn run(&mut self, out: &mut [f32], playback: Nanos, control: Control) {
         let channels = usize::from(self.channels);
         let wanted = out.len();
+        // One chunk read per fill, not one atomic head movement per sample: a
+        // full fill copies two slices off a contiguous region (plus at most
+        // one wrapped tail) instead of popping thousands of samples.
         let mut written = 0;
-        while written < wanted {
-            match self.pcm.pop() {
-                Ok(sample) => {
-                    out[written] = sample;
-                    written += 1;
-                }
-                Err(_) => break,
-            }
+        // `slots().min(wanted)`: rtrb 0.4's `read_chunk` is exact-n and errors
+        // on fewer slots, but an underrun must still play the prefix it has.
+        let take = self.pcm.slots().min(wanted);
+        if take > 0
+            && let Ok(chunk) = self.pcm.read_chunk(take)
+        {
+            let (first, second) = chunk.as_slices();
+            let take_first = wanted.min(first.len());
+            out[..take_first].copy_from_slice(&first[..take_first]);
+            let take_second = (wanted - take_first).min(second.len());
+            out[take_first..take_first + take_second].copy_from_slice(&second[..take_second]);
+            written = take_first + take_second;
+            chunk.commit(written);
         }
         if written < wanted {
             silence(&mut out[written..]);
@@ -468,5 +476,54 @@ mod tests {
             captured[0].abs() > captured[958].abs(),
             "gain ramps rather than stepping"
         );
+    }
+
+    /// A fill straddling the ring's internal wrap point - the second
+    /// `as_slices` region - must deliver every sample in order: the chunk
+    /// read serves the contiguous tail and the wrapped head as one, which
+    /// the per-sample pop this replaced got for free.
+    #[test]
+    fn a_fill_across_the_ring_wrap_delivers_samples_in_order() {
+        let link = Arc::new(OutputLink::new());
+        let (mut pcm_tx, pcm_rx) = rtrb::RingBuffer::<f32>::new(24);
+        let (span_tx, _span_rx) = rtrb::RingBuffer::<SpanRecord>::new(64);
+        let core = CallbackCore::new(
+            Arc::clone(&link),
+            pcm_rx,
+            span_tx,
+            2,
+            RATE,
+            Arc::new(AtomicU64::new(0)),
+        );
+        // Nine frames = 18 samples per fill.
+        let mut output = TestOutput::new(2, RATE, 9, Duration::from_millis(20));
+        output.attach(core);
+        link.publish_control(Control {
+            generation: 1,
+            epoch: 1,
+            phase: Phase::Run,
+        });
+
+        for i in 0..18u32 {
+            pcm_tx.push(i as f32).unwrap();
+        }
+        output.pump_in_place();
+        let contiguous: Vec<f32> = (0u32..18).map(|i| i as f32).collect();
+        assert_eq!(output.captured(), &contiguous[..]);
+
+        // Logical 18..30 wraps the 24-slot ring: this fill's chunk reads six
+        // samples off the physical tail and six off the wrapped head, then
+        // underruns the last six slots of its buffer.
+        for i in 18..30u32 {
+            pcm_tx.push(i as f32).unwrap();
+        }
+        output.clear_captured();
+        output.pump_in_place();
+
+        let expected: Vec<f32> = (18u32..30)
+            .map(|i| i as f32)
+            .chain(std::iter::repeat_n(0.0, 6))
+            .collect();
+        assert_eq!(output.captured(), &expected[..]);
     }
 }

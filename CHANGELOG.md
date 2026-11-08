@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interrupt word, two never-constructed HTTP `Operation` variants, a stale
   `#[allow(dead_code)]`, and six copies of the same poison-tolerant lock
   helper, which playback modules now share as one.
+- The real-time audio callback fills its buffers with one chunk read off
+  the ring instead of one atomic operation per sample, roughly two orders
+  of magnitude fewer ring movements per fill.
 
 ### Added
 
