@@ -139,7 +139,7 @@ impl Worker {
         self.degraded = true;
         if let Some(link) = link
             && let Some(record) = link.take_rescue_after_teardown()
-            && u32::from(record.generation) == generation
+            && record.generation == generation as u16
         {
             self.position = anchor + frames_to_duration(record.media_total_after, rate);
         }

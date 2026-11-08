@@ -2841,6 +2841,7 @@ mod tests {
     use super::super::diagnostics::retire_faults;
     use crate::playback::wait::Servicing;
     use super::*;
+    use crate::playback::output::SampleFormat;
     use crate::playback::outbox;
     use crate::playback::output::null_output::NullOutput;
     use crate::playback::spectrum::worker as spectrum_worker;
@@ -3043,6 +3044,82 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a queued fault outlived its transport"
+        );
+    }
+
+    /// Review finding: the rescue record's generation is the wire's 16-bit
+    /// truncation of the worker's generation (the control word and every
+    /// span carry it that way), so the comparison must happen in that
+    /// domain. A full-width compare discarded every rescue recorded past
+    /// generation 65,535, and a capture timeout kept the anchor position
+    /// instead of recovering the frames the callback actually heard.
+    #[test]
+    fn a_rescue_record_matches_its_generation_in_the_wire_domain() {
+        let (mut worker, _progress, _events, _faults_tx) = idle_worker();
+        const RATE: u32 = 48_000;
+        worker.generation = 65_537;
+        let anchor = Duration::from_secs(10);
+        let link = Arc::new(OutputLink::new());
+        let (_span_tx, span_rx) = rtrb::RingBuffer::<SpanRecord>::new(4);
+        let core = TransportCore::new(
+            Handshake::new(Arc::clone(&link), span_rx),
+            Timeline::new(RATE),
+            anchor,
+            RATE,
+        );
+        worker.link = Some(Arc::clone(&link));
+        worker.config = Some(NegotiatedOutput {
+            sample_rate: RATE,
+            channels: 2,
+            buffer_frames: 512,
+            sample_format: SampleFormat::F32,
+        });
+        *lock(&worker.transport) = Some(core);
+        // The wire truncates 65,537 to 1; the callback stashed its last span
+        // under exactly that value.
+        link.stash_rescue(SpanRecord {
+            generation: 65_537u32 as u16,
+            media_total_after: u64::from(RATE),
+            t0: Nanos(0),
+            frames: RATE,
+        });
+
+        // The freeze never gets its acknowledgment from a callback that does
+        // not exist, so the capture times out and the rescue branch runs.
+        worker.capture_and_teardown();
+
+        assert_eq!(
+            worker.position,
+            anchor + frames_to_duration(u64::from(RATE), RATE),
+            "the rescue record was discarded by a generation-domain mismatch"
+        );
+        assert!(worker.degraded, "a timed-out capture must degrade quality");
+    }
+
+    /// Review finding: fault aggregation keeps the most severe fault of the
+    /// pass, and an underrun and a device change used to rank equally - so
+    /// an `Xrun` that arrived first masked a `DeviceChanged` behind it,
+    /// and the timing-base jump never latched degraded quality.
+    #[test]
+    fn an_underrun_does_not_mask_a_later_device_change() {
+        let (mut worker, _progress, _events, faults_tx) = idle_worker();
+        worker.state = PlaybackState::Playing;
+        faults_tx
+            .send(OutputFault::Recoverable(cpal::ErrorKind::Xrun))
+            .expect("queue accepts a fault");
+        faults_tx
+            .send(OutputFault::Recoverable(cpal::ErrorKind::DeviceChanged))
+            .expect("queue accepts a fault");
+
+        worker.service_faults();
+
+        assert!(
+            worker.degraded,
+            "the device change behind the underrun was discarded"
+        );
+        assert_eq!(
+            worker.device_warnings, 2,
+            "both faults must still count as warnings"
         );
     }
 
