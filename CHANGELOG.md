@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The 4,270-line playback engine module is split into focused modules
+  under `playback::engine/` (`mod`, `handle`, `worker`, `transport`,
+  `reconnect`, `diagnostics`) with single-responsibility names. No
+  behavior change; the public paths `EngineHandle`, `EventStream`,
+  `TransportCore`, `DEADLINE` and `PUMP_NAP` are unchanged.
 - Vestigial internals are gone: the write-only seek bit of the playback
   interrupt word, two never-constructed HTTP `Operation` variants, a stale
   `#[allow(dead_code)]`, and six copies of the same poison-tolerant lock

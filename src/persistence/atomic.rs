@@ -112,6 +112,12 @@ fn orphan_pid(name: &str) -> Option<u32> {
     pid.parse().ok()
 }
 
+/// Off Linux there is no `/proc` to read pids from, so there is nothing
+/// the sweep could do safely: a documented platform gap (§17, D12), never
+/// a behavior difference in the writes themselves.
+#[cfg(not(target_os = "linux"))]
+fn sweep_orphans(_dir: &Path) {}
+
 #[cfg(unix)]
 pub(crate) fn prepare_directory(dir: &Path) -> Result<(), PersistenceError> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
