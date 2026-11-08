@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The HTTP client identifies itself as `tenuto/<version>` and honors the
+  standard proxy environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `NO_PROXY`), so tenuto runs behind a proxy.
+
 ### Fixed
 
 - Adding or re-probing a station now reports what actually went wrong with

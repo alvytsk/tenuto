@@ -77,6 +77,12 @@ impl HttpService {
         let connection_window = u32::try_from(limits.buffer_bytes).unwrap_or(u32::MAX);
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Identify the client: some CDNs answer a UA-less request with
+            // 403, and a name and version cost the server nothing. The
+            // builder default already honors the standard proxy environment
+            // (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY) at build time;
+            // there is nothing to opt into.
+            .user_agent(concat!("tenuto/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(limits.connect)
             .http2_initial_stream_window_size(stream_window)
             .http2_initial_connection_window_size(connection_window)

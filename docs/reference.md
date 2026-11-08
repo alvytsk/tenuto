@@ -30,6 +30,7 @@ The rules the player and the feed commands follow, stated precisely. The [README
 - If a podcast episode drops mid-play and its server supports range requests (most do), Tenuto reconnects with the same backoff and carries on from where you were. The five-minute budget is judged only when something fails, so an attempt already under way can finish after it. Seeking, pausing and stopping work while it reconnects, and a seek takes effect when the connection comes back. Episodes on servers without range support still fail, and Space tries once more.
 - A dropped connection on a finite track from a server without range support fails. Playing again makes one attempt to reopen at the saved position.
 - A stream that interleaves ICY metadata, an HLS playlist, or a source whose continuity cannot be established is refused.
+- Tenuto identifies itself as `tenuto/<version>` in its HTTP requests and honors the standard proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), so it works behind a proxy.
 
 ### Seeking accuracy
 

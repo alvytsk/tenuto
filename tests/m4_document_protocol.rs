@@ -322,6 +322,10 @@ fn a_validator_scoped_to_the_final_hop_is_sent_only_there_and_a_matching_304_suc
     assert_eq!(requests[0].path, "/a");
     assert_eq!(requests[0].header("if-none-match"), None);
     assert_eq!(requests[0].header("if-modified-since"), None);
+    assert_eq!(
+        requests[0].header("user-agent"),
+        Some(concat!("tenuto/", env!("CARGO_PKG_VERSION")))
+    );
     assert_eq!(requests[1].path, "/b");
     assert_eq!(requests[1].header("if-none-match"), Some("\"v1\""));
     assert_eq!(
