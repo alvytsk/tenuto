@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invariant that only the player ever writes the file. A concurrent
   station command refuses with "Another station update is in progress"
   rather than saving a stale list over another writer's commit.
+- Temporary files orphaned by a crash (`<file>.tmp-<pid>-<seq>` beside any
+  durable file) are swept the next time that directory is written. A
+  temporary whose writing process is still alive is left alone, so a
+  concurrent player can never lose an in-flight write to the sweep.
 
 ## [0.5.0] - 2026-11-07
 
