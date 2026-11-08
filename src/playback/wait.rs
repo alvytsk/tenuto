@@ -15,7 +15,7 @@
 //! hook call for exactly this reason. Nothing in this module takes
 //! `TransportCore` before `SessionFacts`.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::http::channel::{SourceInterrupt, WaitHook};
@@ -24,21 +24,12 @@ use crate::media::id::MediaId;
 use super::command::LoadRequestId;
 use super::engine::{DEADLINE, PUMP_NAP, TransportCore};
 use super::event::{PlaybackEvent, Progress};
+use super::lock;
 use super::outbox::Outbox;
 use super::output::Nanos;
 use super::state::PlaybackState;
 use super::timeline::PositionQuality;
 use crate::media::provenance::PositionProvenance;
-
-/// A poisoned lock means a thread already panicked while holding it; there is
-/// nothing better to do than carry on with the state it left. Same pattern as
-/// `http::channel::lock` and `playback::prepare::lock`.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
 
 /// Distinguishes why `service_as` is running: only a `BlockedRead` reports
 /// `buffering` (Ruling 4) and acts on the freeze level.
@@ -229,10 +220,7 @@ impl WaitService {
             }
         };
         // Keep-latest: nothing but the assignment happens under the lock.
-        match self.progress.lock() {
-            Ok(mut slot) => *slot = snapshot,
-            Err(poisoned) => *poisoned.into_inner() = snapshot,
-        }
+        *lock(&self.progress) = snapshot;
     }
 
     /// One implementation, two callers (Ruling 4): `WaitHook::service`
@@ -341,10 +329,7 @@ mod tests {
     }
 
     fn published_buffering(service: &WaitService) -> bool {
-        match service.progress.lock() {
-            Ok(guard) => guard.buffering,
-            Err(poisoned) => poisoned.into_inner().buffering,
-        }
+        lock(&service.progress).buffering
     }
 
     /// Ruling 4: `buffering` is a fact about which caller is running, not

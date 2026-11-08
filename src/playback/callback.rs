@@ -18,10 +18,8 @@ pub struct CallbackCore {
     channels: u16,
     generation: u16,
     media_total: u64,
-    /// Part of the documented constructor interface; unused by this task's own
-    /// logic (`t0` arrives pre-computed), reserved for a future consumer such
-    /// as position or resampling math.
-    #[allow(dead_code)]
+    /// The output stream's rate; the spectrum tap labels every block with
+    /// it so the analysis side can rescale to the analyzer's own grid.
     sample_rate: u32,
     /// A span that could not be published because the ring was full. Republished
     /// on every later invocation, including while frozen or parked, and it gates

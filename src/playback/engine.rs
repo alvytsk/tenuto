@@ -9,7 +9,7 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,7 @@ use super::error::PlaybackError;
 use super::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
 use super::handshake::Handshake;
 use super::link::OutputLink;
+use super::lock;
 use super::outbox::{self, Outbox};
 use super::output::cpal_output::{CpalOutput, OutputFault};
 use super::output::null_output::NullOutput;
@@ -55,10 +56,6 @@ use crate::volume::Volume;
 
 const STOP: u8 = 1;
 const SHUTDOWN: u8 = 2;
-/// A seek whose target has already been accepted by the command queue. §8:
-/// the interrupt is published only after acceptance, so a seek that was
-/// refused admission cannot retire a fetch it never got to replace.
-const SEEK: u8 = 4;
 const TICK: Duration = Duration::from_millis(10);
 /// `pub(crate)` so `wait.rs`'s `WaitService` — the hook's other caller — waits
 /// on the exact same deadline as the worker's own handshake calls.
@@ -325,10 +322,7 @@ impl EngineHandle {
     }
 
     pub fn progress(&self) -> Progress {
-        match self.progress.lock() {
-            Ok(progress) => progress.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        lock(&self.progress).clone()
     }
 
     /// Out-of-band stop: travels on the interrupt flag plus the wake channel,
@@ -445,7 +439,6 @@ impl EngineHandle {
         // it first would cost the listener the stream for nothing (M7 §3.4).
         if !self.traits.seek_unsupported.load(Ordering::Acquire) {
             self.source_interrupt.retire_generation(generation);
-            self.interrupt.fetch_or(SEEK, Ordering::Release);
         }
         let _ = self.wake.try_send(());
         admission
@@ -554,16 +547,6 @@ impl Drop for EngineHandle {
         // Idempotent after `join`. The spectrum thread wakes on this at once
         // and never waits on the decode worker, so this cannot hang.
         self.spectrum_thread.stop();
-    }
-}
-
-/// A poisoned lock means a thread already panicked while holding it; there is
-/// nothing better to do than carry on with the state it left. Same pattern as
-/// `http::channel::lock` and `wait::lock`.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -1011,8 +994,8 @@ impl Worker {
             if flags & STOP != 0 {
                 self.do_stop();
             }
-            // SEEK carries no worker-side action. Its retirement woke the
-            // read, and the queued `SeekTo` carries the target; the
+            // An accepted seek carries no worker-side action. Its retirement
+            // woke the read, and the queued `SeekTo` carries the target; the
             // generation the seek runs under is opened by `begin()` at the
             // point of use, not here — arming here would run after
             // `do_stop` and undo the retirement it just published. The `swap`
@@ -2163,7 +2146,8 @@ impl Worker {
                     // A retired remote source is
                     // `None` here with `descriptor` still naming it - the
                     // very next pass after `is_retired_read`'s own arm ran,
-                    // since `SEEK` takes no step-1 action and `select!` can
+                    // since an accepted seek takes no step-1 action and
+                    // `select!` can
                     // pick `recv(wake)` over the queued `SeekTo` on any given
                     // pass. That is not EOF; it is nothing to decode *yet*,
                     // and must not be converted into one by falling through
@@ -3837,13 +3821,12 @@ fn is_cancelled(error: &PlaybackError) -> bool {
         || matches!(remote_cause(error), Some(RemoteFailure::Cancelled))
 }
 
-/// Whether the interrupt word carries a stop or a shutdown - never the SEEK
-/// bit. Every local refinement loop's `cancelled` closure checks this rather
-/// than `!= 0`: `submit_seek` sets SEEK for exactly the dispatch that is
-/// about to run the seek this closure is guarding, and a bit that means "a
-/// seek was accepted" must not read as "abandon the seek that was just
-/// accepted." STOP and SHUTDOWN carry no such ambiguity - both mean the
-/// operation in progress must give up regardless of what it is.
+/// Whether the interrupt word carries a stop or a shutdown. Every local
+/// refinement loop's `cancelled` closure checks this rather than `!= 0`: the
+/// word exists to wake the worker between passes, and a bare `!= 0` would
+/// read any future out-of-band bit as "abandon the operation in progress."
+/// STOP and SHUTDOWN mean exactly that - the operation in progress must give
+/// up regardless of what it is.
 fn stop_or_shutdown(word: u8) -> bool {
     word & (STOP | SHUTDOWN) != 0
 }

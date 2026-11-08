@@ -54,12 +54,10 @@ impl TapRegistry {
             .copied()
     }
 
-    /// A poisoned lock still holds a consistent map: every critical section
-    /// above is a single `HashMap` call.
+    /// The shared poison-carrying lock (`crate::playback::lock`): a poisoned
+    /// lock still holds a consistent map, and every critical section above
+    /// is a single `HashMap` call.
     fn lock(&self) -> MutexGuard<'_, HashMap<u64, TapMapping>> {
-        match self.live.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        crate::playback::lock(&self.live)
     }
 }

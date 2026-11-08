@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Vestigial internals are gone: the write-only seek bit of the playback
+  interrupt word, two never-constructed HTTP `Operation` variants, a stale
+  `#[allow(dead_code)]`, and six copies of the same poison-tolerant lock
+  helper, which playback modules now share as one.
+
 ### Added
 
 - The HTTP client identifies itself as `tenuto/<version>` and honors the
