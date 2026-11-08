@@ -26,8 +26,6 @@ const SPAN_CAPACITY: usize = 64;
 /// How much audio the PCM ring holds. Large enough that one loop iteration
 /// cannot drain it, small enough that discarding it on a seek is cheap.
 const RING_MILLIS: u64 = 300;
-/// Floor on the interval between aggregated diagnostic warnings.
-const DIAGNOSTIC_INTERVAL: Duration = Duration::from_millis(500);
 /// Refinement budget for an *explicit* seek. Preserving seeks pass `None`.
 const SEEK_BUDGET: Duration = Duration::from_secs(5);
 /// A refined seek lands on a whole *source* frame, while the position it is
@@ -45,6 +43,7 @@ const SEEK_BUDGET: Duration = Duration::from_secs(5);
 /// being swallowed.
 const RESUME_TOLERANCE: Duration = Duration::from_micros(100);
 
+mod diagnostics;
 mod handle;
 mod reconnect;
 mod worker;
