@@ -646,6 +646,7 @@ fn a_control_character_in_the_encoding_label_never_reaches_a_terminal() -> Falli
 /// | `CacheParserMismatch` | `slug`, versions | `feed::cache::check_versions` | Integers from the envelope. |
 /// | `SubscriptionsUnreadable` | `reason` | `subscription::store`, `library::load_mutating` | A fixed phrase, a quarantine path this process chose, or the same category/line/column reduction. |
 /// | `StationsUnreadable` | `reason` | `station::store` | A fixed phrase, a quarantine path this process chose, or the same category/line/column reduction — the same shape as `SubscriptionsUnreadable`, never the file's raw bytes. |
+/// | `StationProbeFailed` | `reason` | `library::add_station`, `library::reprobe_station`, `application::feed_ops::station_probe` | A `redact_url`-redacted URL plus the transport's classification — the same redaction discipline as `Remote` — never the stations file's bytes. |
 /// | `SubscriptionsBusy` | — | `library::lock_subscriptions` | Nothing: a fixed phrase. |
 /// | `InvalidSlug` | `slug` | `subscription::model::validate_slug` | The alias the listener typed. |
 /// | `SlugTaken` | `slug` | `library::subscribe` | A stored, already-validated slug. |
@@ -668,6 +669,7 @@ fn every_feed_error_variant_has_a_recorded_safe_context() {
             FeedError::CacheParserMismatch { .. } => "a slug and two versions",
             FeedError::SubscriptionsUnreadable { .. } => "a fixed phrase or a chosen path",
             FeedError::StationsUnreadable { .. } => "a fixed phrase or a chosen path",
+            FeedError::StationProbeFailed { .. } => "a redacted URL and transport text",
             FeedError::SubscriptionsBusy => "none",
             FeedError::SlugTaken { .. } | FeedError::AlreadySubscribed { .. } => "a stored slug",
             FeedError::BatchIncomplete { .. } => "two integers",
@@ -719,6 +721,9 @@ fn every_feed_error_variant_has_a_recorded_safe_context() {
         },
         FeedError::StationsUnreadable {
             reason: "stations file could not be read".into(),
+        },
+        FeedError::StationProbeFailed {
+            reason: "https://radio.example:8010/stream is not a live stream".into(),
         },
         FeedError::SubscriptionsBusy,
         FeedError::InvalidSlug {

@@ -1173,10 +1173,10 @@ pub async fn add_station(
         // redirect, …) gets an error notice carrying the reason instead.
         Err(
             failure @ (RemoteFailure::UnsupportedLiveMedia | RemoteFailure::IcyFramingUnsupported),
-        ) => Err(FeedError::StationsUnreadable {
+        ) => Err(FeedError::StationProbeFailed {
             reason: format!("{} is not a live stream: {failure}", redact_url(url)),
         }),
-        Err(failure) => Err(FeedError::StationsUnreadable {
+        Err(failure) => Err(FeedError::StationProbeFailed {
             reason: format!("{}: {failure}", redact_url(url)),
         }),
     }
@@ -1233,7 +1233,7 @@ pub async fn reprobe_station(
                 identity,
             })
         }
-        Err(failure) => Err(FeedError::StationsUnreadable {
+        Err(failure) => Err(FeedError::StationProbeFailed {
             reason: format!(
                 "{} could not be reprobed: {failure}",
                 redact_url(url.as_str())

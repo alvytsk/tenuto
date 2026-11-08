@@ -46,6 +46,13 @@ pub enum FeedError {
     SubscriptionsUnreadable { reason: String },
     #[error("cannot use stations: {reason}")]
     StationsUnreadable { reason: String },
+    /// A station probe refused an add or re-probe. The reason carries its own
+    /// context — a `redact_url`-redacted URL plus the transport's
+    /// classification — so `Display` passes it through untouched; the
+    /// stations *file* is fine, which is what
+    /// [`FeedError::StationsUnreadable`] must never be read as claiming.
+    #[error("{reason}")]
+    StationProbeFailed { reason: String },
     #[error("Another subscription update is in progress")]
     SubscriptionsBusy,
     #[error("invalid slug {slug:?}; expected 1-32 ASCII lowercase letters, digits or hyphens")]

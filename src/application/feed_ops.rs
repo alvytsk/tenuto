@@ -395,7 +395,7 @@ fn station_probe(outcome: AddStationOutcome, action: &str) -> Report {
                     .as_ref()
                     .map_or_else(|| ABSENT.to_string(), station_identity_text)
             );
-            Err(FeedError::StationsUnreadable { reason })
+            Err(FeedError::StationProbeFailed { reason })
         }
     };
     Report { text, outcome }
@@ -752,7 +752,7 @@ mod tests {
             .err()
             .ok_or("a failed implicit re-probe must not report success")?;
         assert!(
-            matches!(error, FeedError::StationsUnreadable { .. }),
+            matches!(error, FeedError::StationProbeFailed { .. }),
             "{error:?}"
         );
         assert!(rendered.contains("already saved"), "{rendered}");

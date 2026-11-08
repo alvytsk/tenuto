@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Adding or re-probing a station now reports what actually went wrong with
+  the probe (the transport's refusal, "… is not a live stream") instead of
+  "cannot use stations: …", which wrongly blamed the stations file for a
+  failure of the stream the listener asked to add.
+
 ## [0.5.0] - 2026-11-07
 
 ### Changed
