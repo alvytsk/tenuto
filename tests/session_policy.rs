@@ -559,11 +559,12 @@ fn a_stopped_seek_target_survives_the_shutdown_force() {
 }
 
 /// A live stream (`Continuity::Indefinite`) is not checkpointable, so its
-/// stored seek target is refused like every other checkpoint write - and the
-/// submit that follows must not answer that refusal with `Forced`, which
-/// exists to defeat the batching that coalesces unchanged snapshots away.
+/// stored seek target is refused like every other checkpoint write. The
+/// writer does not deduplicate identical content, so even an `Ordinary`
+/// submission would be a real disk write of an unchanged snapshot - the
+/// refusal must be answered with no submission at all.
 #[test]
-fn a_stored_seek_on_a_non_checkpointable_media_submits_ordinarily() {
+fn a_stored_seek_on_a_non_checkpointable_media_submits_nothing() {
     let clock = FakeClock::new();
     let mut session = Session::new(PersistedState::default());
     let request = session
@@ -586,21 +587,16 @@ fn a_stored_seek_on_a_non_checkpointable_media_submits_ordinarily() {
     );
     let _ = session.observe(&state_changed(1, PlaybackState::Playing), clock.sample());
 
-    let (state, urgency) = submitted(session.observe(
+    let action = session.observe(
         &PlaybackEvent::SeekTargetStored {
             session_rev: 1,
             target: Duration::from_secs(30),
         },
         clock.sample(),
-    ));
-    assert_eq!(
-        urgency,
-        Urgency::Ordinary,
-        "a refused record must not force an uncoalesced write"
     );
     assert!(
-        state.entry_for(&media("a")).is_none(),
-        "the refusal must have left no checkpoint behind"
+        is_none(&action),
+        "a refused record must not submit even an unchanged snapshot"
     );
 }
 
