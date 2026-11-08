@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shutdown gets its chance, but the next one kills the process with the
   signal's default action instead of being swallowed by a shutdown that
   may be stuck.
+- Station writes serialize on a `stations.lock` beside `stations.json`,
+  like subscriptions already do, instead of relying on the unstated
+  invariant that only the player ever writes the file. A concurrent
+  station command refuses with "Another station update is in progress"
+  rather than saving a stale list over another writer's commit.
 
 ## [0.5.0] - 2026-11-07
 

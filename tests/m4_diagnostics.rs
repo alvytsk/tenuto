@@ -648,6 +648,7 @@ fn a_control_character_in_the_encoding_label_never_reaches_a_terminal() -> Falli
 /// | `StationsUnreadable` | `reason` | `station::store` | A fixed phrase, a quarantine path this process chose, or the same category/line/column reduction — the same shape as `SubscriptionsUnreadable`, never the file's raw bytes. |
 /// | `StationProbeFailed` | `reason` | `library::add_station`, `library::reprobe_station`, `application::feed_ops::station_probe` | A `redact_url`-redacted URL plus the transport's classification — the same redaction discipline as `Remote` — never the stations file's bytes. |
 /// | `SubscriptionsBusy` | — | `library::lock_subscriptions` | Nothing: a fixed phrase. |
+/// | `StationsBusy` | — | `library::lock_stations` | Nothing: a fixed phrase. |
 /// | `InvalidSlug` | `slug` | `subscription::model::validate_slug` | The alias the listener typed. |
 /// | `SlugTaken` | `slug` | `library::subscribe` | A stored, already-validated slug. |
 /// | `AlreadySubscribed` | `slug` | `library::subscribe` | A stored, already-validated slug — deliberately not the URL that matched. |
@@ -671,6 +672,7 @@ fn every_feed_error_variant_has_a_recorded_safe_context() {
             FeedError::StationsUnreadable { .. } => "a fixed phrase or a chosen path",
             FeedError::StationProbeFailed { .. } => "a redacted URL and transport text",
             FeedError::SubscriptionsBusy => "none",
+            FeedError::StationsBusy => "none",
             FeedError::SlugTaken { .. } | FeedError::AlreadySubscribed { .. } => "a stored slug",
             FeedError::BatchIncomplete { .. } => "two integers",
             FeedError::Remote(_) => "already-redacted transport text",
@@ -726,6 +728,7 @@ fn every_feed_error_variant_has_a_recorded_safe_context() {
             reason: "https://radio.example:8010/stream is not a live stream".into(),
         },
         FeedError::SubscriptionsBusy,
+        FeedError::StationsBusy,
         FeedError::InvalidSlug {
             slug: "Радио Т".into(),
         },

@@ -400,6 +400,22 @@ fn lock_subscriptions(subs: &SubscriptionStore) -> Result<ProfileLock, FeedError
     })
 }
 
+/// [`lock_subscriptions`] for `stations.json` (M7.1): every mutating
+/// station function holds `stations.lock` for its whole read-modify-write —
+/// the probe included — instead of resting on the unstated invariant that
+/// only the TUI (under `state.lock`) ever writes the file. Contention
+/// refuses at once; there is no waiting or retry.
+fn lock_stations(stations: &StationStore) -> Result<ProfileLock, FeedError> {
+    ProfileLock::acquire_file(&stations.path().with_file_name("stations.lock")).map_err(|error| {
+        match error {
+            LockError::Contended => FeedError::StationsBusy,
+            other => FeedError::StationsUnreadable {
+                reason: format!("cannot lock stations: {other}"),
+            },
+        }
+    })
+}
+
 /// Narrows a store's `load` to the one outcome a mutation may proceed on: a
 /// writable `Loaded` or `Missing`. Every other `LoadReason` becomes a visible
 /// refusal, so a mutation never overwrites a file the store chose to
@@ -1111,6 +1127,7 @@ pub async fn add_station(
     stations: &StationStore,
     url: &str,
 ) -> Result<AddStationOutcome, FeedError> {
+    let _lock = lock_stations(stations)?;
     let (media, parsed) = station_identity_of(url)?;
     let mut snapshot = load_mutating_stations(stations)?;
 
@@ -1189,6 +1206,7 @@ pub fn remove_station(
     stations: &StationStore,
     slug: &str,
 ) -> Result<RemoveStationOutcome, FeedError> {
+    let _lock = lock_stations(stations)?;
     let mut snapshot = load_mutating_stations(stations)?;
     let before = snapshot.stations.len();
     snapshot.stations.retain(|station| station.slug != slug);
@@ -1213,6 +1231,7 @@ pub async fn reprobe_station(
     stations: &StationStore,
     slug: &str,
 ) -> Result<AddStationOutcome, FeedError> {
+    let _lock = lock_stations(stations)?;
     let mut snapshot = load_mutating_stations(stations)?;
     let index = snapshot
         .stations

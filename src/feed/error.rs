@@ -55,6 +55,8 @@ pub enum FeedError {
     StationProbeFailed { reason: String },
     #[error("Another subscription update is in progress")]
     SubscriptionsBusy,
+    #[error("Another station update is in progress")]
+    StationsBusy,
     #[error("invalid slug {slug:?}; expected 1-32 ASCII lowercase letters, digits or hyphens")]
     InvalidSlug { slug: String },
     #[error("slug already taken: {slug}")]
