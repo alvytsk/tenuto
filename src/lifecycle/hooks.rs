@@ -22,6 +22,7 @@ pub enum TestHook {
     ArtworkEncodingPanic,
     MetadataJobPanic,
     WorkerPanic,
+    StallShutdown,
 }
 
 impl TestHook {
@@ -38,6 +39,7 @@ impl TestHook {
             Some("artwork-encoding-panic") => Self::ArtworkEncodingPanic,
             Some("metadata-job-panic") => Self::MetadataJobPanic,
             Some("worker-panic") => Self::WorkerPanic,
+            Some("stall-shutdown") => Self::StallShutdown,
             _ => Self::None,
         }
     }
@@ -59,6 +61,21 @@ impl TestHook {
         }
     }
 
+    /// Parks the calling thread forever when this value is the requested
+    /// `stage`, after announcing the stall on stderr (`tenuto test hook:
+    /// <name>`) so a process test can sync on the moment the wedge begins.
+    /// Unlike [`Self::panic_at`] this leaves the process alive: the point is
+    /// to hold a graceful path open while something external — a second
+    /// Ctrl-C, a watchdog — acts on a run that cannot finish on its own.
+    pub fn stall_at(self, stage: Self) {
+        if self == stage {
+            eprintln!("tenuto test hook: {}", stage.name());
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -70,6 +87,7 @@ impl TestHook {
             Self::ArtworkEncodingPanic => "artwork-encoding-panic",
             Self::MetadataJobPanic => "metadata-job-panic",
             Self::WorkerPanic => "worker-panic",
+            Self::StallShutdown => "stall-shutdown",
         }
     }
 }

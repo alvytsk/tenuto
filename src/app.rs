@@ -215,6 +215,9 @@ fn run_resolved_locked(
         view.now_playing.as_ref(),
         view.status.as_deref(),
     ) {
+        // `stall-shutdown` wedges here so a process test can hold the
+        // graceful path mid-flush and prove the second Ctrl-C force-quits.
+        TestHook::from_env().stall_at(TestHook::StallShutdown);
         report_flush(runtime.shutdown());
         return failed;
     }
@@ -268,6 +271,9 @@ fn run_resolved_locked(
     // Restore the terminal before waiting on the engine and the disk, and
     // before the caller prints a diagnostic on `outcome` (Ruling 1).
     drop(raw);
+    // `stall-shutdown` wedges here so a process test can hold the graceful
+    // path mid-flush and prove the second Ctrl-C force-quits.
+    TestHook::from_env().stall_at(TestHook::StallShutdown);
     report_flush(runtime.shutdown());
     outcome
 }

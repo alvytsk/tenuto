@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the probe (the transport's refusal, "… is not a live stream") instead of
   "cannot use stations: …", which wrongly blamed the stations file for a
   failure of the stream the listener asked to add.
+- A second Ctrl-C force-quits: the first SIGINT is caught and the graceful
+  shutdown gets its chance, but the next one kills the process with the
+  signal's default action instead of being swallowed by a shutdown that
+  may be stuck.
 
 ## [0.5.0] - 2026-11-07
 
