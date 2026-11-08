@@ -41,7 +41,7 @@ use super::super::outbox::Outbox;
 use super::super::output::cpal_output::OutputFault;
 use super::super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
 use super::super::prepare::{PrepareContext, prepare};
-use super::super::reconnect::{Next, Outage, ReconnectPolicy, retryable};
+use super::super::reconnect::{Outage, ReconnectPolicy, retryable};
 use super::super::resample::Converter;
 use super::super::spectrum::worker::SpectrumPort;
 use super::super::state::PlaybackState;
@@ -58,7 +58,7 @@ use super::{
 
 /// How [`Worker::land`] treats the decoder's answer (M9.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Approach {
+pub(super) enum Approach {
     /// The listener's own seek: refinement may give up after `SEEK_BUDGET`,
     /// and the position is what the decoder reports.
     Seek,
@@ -70,7 +70,7 @@ enum Approach {
 
 /// Where a landing put the decoder.
 #[derive(Clone, Copy, Debug)]
-struct Landing {
+pub(super) struct Landing {
     actual: Duration,
     /// Refinement gave up early, or the decoder stopped short of the target.
     truncated: bool,
@@ -79,7 +79,7 @@ struct Landing {
 /// [`Worker::land`]'s closed outcome. A caller maps each arm to state and
 /// events; none of them has to re-derive which errors are cancellations.
 #[derive(Debug)]
-enum Landed {
+pub(super) enum Landed {
     At(Landing),
     /// A stop, a shutdown or a newer seek retired the landing. The decoder
     /// is at an arbitrary point, and the interrupt still stands for the loop.
@@ -89,13 +89,13 @@ enum Landed {
 
 /// M10 §4: what a resume must establish, held until a landing is installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PendingResume {
+pub(super) enum PendingResume {
     Seek(Duration),
     Restart,
 }
 
 impl PendingResume {
-    fn target(self) -> Duration {
+    pub(super) fn target(self) -> Duration {
         match self {
             Self::Seek(target) => target,
             Self::Restart => Duration::ZERO,
@@ -123,15 +123,15 @@ pub(super) struct Worker {
     /// Read by the seek gates in `restore` and `seek_to` so they answer from
     /// one field rather than reaching into a source that may currently be
     /// `None` (a retired remote source between a stop and its reopen).
-    capabilities: MediaCapabilities,
+    pub(super) capabilities: MediaCapabilities,
     converter: Option<Converter>,
     /// Interleaved output samples the ring has not accepted yet.
     staging: Vec<f32>,
-    state: PlaybackState,
+    pub(super) state: PlaybackState,
     session_rev: u64,
     /// The logical resume point. Stop and recreation preserve it; load,
     /// restart and successful seeks establish a new one.
-    position: Duration,
+    pub(super) position: Duration,
     /// Whether `position` is decoder-established or a byte-offset estimate
     /// (§3, M3.1). Sticky: ordinary playback never changes it, and a seek
     /// that performs no actual `seek_refined` call (`land`'s no-op, or a
@@ -139,10 +139,10 @@ pub(super) struct Worker {
     /// resetting it to `Established` by default. `publish_progress` mirrors
     /// this into `facts.provenance` on every pass, the same way it mirrors
     /// `position` and `degraded`.
-    position_provenance: PositionProvenance,
+    pub(super) position_provenance: PositionProvenance,
     /// A seek or restart stored but not yet established (M10 §4). Read, never
     /// taken, by every resume; cleared only once a landing is installed.
-    pending: Option<PendingResume>,
+    pub(super) pending: Option<PendingResume>,
     /// The established duration of a finite source in recovery, cached on
     /// entry because the decoder that knew it is gone (M10 §3). Clamps a seek
     /// stored offline. Cleared by `load`.
@@ -181,10 +181,10 @@ pub(super) struct Worker {
     attempt_failure: Option<PlaybackError>,
     shutting_down: bool,
     receivers_gone: bool,
-    commands: Receiver<PlaybackCommand>,
+    pub(super) commands: Receiver<PlaybackCommand>,
     /// The engine's one event queue and its delivery rules, shared with the
     /// wait hook (`playback::outbox`).
-    outbox: Arc<Outbox>,
+    pub(super) outbox: Arc<Outbox>,
     liveness: Sender<()>,
     wake: Receiver<()>,
     interrupt: Arc<AtomicU8>,
@@ -209,10 +209,10 @@ pub(super) struct Worker {
     /// Finding 2). Handed to `prepare` as `PrepareContext::interrupt` for
     /// every source this worker ever opens, and to `WaitService` at
     /// construction — the same instance throughout, never swapped.
-    source_interrupt: Arc<SourceInterrupt>,
+    pub(super) source_interrupt: Arc<SourceInterrupt>,
     /// The handle's out-of-band view of `capabilities`, written only by
     /// `set_capabilities` (M7 §6.1).
-    traits: Arc<SourceTraits>,
+    pub(super) traits: Arc<SourceTraits>,
     /// Shared with `EngineHandle::set_http`, so a service installed after
     /// this worker was spawned is visible the next time `load` builds a
     /// `PrepareContext`.
@@ -220,7 +220,7 @@ pub(super) struct Worker {
     /// Shared with `EngineHandle::set_reconnect_policy`. Read fresh at every
     /// decision point, never cached, so an installed policy takes effect at
     /// once (M7 §7).
-    reconnect_policy: Arc<Mutex<ReconnectPolicy>>,
+    pub(super) reconnect_policy: Arc<Mutex<ReconnectPolicy>>,
     /// The outage in progress: `Some` from the first retryable failure of a
     /// playing connection, live or finite (M10), until sustained playback
     /// ends it, a failure ends the session (every one of them, through
@@ -228,7 +228,7 @@ pub(super) struct Worker {
     /// included - stop, a replacing load, shutdown). `None` at every other
     /// moment - which is what lets each outage be judged against a budget of
     /// its own.
-    outage: Option<Outage>,
+    pub(super) outage: Option<Outage>,
     /// Where heard-time accounting last read the current generation (M10
     /// §6): its number and how far past its anchor the position was.
     heard_mark: Option<(u32, Duration)>,
@@ -534,7 +534,7 @@ impl Worker {
     /// condition — recurs throughout this file (`reinstall`, `restore`,
     /// `restart`, `play`'s match guard) and is always this same rule, not
     /// repeated at every site.
-    fn announce_playing(&mut self) {
+    pub(super) fn announce_playing(&mut self) {
         if lock(&self.transport).is_some() {
             self.set_state(PlaybackState::Playing);
         }
@@ -554,7 +554,7 @@ impl Worker {
     /// half, kept separate for the two hook-landing pause writes: the wait
     /// hook announced `Paused` itself when it parked the transport inside a
     /// blocked read, and that announcement is allowed to stand alone.
-    fn adopt_state(&mut self, state: PlaybackState) -> bool {
+    pub(super) fn adopt_state(&mut self, state: PlaybackState) -> bool {
         // M10 §7: every exit from Reconnecting ends a finite recovery.
         if state != PlaybackState::Reconnecting {
             self.traits.recovering.store(false, Ordering::Release);
@@ -570,7 +570,7 @@ impl Worker {
         true
     }
 
-    fn set_state(&mut self, state: PlaybackState) {
+    pub(super) fn set_state(&mut self, state: PlaybackState) {
         if !self.adopt_state(state) {
             return;
         }
@@ -601,7 +601,7 @@ impl Worker {
     /// than only read a string a human wrote; M1's local failures have none,
     /// which is why `fail` is still the entry point every local call site
     /// uses (Ruling 1).
-    fn fail_with(&mut self, message: String, cause: Option<RemoteFailure>) {
+    pub(super) fn fail_with(&mut self, message: String, cause: Option<RemoteFailure>) {
         if self.state == PlaybackState::Failed {
             // A repeating fatal fault must not re-announce the same failure
             // every iteration.
@@ -660,7 +660,7 @@ impl Worker {
     /// variant is walked with `remote_cause`, which is how a decode error
     /// Symphonia mangled on the way up (Ruling 4 finding, `prepare.rs`'s own
     /// `promote_latched`) still reports the typed cause underneath it.
-    fn fail_from(&mut self, error: PlaybackError) {
+    pub(super) fn fail_from(&mut self, error: PlaybackError) {
         match error {
             PlaybackError::Remote(failure) => {
                 let message = failure.to_string();
@@ -1031,7 +1031,7 @@ impl Worker {
     /// previous generation's *transport*, holding the frames already staged
     /// in its ring, which go on playing out while the caller decides what the
     /// failure means. A failure from step 3 onward has torn even that down.
-    fn fresh_open(&mut self) -> Result<(), PlaybackError> {
+    pub(super) fn fresh_open(&mut self) -> Result<(), PlaybackError> {
         let Some(location) = self.descriptor.clone() else {
             return Err(PlaybackError::UnsupportedInput {
                 path: Default::default(),
@@ -1112,68 +1112,19 @@ impl Worker {
 
     /// Give up what `fresh_open` had opened but not yet announced, leaving no
     /// transport and no half-adopted decoder behind.
-    fn abandon_attempt(&mut self) {
+    pub(super) fn abandon_attempt(&mut self) {
         self.teardown();
         self.source_interrupt.retire();
         self.retire_remote_source();
     }
 
-    /// M10 §5: one recovery attempt for a finite source.
-    ///
-    /// `Ok` means `Playing` was announced and the pending intent, if any, was
-    /// reported. On `Err` nothing of the attempt remains: no transport, no
-    /// decoder, `pending` untouched and the position as it was captured.
-    fn reconnect_finite(&mut self) -> Result<(), PlaybackError> {
-        // 1. Capture and tear down before any network I/O, so the ring cannot
-        //    move once the position is read. A no-op after the first attempt,
-        //    which already left no transport.
-        self.capture_and_teardown();
-        let previous = (self.position, self.position_provenance);
-        // 2.
-        let target = self.pending.map_or(self.position, PendingResume::target);
-        // 3 + 4. `ensure_source_open` sets `expected = Finite`, so a reopen
-        //    that answers as a station fails with `ResourceChanged`.
-        // 5. `land` adopts the landing as the anchor before the transport
-        //    exists: `open_transport` copies `self.position` into the new
-        //    `TransportCore`, so a landing assigned afterwards would play from
-        //    the target while progress and every later capture counted from
-        //    the old position.
-        let landed = match self.ensure_source_open() {
-            Ok(_) => self.land(target, Approach::Preserve),
-            Err(error) => Landed::Failed(error),
-        };
-        let landing = match landed {
-            Landed::At(landing) => landing,
-            Landed::Cancelled => {
-                self.abandon_attempt();
-                return Err(PlaybackError::Cancelled);
-            }
-            Landed::Failed(error) => {
-                self.abandon_attempt();
-                return Err(error);
-            }
-        };
-        // 6 + 7.
-        if let Err(error) = self.prime_attempt() {
-            (self.position, self.position_provenance) = previous;
-            return Err(error);
-        }
-        // 8.
-        self.start_running();
-        self.announce_playing();
-        self.complete_pending(landing);
-        Ok(())
-    }
-
-    /// M10 §5 steps 6–7, shared by `reconnect_finite` and `restore`: install
-    /// and prime with a read failure reported here rather than through
     /// `fail_with`, then commit only if nothing failed and nothing cancelled.
     /// `Ok` leaves the transport primed and parked, for the caller to start;
     /// `Err` leaves no transport and no decoder.
     ///
     /// No `primed` check, unlike `fresh_open`: a finite target at the very
     /// end primes nothing and is still a landing, which end-of-track follows.
-    fn prime_attempt(&mut self) -> Result<(), PlaybackError> {
+    pub(super) fn prime_attempt(&mut self) -> Result<(), PlaybackError> {
         self.attempting = true;
         self.attempt_failure = None;
         let opened = self.reinstall(false);
@@ -1296,7 +1247,7 @@ impl Worker {
     /// Release the current generation into `Run`. `prime_and_run`'s tail,
     /// extracted so `fresh_open` can prime first and only start the output
     /// once the new source has proven it produces audio (M7 §5.2).
-    fn start_running(&mut self) {
+    pub(super) fn start_running(&mut self) {
         let mut guard = lock(&self.transport);
         if let Some(core) = guard.as_mut() {
             let generation = core.handshake.generation();
@@ -1306,14 +1257,14 @@ impl Worker {
 
     /// Whether a stop or a shutdown is pending. Read rather than consumed:
     /// the loop's own `swap(0)` is what acts on it.
-    fn interrupted(&self) -> bool {
+    pub(super) fn interrupted(&self) -> bool {
         stop_or_shutdown(self.interrupt.load(Ordering::Acquire))
     }
 
     /// M10 §6: credit the outage with what was heard since the last reading.
     /// A new generation (a seek, a reopen, a device rebuild) starts again from
     /// its own anchor, so a seek moves nothing here.
-    fn settle_heard(&mut self) {
+    pub(super) fn settle_heard(&mut self) {
         let Some(anchor) = lock(&self.transport).as_ref().map(|core| core.anchor) else {
             return;
         };
@@ -1367,7 +1318,7 @@ impl Worker {
         }
     }
 
-    fn capture_and_teardown(&mut self) {
+    pub(super) fn capture_and_teardown(&mut self) {
         let rate = self
             .config
             .as_ref()
@@ -1678,124 +1629,6 @@ impl Worker {
             return;
         }
         self.enter_reconnecting(failure);
-    }
-
-    /// M7 §7, M10 §3. A playing connection, or an attempt, failed retryably.
-    ///
-    /// The outage is the thing that spans attempts: it is begun by the first
-    /// such failure and outlives every attempt until sustained playback ends
-    /// it, the budget gives up, or the listener ends the request.
-    fn enter_reconnecting(&mut self, failure: RemoteFailure) {
-        let now = self.source_interrupt.now();
-        let policy = *lock(&self.reconnect_policy);
-        let outage = self.outage.get_or_insert_with(|| Outage::begin(now));
-        match outage.failed(now, &policy) {
-            Next::GiveUp => self.fail_with(format!("{failure}"), Some(failure)),
-            Next::AttemptAt(_) => {
-                if self.is_indefinite() {
-                    tracing::info!(reason = %failure, "live source lost; reconnecting");
-                } else {
-                    let position = self.position;
-                    tracing::info!(reason = %failure, ?position, "connection lost; reconnecting");
-                    self.traits.recovering.store(true, Ordering::Release);
-                }
-                // The output transport stays up so the ring plays out; only
-                // the source goes.
-                self.source_interrupt.retire();
-                self.retire_remote_source();
-                self.set_state(PlaybackState::Reconnecting);
-            }
-        }
-    }
-
-    /// Run from the loop, never from a sleep: commands stay serviced through
-    /// every backoff, so a pause, a stop, a replacing load or a shutdown ends
-    /// the attempts at once rather than after the current one.
-    fn service_reconnect(&mut self) {
-        match self.state {
-            PlaybackState::Playing => {
-                self.settle_heard();
-                let policy = *lock(&self.reconnect_policy);
-                if self
-                    .outage
-                    .as_ref()
-                    .is_some_and(|outage| outage.is_over(&policy))
-                {
-                    self.outage = None;
-                }
-            }
-            PlaybackState::Reconnecting => {
-                // M7 §6: a cancellation already in hand ends recovery *now*.
-                // An attempt begun here blocks this whole pass inside an open
-                // that may last `limits.headers`, or inside a priming read a
-                // silent station never answers; the stop, pause or replacing
-                // load that cancels it is only looked at when the loop comes
-                // back round, so recovery would outlive the explicit Play it
-                // belongs to by a whole attempt. The interrupt word covers a
-                // stop or a shutdown raised since step 1 consumed the flags
-                // (the loop's `select!` is free to answer the wake that
-                // carried one and leave the flag standing for the next pass);
-                // a queued command covers a pause or a replacing load, which
-                // travel on the command channel and cannot be peeked at. Any
-                // queued command is reason enough to come back for it: the
-                // loop takes one per pass, so an attempt is postponed by a
-                // pass, never dropped. Commands are only taken while nothing
-                // is backed up, so a blocked outbox must not be allowed to
-                // stall recovery indefinitely - hence the backlog test.
-                let command_waiting = self.outbox.is_empty() && !self.commands.is_empty();
-                if self.interrupted() || command_waiting {
-                    return;
-                }
-                if !self
-                    .outage
-                    .as_ref()
-                    .is_some_and(|outage| outage.due(self.source_interrupt.now()))
-                {
-                    return;
-                }
-                let attempt = if self.is_indefinite() {
-                    self.fresh_open()
-                } else {
-                    self.reconnect_finite()
-                };
-                match attempt {
-                    Ok(()) => {
-                        if let Some(outage) = self.outage.as_mut() {
-                            outage.playing_from();
-                        }
-                    }
-                    // The command that cancelled it decides what happens next.
-                    Err(error) if is_cancelled(&error) => {}
-                    Err(error) => {
-                        let failure = match error {
-                            PlaybackError::Remote(failure) => failure,
-                            other => match remote_cause(&other) {
-                                Some(failure) => failure,
-                                // Not the server's fault: a device that will
-                                // not open, or any other error with no remote
-                                // cause, is never retried against a remote
-                                // budget.
-                                None => {
-                                    self.fail_from(other);
-                                    return;
-                                }
-                            },
-                        };
-                        // The attempt may have torn the old transport down
-                        // and announced nothing; stay in Reconnecting —
-                        // quietly, which for this no-change re-assert is
-                        // exactly what `adopt_state` does.
-                        self.adopt_state(PlaybackState::Reconnecting);
-                        if retryable(&failure, self.capabilities.continuity) {
-                            self.enter_reconnecting(failure);
-                        } else {
-                            self.fail_with(format!("{failure}"), Some(failure));
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 
     /// End of track fires only once every pushed frame has been played, which
@@ -2340,7 +2173,7 @@ impl Worker {
     /// and only then reported: `SeekCompleted` for a seek, `RestartEstablished`
     /// for a restart. Emitting at store time would claim a landing no decoder
     /// had confirmed.
-    fn complete_pending(&mut self, landing: Landing) {
+    pub(super) fn complete_pending(&mut self, landing: Landing) {
         let Landing { actual, truncated } = landing;
         let session_rev = self.session_rev;
         let provenance = self.position_provenance;
@@ -2854,7 +2687,7 @@ impl Worker {
     ///
     /// Cancellable, so a stop or a shutdown is not left waiting for a
     /// refinement to finish; the deadline is fresh on every call (§5.4).
-    fn land(&mut self, target: Duration, approach: Approach) -> Landed {
+    pub(super) fn land(&mut self, target: Duration, approach: Approach) -> Landed {
         let target = self.clamp_target(target);
         let deadline = self.seek_deadline();
         let Some(source) = self.source.as_mut() else {
@@ -2950,7 +2783,7 @@ impl Worker {
     /// local `DecodedSource` is tied to a fetch that a stop, a seek or a
     /// shutdown could have retired, so M1's decoder-survives-a-stop contract
     /// is untouched.
-    fn retire_remote_source(&mut self) {
+    pub(super) fn retire_remote_source(&mut self) {
         if self.source_is_remote() {
             self.source = None;
         }
@@ -3009,7 +2842,7 @@ impl Worker {
         );
     }
 
-    fn is_indefinite(&self) -> bool {
+    pub(super) fn is_indefinite(&self) -> bool {
         self.capabilities.continuity == Continuity::Indefinite
     }
 
@@ -3030,7 +2863,7 @@ impl Worker {
     /// retirement dropped the decoder), and by `restart`. Giving it to only
     /// one of them is what makes a stopped seek fail with "nothing is
     /// loaded" on a source that is very much loaded.
-    fn ensure_source_open(&mut self) -> Result<bool, PlaybackError> {
+    pub(super) fn ensure_source_open(&mut self) -> Result<bool, PlaybackError> {
         if self.source.is_some() {
             return Ok(false);
         }
@@ -3183,7 +3016,7 @@ fn is_retired_read(error: &PlaybackError) -> bool {
 /// cancelled the operation is still set, so the loop's next pass turns it
 /// into the stop, seek or shutdown the user actually asked for, which is why
 /// every caller of this function treats the two identically.
-fn is_cancelled(error: &PlaybackError) -> bool {
+pub(super) fn is_cancelled(error: &PlaybackError) -> bool {
     matches!(error, PlaybackError::Cancelled)
         // A direct `PlaybackError::Remote(RemoteFailure::Cancelled)` - what
         // `prepare`/`HttpMediaSource::open` and `ensure_source_open` produce,

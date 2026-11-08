@@ -46,6 +46,7 @@ const SEEK_BUDGET: Duration = Duration::from_secs(5);
 const RESUME_TOLERANCE: Duration = Duration::from_micros(100);
 
 mod handle;
+mod reconnect;
 mod worker;
 
 pub use handle::{EngineHandle, EventStream};
