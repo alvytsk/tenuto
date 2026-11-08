@@ -799,7 +799,16 @@ struct Worker {
     /// the next `load` clears it, before announcing its own `Loading`.
     adopted_load: Option<LoadRequestId>,
     volume: Volume,
-    generation: u16,
+    /// The transport generation: bumped for every new source, seek, device
+    /// rebuild. Worker-side this is u32 — the comparisons it feeds
+    /// (`heard_mark`, the rescue-record match) live as long as the worker,
+    /// and 65,536 bumps — a held key-repeat's worth of seeks — would alias
+    /// a u16 onto a mark recorded a lifetime ago. The RT wire keeps u16
+    /// (`Handshake`, `Timeline`, `OutputLink`'s packed word, the spectrum
+    /// tap): an in-flight span or ack survives at most a handful of
+    /// generations, so the low 16 bits cannot alias there. Cast at the
+    /// boundary, never widened back for a comparison.
+    generation: u32,
     pushed_total: u64,
     source_eof: bool,
     converter_flushed: bool,
@@ -863,7 +872,7 @@ struct Worker {
     outage: Option<Outage>,
     /// Where heard-time accounting last read the current generation (M10
     /// §6): its number and how far past its anchor the position was.
-    heard_mark: Option<(u16, Duration)>,
+    heard_mark: Option<(u32, Duration)>,
     /// A `Send + Sync` mirror of the device's current instant, so
     /// `WaitService` — reachable from inside a decoder read that already
     /// holds `&mut self.source` and so cannot see the rest of `Worker`, let
@@ -1609,7 +1618,9 @@ impl Worker {
         )?);
         let mut handshake = Handshake::new(Arc::clone(&link), span_rx);
         self.reset_generation_state();
-        let generation = self.generation;
+        // The wire keeps the low 16 bits of the generation (see the field's
+        // doc); in-flight protocol state cannot live long enough to alias.
+        let generation = self.generation as u16;
         // The anchor this generation counts from: captured now, before the
         // new `TransportCore` exists to hold it, and handed straight to its
         // constructor below.
@@ -1853,7 +1864,9 @@ impl Worker {
             return self.rebuild("handshake timeout", playing);
         }
         self.reset_generation_state();
-        let generation = self.generation;
+        // The wire keeps the low 16 bits of the generation (see the field's
+        // doc); in-flight protocol state cannot live long enough to alias.
+        let generation = self.generation as u16;
         let anchor = self.position;
         let installed = {
             let mut guard = lock(&self.transport);
@@ -2012,7 +2025,7 @@ impl Worker {
         self.degraded = true;
         if let Some(link) = link
             && let Some(record) = link.take_rescue_after_teardown()
-            && record.generation == generation
+            && u32::from(record.generation) == generation
         {
             self.position = anchor + frames_to_duration(record.media_total_after, rate);
         }
@@ -4200,6 +4213,31 @@ mod tests {
             established_duration(&metadata),
             Some(Duration::from_secs(100)),
             "an established duration is the M1/M2 ceiling, unchanged"
+        );
+    }
+
+    /// The worker-side generation is u32: 65,536 bumps — a held key-repeat's
+    /// worth of seeks, or one reopen per outage across a long session — must
+    /// not wrap back onto a mark recorded a lifetime ago. With the u16 this
+    /// replaced, exactly this many bumps landed the generation back on the
+    /// seeded mark's value, and `settle_heard`'s match arm would credit the
+    /// whole gap as newly heard. The wire's 16-bit truncation is the
+    /// handshake/link suites' concern, not this one's.
+    #[test]
+    fn a_generation_does_not_wrap_onto_a_live_mark_after_65_536_bumps() {
+        let (mut worker, _progress, _events) = idle_worker();
+        worker.generation = 1;
+        worker.heard_mark = Some((1, Duration::from_millis(500)));
+
+        for _ in 0..65_536 {
+            worker.reset_generation_state();
+        }
+
+        assert_eq!(worker.generation, 65_537);
+        assert_ne!(
+            worker.heard_mark.map(|(marked, _)| marked),
+            Some(worker.generation),
+            "a mark from generation 1 must not match after 65,536 bumps"
         );
     }
 }

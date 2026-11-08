@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   durable file) are swept the next time that directory is written. A
   temporary whose writing process is still alive is left alone, so a
   concurrent player can never lose an in-flight write to the sweep.
+- The transport generation the worker compares against is 32 bits now: a
+  held key-repeat could seek through all 65,536 16-bit values and alias a
+  position mark recorded a lifetime ago. The real-time wire keeps its
+  16-bit field, where in-flight state lives for a handful of generations
+  at most.
 
 ## [0.5.0] - 2026-11-07
 
