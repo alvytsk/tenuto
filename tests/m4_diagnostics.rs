@@ -319,19 +319,26 @@ fn a_transport_failure_names_the_host_and_redacts_the_query() -> Fallible {
 /// reduces the whole thing to a category and a position, so the message says
 /// *where* the file is broken without repeating *what* it holds.
 ///
-/// Both refusal tiers are exercised, because they are reached by different
-/// code: the first identity never parses at all (serde's path), the second
-/// parses perfectly and is then refused by §5.6's semantic validation for
-/// belonging to no feed.
+/// Three refusal tiers are exercised, reached by different code: the first
+/// identity never parses at all (serde's path); the second carries embedded
+/// credentials, which the identity type itself refuses since the
+/// public-source bar moved into it (#70) - the same serde path, one tier
+/// earlier than it used to be caught; the third parses perfectly and is
+/// then refused by §5.6's semantic validation for belonging to no feed.
 #[test]
 fn a_cache_whose_media_id_is_refused_reports_where_not_what() -> Fallible {
     let cases = [
         ("unparseable", "remote:not a url SECRETVALUE", true),
+        // A credential-carrying URL used to deserialize and then be refused
+        // by §5.6's validation; the unified public-source bar refuses it at
+        // deserialize now - the same safe category-and-position reduction,
+        // one tier earlier.
         (
-            "foreign",
+            "credentials",
             "remote:https://user:secret@example.org/a.mp3?token=SECRETVALUE",
-            false,
+            true,
         ),
+        ("foreign", "remote:https://other.example.org/a.mp3", false),
     ];
 
     for (label, media_id, from_serde) in cases {
