@@ -1229,16 +1229,29 @@ impl TestEngine {
     }
 
     pub fn count_events(&mut self, predicate: impl Fn(&PlaybackEvent) -> bool) -> usize {
-        // Drain until the engine goes quiet: several consecutive pumps that
-        // add nothing. No fixed wall-clock window - idle, this returns at
-        // once; loaded, the drain keeps going for as long as events are
-        // actually still arriving, which is what an exact count needs.
-        let mut quiet = 0;
-        while quiet < 5 {
+        // Drain until the engine has been observably quiet for a stretch, or
+        // a 200 ms ceiling passes. The settle beats between pumps are what
+        // makes "quiet" mean something: an event emitted a scheduling beat
+        // after the last one needs that room to arrive, and consecutive
+        // non-blocking pumps alone can read an empty beat as the end of the
+        // stream. Under load the drain simply rides to the ceiling, exactly
+        // like the fixed window it replaced - but a genuinely quiet engine
+        // is done in a fraction of it.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let quiet_needed = Duration::from_millis(50);
+        let mut quiet_since: Option<Instant> = None;
+        while Instant::now() < deadline {
             let before = lock(&self.inbox).len();
             self.pump_events();
-            let added = lock(&self.inbox).len() - before;
-            quiet = if added == 0 { quiet + 1 } else { 0 };
+            if lock(&self.inbox).len() > before {
+                quiet_since = None;
+            } else {
+                let quiet = quiet_since.get_or_insert_with(Instant::now);
+                if quiet.elapsed() >= quiet_needed {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
         lock(&self.inbox).iter().filter(|e| predicate(e)).count()
     }
