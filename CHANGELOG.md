@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- After a resampler error left the channel planes unequal, every later
+  chunk resampled the channels against the wrong frames of each other:
+  the planes are truncated back into alignment first, so a resampler
+  error drops that chunk's audio on all channels at once instead of one
+  channel drifting ahead of the others.
 - Adding or re-probing a station now reports what actually went wrong with
   the probe (the transport's refusal, "… is not a live stream") instead of
   "cannot use stations: …", which wrongly blamed the stations file for a
