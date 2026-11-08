@@ -9,7 +9,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSource;
@@ -27,6 +27,7 @@ use crate::telemetry::redact_url;
 
 use super::decode::DecodedSource;
 use super::error::PlaybackError;
+use super::lock;
 
 pub struct Prepared {
     pub source: DecodedSource,
@@ -138,15 +139,6 @@ fn open_http(url: &Url, context: &PrepareContext) -> Result<DecodedSource, Playb
         decoded.set_fallback_title(name);
     }
     Ok(decoded)
-}
-
-/// A poisoned lock means a thread already panicked while holding it; there is
-/// nothing better to do than carry on with the state it left.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 /// The most recent [`RemoteFailure`] a read or seek produced, cleared the

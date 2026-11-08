@@ -400,6 +400,22 @@ fn lock_subscriptions(subs: &SubscriptionStore) -> Result<ProfileLock, FeedError
     })
 }
 
+/// [`lock_subscriptions`] for `stations.json` (M7.1): every mutating
+/// station function holds `stations.lock` for its whole read-modify-write —
+/// the probe included — instead of resting on the unstated invariant that
+/// only the TUI (under `state.lock`) ever writes the file. Contention
+/// refuses at once; there is no waiting or retry.
+fn lock_stations(stations: &StationStore) -> Result<ProfileLock, FeedError> {
+    ProfileLock::acquire_file(&stations.path().with_file_name("stations.lock")).map_err(|error| {
+        match error {
+            LockError::Contended => FeedError::StationsBusy,
+            other => FeedError::StationsUnreadable {
+                reason: format!("cannot lock stations: {other}"),
+            },
+        }
+    })
+}
+
 /// Narrows a store's `load` to the one outcome a mutation may proceed on: a
 /// writable `Loaded` or `Missing`. Every other `LoadReason` becomes a visible
 /// refusal, so a mutation never overwrites a file the store chose to
@@ -471,11 +487,10 @@ fn load_mutating_stations(stations: &StationStore) -> Result<StationSnapshot, Fe
     .map_err(|reason| FeedError::StationsUnreadable { reason })
 }
 
-/// Parses `url` and validates it against the same public-source bar
-/// [`crate::http::document`] holds a feed's `origin` to (§6.7): HTTP(S)
-/// with a host, and no embedded userinfo. Re-expressed here, rather than
-/// reused from that module, because this check must run — and be able to
-/// reject a bad URL — *before* any [`HttpService`] call, including the ones
+/// Parses `url` and validates it against the public-source bar
+/// (`src/media`, one implementation for the whole crate; §6.7): HTTP(S)
+/// with a host, and no embedded userinfo. Runs here — and is able to reject
+/// a bad URL — *before* any [`HttpService`] call, including the ones
 /// `AlreadySubscribed` and slug derivation need first.
 fn validate_public_url(url: &str) -> Result<Url, FeedError> {
     let invalid = |reason: &'static str| {
@@ -485,10 +500,10 @@ fn validate_public_url(url: &str) -> Result<Url, FeedError> {
         })
     };
     let parsed = Url::parse(url).map_err(|_| invalid("not a valid URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if !crate::media::is_http_url_with_host(&parsed) {
         return Err(invalid("expected http(s) with a host"));
     }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    if !crate::media::is_public_source_url(&parsed) {
         return Err(invalid("URLs with embedded credentials are not supported"));
     }
     Ok(parsed)
@@ -1111,6 +1126,7 @@ pub async fn add_station(
     stations: &StationStore,
     url: &str,
 ) -> Result<AddStationOutcome, FeedError> {
+    let _lock = lock_stations(stations)?;
     let (media, parsed) = station_identity_of(url)?;
     let mut snapshot = load_mutating_stations(stations)?;
 
@@ -1173,10 +1189,10 @@ pub async fn add_station(
         // redirect, …) gets an error notice carrying the reason instead.
         Err(
             failure @ (RemoteFailure::UnsupportedLiveMedia | RemoteFailure::IcyFramingUnsupported),
-        ) => Err(FeedError::StationsUnreadable {
+        ) => Err(FeedError::StationProbeFailed {
             reason: format!("{} is not a live stream: {failure}", redact_url(url)),
         }),
-        Err(failure) => Err(FeedError::StationsUnreadable {
+        Err(failure) => Err(FeedError::StationProbeFailed {
             reason: format!("{}: {failure}", redact_url(url)),
         }),
     }
@@ -1189,6 +1205,7 @@ pub fn remove_station(
     stations: &StationStore,
     slug: &str,
 ) -> Result<RemoveStationOutcome, FeedError> {
+    let _lock = lock_stations(stations)?;
     let mut snapshot = load_mutating_stations(stations)?;
     let before = snapshot.stations.len();
     snapshot.stations.retain(|station| station.slug != slug);
@@ -1213,6 +1230,7 @@ pub async fn reprobe_station(
     stations: &StationStore,
     slug: &str,
 ) -> Result<AddStationOutcome, FeedError> {
+    let _lock = lock_stations(stations)?;
     let mut snapshot = load_mutating_stations(stations)?;
     let index = snapshot
         .stations
@@ -1233,7 +1251,7 @@ pub async fn reprobe_station(
                 identity,
             })
         }
-        Err(failure) => Err(FeedError::StationsUnreadable {
+        Err(failure) => Err(FeedError::StationProbeFailed {
             reason: format!(
                 "{} could not be reprobed: {failure}",
                 redact_url(url.as_str())

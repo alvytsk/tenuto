@@ -558,6 +558,52 @@ fn a_stopped_seek_target_survives_the_shutdown_force() {
     );
 }
 
+/// A live stream (`Continuity::Indefinite`) is not checkpointable, so its
+/// stored seek target is refused like every other checkpoint write - and the
+/// submit that follows must not answer that refusal with `Forced`, which
+/// exists to defeat the batching that coalesces unchanged snapshots away.
+#[test]
+fn a_stored_seek_on_a_non_checkpointable_media_submits_ordinarily() {
+    let clock = FakeClock::new();
+    let mut session = Session::new(PersistedState::default());
+    let request = session
+        .register_load(LoadTarget::Detached, &media("a"))
+        .unwrap_or_else(|error| panic!("room for a load: {error:?}"));
+    let _ = session.observe(
+        &PlaybackEvent::Loaded {
+            session_rev: 1,
+            request,
+            media: media("a"),
+            metadata: MediaMetadata::default(),
+            capabilities: MediaCapabilities {
+                continuity: Continuity::Indefinite,
+                seek: SeekSupport::Native,
+            },
+            position: Duration::ZERO,
+            disposition: StartDisposition::Fresh,
+        },
+        clock.sample(),
+    );
+    let _ = session.observe(&state_changed(1, PlaybackState::Playing), clock.sample());
+
+    let (state, urgency) = submitted(session.observe(
+        &PlaybackEvent::SeekTargetStored {
+            session_rev: 1,
+            target: Duration::from_secs(30),
+        },
+        clock.sample(),
+    ));
+    assert_eq!(
+        urgency,
+        Urgency::Ordinary,
+        "a refused record must not force an uncoalesced write"
+    );
+    assert!(
+        state.entry_for(&media("a")).is_none(),
+        "the refusal must have left no checkpoint behind"
+    );
+}
+
 /// stop → seek to 30 s → the same iteration's tick. Both the stop's force and
 /// the target are outstanding, and the target is what the checkpoint uses.
 #[test]

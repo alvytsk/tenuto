@@ -1229,10 +1229,28 @@ impl TestEngine {
     }
 
     pub fn count_events(&mut self, predicate: impl Fn(&PlaybackEvent) -> bool) -> usize {
-        // Give anything still in flight a moment to arrive.
-        let until = Instant::now() + Duration::from_millis(200);
-        while Instant::now() < until {
+        // Drain until the engine has been observably quiet for a stretch, or
+        // a 200 ms ceiling passes. The settle beats between pumps are what
+        // makes "quiet" mean something: an event emitted a scheduling beat
+        // after the last one needs that room to arrive, and consecutive
+        // non-blocking pumps alone can read an empty beat as the end of the
+        // stream. Under load the drain simply rides to the ceiling, exactly
+        // like the fixed window it replaced - but a genuinely quiet engine
+        // is done in a fraction of it.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let quiet_needed = Duration::from_millis(50);
+        let mut quiet_since: Option<Instant> = None;
+        while Instant::now() < deadline {
+            let before = lock(&self.inbox).len();
             self.pump_events();
+            if lock(&self.inbox).len() > before {
+                quiet_since = None;
+            } else {
+                let quiet = quiet_since.get_or_insert_with(Instant::now);
+                if quiet.elapsed() >= quiet_needed {
+                    break;
+                }
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         lock(&self.inbox).iter().filter(|e| predicate(e)).count()

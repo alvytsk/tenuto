@@ -650,7 +650,7 @@ impl<'a> Walker<'a> {
         }
         let image = href
             .and_then(|value| resolved_url(Some(base), &value))
-            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+            .filter(crate::media::is_public_source_url);
         match parent {
             Context::RssItem | Context::AtomEntry => {
                 if let Some(builder) = self.item.as_mut() {
@@ -748,7 +748,7 @@ impl<'a> Walker<'a> {
             .href
             .as_deref()
             .and_then(|href| resolved_url(Some(base), href))
-            .filter(|url| matches!(url.scheme(), "http" | "https"));
+            .filter(crate::media::is_public_source_url);
         match url {
             Some(url) => {
                 let length = candidate

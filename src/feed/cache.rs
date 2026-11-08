@@ -195,10 +195,11 @@ fn check_versions(schema_version: u32, parser_version: u32) -> Result<(), CacheD
     Ok(())
 }
 
-/// Whether a URL is HTTP(S) with a host — the same usability bar §4.5 and
+/// Whether a URL clears the public-source bar (`src/media`, one
+/// implementation for the whole crate) - the same usability bar §4.5 and
 /// [`crate::feed::episode::bind_feed`] hold enclosures to.
 fn is_http_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+    crate::media::is_public_source_url(url)
 }
 
 /// §5.6's semantic validation, extended by this task's additional checks:

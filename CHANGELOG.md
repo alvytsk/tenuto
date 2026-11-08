@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Vestigial internals are gone: the write-only seek bit of the playback
+  interrupt word, two never-constructed HTTP `Operation` variants, a stale
+  `#[allow(dead_code)]`, and six copies of the same poison-tolerant lock
+  helper, which playback modules now share as one.
+- The real-time audio callback fills its buffers with one chunk read off
+  the ring instead of one atomic operation per sample, roughly two orders
+  of magnitude fewer ring movements per fill.
+- A stored seek on a medium that cannot be checkpointed (a live stream, or
+  one whose stored position is under protection) no longer forces an
+  uncoalesced state write per seek: the refused record leaves the snapshot
+  unchanged, so the write that follows batches like any other.
+- An enclosure URL with embedded credentials (`https://user:pass@host/…`)
+  from an untrusted feed is refused when the feed is parsed, instead of
+  being admitted and only failing later, when the episode is played. The
+  public-source bar every remote URL is held to - scheme, host, no
+  credentials - is one shared implementation now, applied at feed parsing,
+  episode binding, cache validation, station logos, queue matching and the
+  identity type itself.
+
+### Added
+
+- The HTTP client identifies itself as `tenuto/<version>` and honors the
+  standard proxy environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `NO_PROXY`), so tenuto runs behind a proxy.
+
+### Fixed
+
+- After a resampler error left the channel planes unequal, every later
+  chunk resampled the channels against the wrong frames of each other:
+  the planes are truncated back into alignment first, so a resampler
+  error drops that chunk's audio on all channels at once instead of one
+  channel drifting ahead of the others.
+- Adding or re-probing a station now reports what actually went wrong with
+  the probe (the transport's refusal, "… is not a live stream") instead of
+  "cannot use stations: …", which wrongly blamed the stations file for a
+  failure of the stream the listener asked to add.
+- A second Ctrl-C force-quits: the first SIGINT is caught and the graceful
+  shutdown gets its chance, but the next one kills the process with the
+  signal's default action instead of being swallowed by a shutdown that
+  may be stuck.
+- Station writes serialize on a `stations.lock` beside `stations.json`,
+  like subscriptions already do, instead of relying on the unstated
+  invariant that only the player ever writes the file. A concurrent
+  station command refuses with "Another station update is in progress"
+  rather than saving a stale list over another writer's commit.
+- Temporary files orphaned by a crash (`<file>.tmp-<pid>-<seq>` beside any
+  durable file) are swept the next time that directory is written. A
+  temporary whose writing process is still alive is left alone, so a
+  concurrent player can never lose an in-flight write to the sweep.
+- The transport generation the worker compares against is 32 bits now: a
+  held key-repeat could seek through all 65,536 16-bit values and alias a
+  position mark recorded a lifetime ago. The real-time wire keeps its
+  16-bit field, where in-flight state lives for a handful of generations
+  at most.
+- One benign underrun no longer degrades the position quality for the
+  whole generation: an underrun counts no frames, so the position stays
+  exactly at what was really heard. A rerouted device or denied realtime
+  scheduling still degrades it.
+
 ## [0.5.0] - 2026-11-07
 
 ### Changed

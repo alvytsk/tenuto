@@ -937,12 +937,22 @@ impl Session {
                 // own number. `self.position_provenance` already tracks
                 // exactly that position: every tick and every landing event
                 // keeps it current, and nothing has touched it since.
-                if self.position_provenance == PositionProvenance::Established {
-                    self.record_current(*target, now);
+                // A refused record left the snapshot byte-identical, and
+                // `Forced` exists to defeat the batching that would coalesce
+                // such a write away - so a refused record must not cause one
+                // uncoalesced disk write per stored seek in precisely the
+                // states the refusal exists for. It still submits, but
+                // `Ordinary`, batched like any other unchanged snapshot.
+                let recorded = if self.position_provenance == PositionProvenance::Established {
+                    self.record_current(*target, now)
                 } else {
-                    self.record_current_estimated(*target, now);
-                }
-                self.submit(Urgency::Forced)
+                    self.record_current_estimated(*target, now)
+                };
+                self.submit(if recorded {
+                    Urgency::Forced
+                } else {
+                    Urgency::Ordinary
+                })
             }
             // The other one (D6): the end of the track is a position the engine
             // reached, carried by the event that reports it.
@@ -1487,15 +1497,15 @@ impl Session {
     /// (§10). Every call site decides `Established` vs. `Estimated` first
     /// (§4.2) — this function itself has no branch on provenance, because a
     /// caller only reaches it once that decision already went one way.
-    fn record_current(&mut self, position: Duration, now: ClockSample) {
+    fn record_current(&mut self, position: Duration, now: ClockSample) -> bool {
         if !self.checkpointable {
-            return;
+            return false;
         }
         if self.protected.is_some() {
-            return;
+            return false;
         }
         let Some(media) = self.current_media.clone() else {
-            return;
+            return false;
         };
         let completed = self.completed;
         self.state.edit().record(
@@ -1506,6 +1516,7 @@ impl Session {
             },
             completed,
         );
+        true
     }
 
     /// The estimated-write counterpart to `record_current` (§4.2): every call
@@ -1519,20 +1530,21 @@ impl Session {
     /// itself (`checkpoint_from_progress`) and one that has not
     /// (`EndOfTrack`'s handler, which must decide *before* touching
     /// `protected` — see its own comment) both reach here safely either way.
-    fn record_current_estimated(&mut self, position: Duration, now: ClockSample) {
+    fn record_current_estimated(&mut self, position: Duration, now: ClockSample) -> bool {
         if !self.checkpointable {
-            return;
+            return false;
         }
         if self.protected.is_some() {
-            return;
+            return false;
         }
         let Some(media) = self.current_media.clone() else {
-            return;
+            return false;
         };
         let completed = self.completed;
         self.state
             .edit()
             .record_estimated(media, position, now.wall, completed);
+        true
     }
 
     /// What a fresh load of `media` does with this state's stored entry

@@ -100,7 +100,7 @@ flowchart TB
 | `state.lock` | Player | Never written or unlinked | Locked by `tui` and `play` |
 | `subscriptions.json` | Feed layer | Durable user data | `subscribe`, `unsubscribe`, `refresh`, from the CLI or the browser |
 | `subscriptions.lock` | Feed layer | Never written or unlinked | Locked by every subscription mutation |
-| `stations.json` | Station layer | Durable user data | The browser's Radio tab: add, remove, re-probe. Only `tui` writes it, so `state.lock` serializes writers and it has no lock of its own |
+| `stations.json` | Station layer | Durable user data | The browser's Radio tab: add, remove, re-probe. Serialized by its own `stations.lock`, held for each whole read-modify-write; contention refuses at once |
 | `feeds/<feed-id>.json` | Feed layer | Disposable, refetchable | `subscribe` and `refresh` |
 | `logs/` | TUI | Disposable | The fd-2 redirect under `tui` |
 | `mpris/cover-<pid>-<seq>.png` | MPRIS | Disposable | `tenuto-mpris`, one file per published cover. A new cover replaces the previous file, the bus thread removes its last one on exit, and startup clears files left by exited processes |
@@ -534,7 +534,7 @@ flowchart TB
             sigT["tenuto-signal-listener"]
             bg["tenuto-browse<br/>tenuto-artwork<br/>tenuto-metadata-1, -2<br/>tenuto-spectrum"]
         end
-        files[("state.json, state.lock<br/>subscriptions.json, subscriptions.lock<br/>feeds/*.json, logs/")]
+        files[("state.json, state.lock<br/>subscriptions.json, subscriptions.lock<br/>stations.json, stations.lock<br/>feeds/*.json, logs/")]
         dev["Audio device"]
         tty["Terminal"]
     end

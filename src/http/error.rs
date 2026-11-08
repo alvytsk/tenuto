@@ -5,9 +5,6 @@ pub enum Operation {
     Open,
     Read,
     Seek,
-    Reopen,
-    /// The bounded tail read that confirms a finite body actually ended (§9).
-    Complete,
 }
 
 /// Which deadline elapsed.

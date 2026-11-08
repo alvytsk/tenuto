@@ -30,6 +30,7 @@ The rules the player and the feed commands follow, stated precisely. The [README
 - If a podcast episode drops mid-play and its server supports range requests (most do), Tenuto reconnects with the same backoff and carries on from where you were. The five-minute budget is judged only when something fails, so an attempt already under way can finish after it. Seeking, pausing and stopping work while it reconnects, and a seek takes effect when the connection comes back. Episodes on servers without range support still fail, and Space tries once more.
 - A dropped connection on a finite track from a server without range support fails. Playing again makes one attempt to reopen at the saved position.
 - A stream that interleaves ICY metadata, an HLS playlist, or a source whose continuity cannot be established is refused.
+- Tenuto identifies itself as `tenuto/<version>` in its HTTP requests and honors the standard proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`), so it works behind a proxy.
 
 ### Seeking accuracy
 
@@ -162,7 +163,7 @@ Until a cover arrives, and when there is none, a built-in cover stands in: a rec
 
 ### Saving, quitting and signals
 
-`q` and Ctrl-C exit 0. SIGINT, SIGHUP and SIGTERM, including a closing pane or window, capture and flush the final position, restore the terminal, and exit with `128 + signal number`. `tenuto play` follows the same contract. A flush that fails is reported as `State was not saved: ...` after the terminal is restored. SIGKILL, a crash or power loss keep only the last completed write.
+`q` and Ctrl-C exit 0. SIGINT, SIGHUP and SIGTERM, including a closing pane or window, capture and flush the final position, restore the terminal, and exit with `128 + signal number`. `tenuto play` follows the same contract. A flush that fails is reported as `State was not saved: ...` after the terminal is restored. A second Ctrl-C force-quits: it kills the process instead of waiting on a flush that may be stuck. SIGKILL, a crash or power loss keep only the last completed write.
 
 A write that fails while the player runs shows `not saving` in the header until a later write succeeds. If the state file cannot be repaired safely at startup, the session runs unsaved and shows `unsaved`.
 

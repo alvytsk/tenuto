@@ -312,14 +312,15 @@ impl HttpMediaSource {
                         .headers
                         .get("icy-br")
                         .and_then(|value| value.trim().parse::<u32>().ok()),
-                    // Only an absolute http(s) URL with a host is kept: a
-                    // `file:`/`data:`/`javascript:` value would never be
-                    // fetched by `fetch_document` anyway, and admitting it
-                    // here just persists a logo that can never load (§5).
+                    // Only a URL clearing the public-source bar
+                    // (`crate::media`) is kept: a `file:`/`data:`/`javascript:`
+                    // value would never be fetched by `fetch_document` anyway,
+                    // and admitting it here just persists a logo that can
+                    // never load (§5).
                     logo: accepted.headers.get("icy-logo").and_then(|value| {
-                        Url::parse(value.trim()).ok().filter(|u| {
-                            matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
-                        })
+                        Url::parse(value.trim())
+                            .ok()
+                            .filter(crate::media::is_public_source_url)
                     }),
                 }),
             ),

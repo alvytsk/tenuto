@@ -31,7 +31,13 @@ fn wait_exit(child: &mut Child, patience: Duration) -> ExitStatus {
         if let Ok(Some(status)) = child.try_wait() {
             return status;
         }
-        assert!(Instant::now() < deadline, "the process did not exit");
+        if Instant::now() >= deadline {
+            // Kill on the deadline rather than leaving the child running: a
+            // hung process must fail this test, not leak onto the machine.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the process did not exit within {patience:?}; killed");
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -169,4 +175,70 @@ fn exit_status_arithmetic() {
     assert_eq!(RunOutcome::Completed.exit_status(), 0);
     assert_eq!(RunOutcome::Signalled(15).exit_status(), 143);
     assert_eq!(RunOutcome::Signalled(200).exit_status(), 255);
+}
+
+/// The point of the second Ctrl-C: the first one is caught and the graceful
+/// shutdown starts, but here that shutdown is wedged mid-flush by the
+/// `stall-shutdown` hook — exactly the state where swallowing the second
+/// SIGINT would hang forever. The second SIGINT must kill the process by
+/// the signal itself, not exit through the graceful path.
+#[test]
+fn a_second_sigint_kills_a_shutdown_wedged_mid_flush() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::mpsc;
+
+    let profile = process::Profile::new().expect("profile");
+    let server = TestServer::start(Script::serving(b"x".to_vec()).stall_headers());
+    let mut child = profile
+        .command()
+        .args(["play", &server.url("/a.mp3")])
+        .env("TENUTO_AUDIO_OUTPUT", "null")
+        .env("TENUTO_TEST_HOOK", "stall-shutdown")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    assert!(server.wait_until_stalled(Duration::from_secs(10)));
+
+    // Collect the child's stderr from the start, so nothing written before
+    // the first signal is lost.
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // First SIGINT: the graceful path breaks out, reaches the final flush
+    // and parks in the hook, which announces itself on stderr.
+    send_signal(&child, "INT");
+    let deadline = Instant::now() + PATIENCE;
+    let mut wedged = false;
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) if line.contains("tenuto test hook: stall-shutdown") => {
+                wedged = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(
+        wedged,
+        "the graceful shutdown never reached the wedged flush"
+    );
+
+    // Second SIGINT: the flush cannot be waited out, so this one kills the
+    // process outright — death by SIGINT, not a graceful exit code.
+    send_signal(&child, "INT");
+    let status = wait_exit(&mut child, PATIENCE);
+    assert_eq!(status.code(), None, "killed by the signal: {status:?}");
+    assert_eq!(status.signal(), Some(2), "SIGINT: {status:?}");
+    next_invocation_acquires_the_profile(&profile);
+    server.shutdown();
 }

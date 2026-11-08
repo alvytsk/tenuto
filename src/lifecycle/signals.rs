@@ -1,7 +1,9 @@
 //! Shutdown signals for `play` (design doc M5 §6.5): SIGINT, SIGHUP and
 //! SIGTERM are caught rather than left to kill the process outright, so the
 //! session can still flush its final checkpoint and release the profile
-//! lock before it exits.
+//! lock before it exits. A **second** SIGINT force-quits: the graceful path
+//! had its chance at the first one, and the next must not be swallowed by a
+//! shutdown that may itself be wedged.
 //!
 //! The listener thread this installs does exactly one thing per signal: it
 //! records the first one, flags a shutdown as requested, and wakes anyone
@@ -115,6 +117,7 @@ impl Platform {
     fn install(shared: &Arc<Shared>, wake_tx: Sender<()>) -> std::io::Result<Self> {
         use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
         use signal_hook::iterator::Signals;
+        use signal_hook::low_level::emulate_default_handler;
 
         let mut signals = Signals::new([SIGINT, SIGHUP, SIGTERM])?;
         let handle = signals.handle();
@@ -124,6 +127,7 @@ impl Platform {
             .spawn(move || {
                 // `forever()` blocks until a signal arrives or `handle.close()`
                 // is called; the latter is exactly how this loop ends.
+                let mut sigints = 0usize;
                 for signal in signals.forever() {
                     let _ = shared.first_signal.compare_exchange(
                         0,
@@ -133,6 +137,17 @@ impl Platform {
                     );
                     shared.requested.store(true, Ordering::SeqCst);
                     let _ = wake_tx.try_send(());
+                    // The graceful path got its chance at the first SIGINT; a
+                    // second one performs the signal's default action, killing
+                    // the process outright. `emulate_default_handler` only
+                    // returns when the signal is somehow undeliverable, and
+                    // then the loop simply keeps serving the graceful path.
+                    if signal == SIGINT {
+                        sigints += 1;
+                        if sigints == 2 {
+                            let _ = emulate_default_handler(SIGINT);
+                        }
+                    }
                 }
             })?;
         Ok(Self {

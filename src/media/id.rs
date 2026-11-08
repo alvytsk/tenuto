@@ -60,7 +60,12 @@ impl NormalizedUrl {
             input: input.into(),
             source,
         })?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        // The full public-source bar, one check: http(s) with a host, and no
+        // embedded credentials. The credentials ban is the point of doing
+        // this here rather than at every caller - the foundation type must
+        // not be the one place a `user:password@` URL could slip into a
+        // `MediaId`.
+        if !super::is_public_source_url(&url) {
             return Err(DomainError::UnsupportedUrl {
                 input: input.into(),
             });

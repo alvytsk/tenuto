@@ -10,8 +10,8 @@ tag=$1
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
 
-if out=$(gh release view "$tag" --json isDraft 2>"$err"); then
-  case "$(jq -r .isDraft <<<"$out" 2>/dev/null)" in
+if out=$(gh api "repos/{owner}/{repo}/releases/tags/$tag" --jq '{draft: .draft}' 2>"$err"); then
+  case "$(jq -r .draft 2>/dev/null <<<"$out")" in
     true)
       echo "guard-release: an incomplete draft for $tag exists; inspect and delete it, then rerun" >&2
       exit 1 ;;
@@ -23,10 +23,13 @@ if out=$(gh release view "$tag" --json isDraft 2>"$err"); then
       exit 2 ;;
   esac
 fi
-if grep -q "release not found" "$err"; then
+# The tags endpoint answers 404 exactly when no release carries the tag, and
+# gh echoes the machine-visible HTTP status on failure - the signal to grep,
+# not a human-readable API message.
+if grep -q "HTTP 404" "$err"; then
   echo "guard-release: no release for $tag yet; proceeding"
   exit 0
 fi
-echo "guard-release: gh release view failed:" >&2
+echo "guard-release: gh release lookup failed:" >&2
 cat "$err" >&2
 exit 2

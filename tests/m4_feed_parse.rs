@@ -36,6 +36,29 @@ fn feed_url() -> Url {
     Url::parse("https://example.org/feed.xml").unwrap()
 }
 
+/// The live drift the 2026-11-01 review caught: an enclosure was checked
+/// for scheme only, so a URL with embedded credentials from an untrusted
+/// feed was admitted at parse and only failed later, at play. The
+/// public-source bar (scheme, host, no credentials) holds at parse now.
+#[test]
+fn an_enclosure_with_embedded_credentials_or_no_host_is_dropped()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = "        <item><title>cred</title><guid>g-cred</guid>\
+        <enclosure url=\"https://user:pw@example.org/a.mp3\" type=\"audio/mpeg\" length=\"1\"/></item>\
+        <item><title>clean</title><guid>g-clean</guid>\
+        <enclosure url=\"https://clean.example.org/a.mp3\" type=\"audio/mpeg\" length=\"1\"/></item>";
+    let report = parse_feed(rss(body).as_bytes(), &feed_url())?;
+    assert!(
+        report.feed.items[0].enclosure.is_none(),
+        "a credential-carrying enclosure is dropped"
+    );
+    assert!(
+        report.feed.items[1].enclosure.is_some(),
+        "a clean enclosure still parses"
+    );
+    Ok(())
+}
+
 /// Wraps a channel body in a minimal RSS 2.0 document.
 fn rss(body: &str) -> String {
     format!(

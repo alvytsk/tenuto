@@ -120,10 +120,20 @@ impl Converter {
         }
         while self.buffered_frames() >= CHUNK {
             self.process_chunk(CHUNK, None, out);
+            // The chunk is spent whether or not the resampler accepted it.
+            // A rejected or unwrappable one can leave the planes unequal, and
+            // draining each by at most CHUNK then keeps that misalignment
+            // forever: the longer plane holds frames the shorter ones have
+            // already lost, so every later chunk resamples the channels
+            // against the wrong frames of each other (and re-triggers the
+            // drop, logging a full CHUNK of frames the short planes do not
+            // hold). Truncate all planes to the shortest first: the price of
+            // a resampler error is that chunk's audio dropped on every
+            // channel at once, never one channel drifting ahead of the
+            // others.
+            let aligned = self.input.iter().map(Vec::len).min().unwrap_or(0);
             for plane in &mut self.input {
-                // The chunk is spent whether or not the resampler accepted
-                // it, and a rejected one can leave planes unequal — drain
-                // what each plane holds, never more.
+                plane.truncate(aligned);
                 let consumed = CHUNK.min(plane.len());
                 plane.drain(..consumed);
             }
@@ -504,5 +514,39 @@ mod tests {
             lines.is_empty(),
             "a clean conversion must stay silent; captured: {lines:?}"
         );
+    }
+
+    /// A chunk that cannot even be wrapped - planes unequal, the shorter
+    /// one under CHUNK - must not leave the channels permanently misaligned.
+    /// Draining each plane by at most CHUNK let the longer plane keep frames
+    /// the shorter had already lost, so every later chunk resampled the
+    /// channels against the wrong frames of each other. The planes are
+    /// truncated to the shortest before draining instead.
+    #[test]
+    fn a_dropped_chunk_realigns_unequal_planes_instead_of_drifting() {
+        let mut converter = Converter::new(44_100, 48_000, 2, 2).unwrap();
+        // The right plane is under CHUNK, so the input wrapper itself
+        // refuses the chunk and the drop path runs.
+        converter.push(&[vec![1.0; 1536], vec![2.0; 600]], &mut Vec::new());
+        let dropped = converter.dropped_frames;
+        assert!(dropped > 0, "the unequal chunk must be counted as dropped");
+
+        let (left, right) = (&converter.input[0], &converter.input[1]);
+        assert_eq!(
+            left.len(),
+            right.len(),
+            "channels must be truncated back into alignment"
+        );
+
+        // Whatever follows stays aligned and drops nothing: the old drain
+        // kept the longer plane frames ahead, so the next push either
+        // mispaired the channels or dropped again.
+        converter.push(&sine(1024, 2), &mut Vec::new());
+        assert_eq!(
+            converter.dropped_frames, dropped,
+            "no further chunk may drop once the planes are realigned"
+        );
+        let (left, right) = (&converter.input[0], &converter.input[1]);
+        assert_eq!(left.len(), right.len());
     }
 }

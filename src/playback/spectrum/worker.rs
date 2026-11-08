@@ -387,10 +387,7 @@ struct Shared {
 
 impl Shared {
     fn latest(&self) -> MutexGuard<'_, Option<(u64, SpectrumFrame)>> {
-        match self.latest.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        crate::playback::lock(&self.latest)
     }
 }
 

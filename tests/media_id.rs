@@ -95,3 +95,21 @@ fn parser_rejects_invalid_and_noncanonical_forms() {
         assert!(serde_json::from_value::<MediaId>(serde_json::json!(input)).is_err());
     }
 }
+
+/// The full public-source bar lives in the foundation type itself: a
+/// `user:password@` URL must never be carried into a `MediaId` because a
+/// caller skipped the transport's own source check.
+#[test]
+fn normalization_refuses_embedded_credentials() {
+    for input in [
+        "https://user:pw@example.org/audio.mp3",
+        "https://user@example.org/audio.mp3",
+        "http://example.org:80@evil.example/audio.mp3",
+    ] {
+        assert!(
+            NormalizedUrl::parse(input).is_err(),
+            "{input} must be refused"
+        );
+    }
+    assert!(NormalizedUrl::parse("https://example.org/audio.mp3").is_ok());
+}

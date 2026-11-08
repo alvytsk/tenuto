@@ -393,3 +393,39 @@ fn a_save_that_cannot_serialize_leaves_the_file_as_it_was() {
         before
     );
 }
+
+/// Every mutation holds `stations.lock` (beside `stations.json`) for its
+/// whole read-modify-write — the probe included — so a second writer
+/// refuses instead of saving a stale snapshot over the first one's commit:
+/// the same contract `subscriptions.lock` holds
+/// (`tests/m4_library_mutations.rs`), without resting on the old
+/// "only the TUI writes this file" invariant.
+#[test]
+fn a_mutation_refuses_while_another_holds_the_station_lock()
+-> Result<(), Box<dyn std::error::Error>> {
+    use tenuto::library::{list_stations, remove_station};
+    use tenuto::lifecycle::lock::ProfileLock;
+
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let path = dir.path().join("stations.json");
+    let store = StationStore::new(path.clone(), clock());
+
+    let held = ProfileLock::acquire_file(&path.with_file_name("stations.lock"))?;
+    match remove_station(&store, "any-slug") {
+        Err(error @ FeedError::StationsBusy) => {
+            assert_eq!(error.to_string(), "Another station update is in progress");
+        }
+        other => return Err(format!("expected StationsBusy, got {other:?}").into()),
+    }
+    // Listing never takes the lock: it still works while a writer holds it.
+    assert!(list_stations(&store)?.is_empty());
+
+    drop(held);
+    // With the lock free the mutation proceeds far enough to report the
+    // slug it cannot find — proof the lock was the only obstruction.
+    match remove_station(&store, "any-slug") {
+        Err(FeedError::UnknownSlug { slug }) => assert_eq!(slug, "any-slug"),
+        other => return Err(format!("expected UnknownSlug, got {other:?}").into()),
+    }
+    Ok(())
+}

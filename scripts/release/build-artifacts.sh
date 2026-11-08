@@ -53,7 +53,6 @@ tar -xzf "$tarball" -C "$check/tar"
 [ "$(sha256sum <"$check/deb/usr/bin/tenuto" | cut -d' ' -f1)" = "$want" ] || fail "the .deb binary differs from $bin"
 [ "$(sha256sum <"$check/tar/$name/tenuto" | cut -d' ' -f1)" = "$want" ] || fail "the tarball binary differs from $bin"
 
-(cd "$out" && sha256sum "$(basename "$tarball")" "$(basename "$deb")" >SHA256SUMS)
 {
   echo "source_sha: $sha"
   echo "version: $version"
@@ -63,6 +62,11 @@ tar -xzf "$tarball" -C "$check/tar"
   echo "binary_sha256: $want"
   echo "$elf_report"
 } >"$out/build-info.txt"
+
+# The provenance record is checksummed with the artifacts it describes, so a
+# tampered build-info.txt is caught by the same `sha256sum -c` that guards
+# the packages.
+(cd "$out" && sha256sum "$(basename "$tarball")" "$(basename "$deb")" build-info.txt >SHA256SUMS)
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "version=$version" >>"$GITHUB_OUTPUT"

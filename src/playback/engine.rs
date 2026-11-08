@@ -9,7 +9,7 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,7 @@ use super::error::PlaybackError;
 use super::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
 use super::handshake::Handshake;
 use super::link::OutputLink;
+use super::lock;
 use super::outbox::{self, Outbox};
 use super::output::cpal_output::{CpalOutput, OutputFault};
 use super::output::null_output::NullOutput;
@@ -55,10 +56,6 @@ use crate::volume::Volume;
 
 const STOP: u8 = 1;
 const SHUTDOWN: u8 = 2;
-/// A seek whose target has already been accepted by the command queue. §8:
-/// the interrupt is published only after acceptance, so a seek that was
-/// refused admission cannot retire a fetch it never got to replace.
-const SEEK: u8 = 4;
 const TICK: Duration = Duration::from_millis(10);
 /// `pub(crate)` so `wait.rs`'s `WaitService` — the hook's other caller — waits
 /// on the exact same deadline as the worker's own handshake calls.
@@ -325,10 +322,7 @@ impl EngineHandle {
     }
 
     pub fn progress(&self) -> Progress {
-        match self.progress.lock() {
-            Ok(progress) => progress.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        lock(&self.progress).clone()
     }
 
     /// Out-of-band stop: travels on the interrupt flag plus the wake channel,
@@ -445,7 +439,6 @@ impl EngineHandle {
         // it first would cost the listener the stream for nothing (M7 §3.4).
         if !self.traits.seek_unsupported.load(Ordering::Acquire) {
             self.source_interrupt.retire_generation(generation);
-            self.interrupt.fetch_or(SEEK, Ordering::Release);
         }
         let _ = self.wake.try_send(());
         admission
@@ -554,16 +547,6 @@ impl Drop for EngineHandle {
         // Idempotent after `join`. The spectrum thread wakes on this at once
         // and never waits on the decode worker, so this cannot hang.
         self.spectrum_thread.stop();
-    }
-}
-
-/// A poisoned lock means a thread already panicked while holding it; there is
-/// nothing better to do than carry on with the state it left. Same pattern as
-/// `http::channel::lock` and `wait::lock`.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -799,7 +782,16 @@ struct Worker {
     /// the next `load` clears it, before announcing its own `Loading`.
     adopted_load: Option<LoadRequestId>,
     volume: Volume,
-    generation: u16,
+    /// The transport generation: bumped for every new source, seek, device
+    /// rebuild. Worker-side this is u32 — the comparisons it feeds
+    /// (`heard_mark`, the rescue-record match) live as long as the worker,
+    /// and 65,536 bumps — a held key-repeat's worth of seeks — would alias
+    /// a u16 onto a mark recorded a lifetime ago. The RT wire keeps u16
+    /// (`Handshake`, `Timeline`, `OutputLink`'s packed word, the spectrum
+    /// tap): an in-flight span or ack survives at most a handful of
+    /// generations, so the low 16 bits cannot alias there. Cast at the
+    /// boundary, never widened back for a comparison.
+    generation: u32,
     pushed_total: u64,
     source_eof: bool,
     converter_flushed: bool,
@@ -863,7 +855,7 @@ struct Worker {
     outage: Option<Outage>,
     /// Where heard-time accounting last read the current generation (M10
     /// §6): its number and how far past its anchor the position was.
-    heard_mark: Option<(u16, Duration)>,
+    heard_mark: Option<(u32, Duration)>,
     /// A `Send + Sync` mirror of the device's current instant, so
     /// `WaitService` — reachable from inside a decoder read that already
     /// holds `&mut self.source` and so cannot see the rest of `Worker`, let
@@ -1002,8 +994,8 @@ impl Worker {
             if flags & STOP != 0 {
                 self.do_stop();
             }
-            // SEEK carries no worker-side action. Its retirement woke the
-            // read, and the queued `SeekTo` carries the target; the
+            // An accepted seek carries no worker-side action. Its retirement
+            // woke the read, and the queued `SeekTo` carries the target; the
             // generation the seek runs under is opened by `begin()` at the
             // point of use, not here — arming here would run after
             // `do_stop` and undo the retirement it just published. The `swap`
@@ -1459,6 +1451,17 @@ impl Worker {
         match fault {
             // Rerouted or refused realtime: playback continues, but the timing
             // base underneath the timeline may have jumped.
+            OutputFault::Recoverable(
+                cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied,
+            ) => self.degraded = true,
+            // An underrun counts no frames: the timeline freezes at what was
+            // really heard, which stays exact, so a benign `Xrun` must not
+            // latch degraded quality onto the whole generation. The warning
+            // still counts through `device_warnings`.
+            OutputFault::Recoverable(cpal::ErrorKind::Xrun) => {}
+            // Any future recoverable kind (`ErrorKind` is non-exhaustive)
+            // degrades: without host-specific knowledge it may well have
+            // disturbed the timing base, and position honesty wins.
             OutputFault::Recoverable(_) => self.degraded = true,
             OutputFault::Rebuild(kind) => {
                 let resume = self.state == PlaybackState::Playing;
@@ -1609,7 +1612,9 @@ impl Worker {
         )?);
         let mut handshake = Handshake::new(Arc::clone(&link), span_rx);
         self.reset_generation_state();
-        let generation = self.generation;
+        // The wire keeps the low 16 bits of the generation (see the field's
+        // doc); in-flight protocol state cannot live long enough to alias.
+        let generation = self.generation as u16;
         // The anchor this generation counts from: captured now, before the
         // new `TransportCore` exists to hold it, and handed straight to its
         // constructor below.
@@ -1853,7 +1858,9 @@ impl Worker {
             return self.rebuild("handshake timeout", playing);
         }
         self.reset_generation_state();
-        let generation = self.generation;
+        // The wire keeps the low 16 bits of the generation (see the field's
+        // doc); in-flight protocol state cannot live long enough to alias.
+        let generation = self.generation as u16;
         let anchor = self.position;
         let installed = {
             let mut guard = lock(&self.transport);
@@ -2012,7 +2019,7 @@ impl Worker {
         self.degraded = true;
         if let Some(link) = link
             && let Some(record) = link.take_rescue_after_teardown()
-            && record.generation == generation
+            && u32::from(record.generation) == generation
         {
             self.position = anchor + frames_to_duration(record.media_total_after, rate);
         }
@@ -2139,7 +2146,8 @@ impl Worker {
                     // A retired remote source is
                     // `None` here with `descriptor` still naming it - the
                     // very next pass after `is_retired_read`'s own arm ran,
-                    // since `SEEK` takes no step-1 action and `select!` can
+                    // since an accepted seek takes no step-1 action and
+                    // `select!` can
                     // pick `recv(wake)` over the queued `SeekTo` on any given
                     // pass. That is not EOF; it is nothing to decode *yet*,
                     // and must not be converted into one by falling through
@@ -3813,13 +3821,12 @@ fn is_cancelled(error: &PlaybackError) -> bool {
         || matches!(remote_cause(error), Some(RemoteFailure::Cancelled))
 }
 
-/// Whether the interrupt word carries a stop or a shutdown - never the SEEK
-/// bit. Every local refinement loop's `cancelled` closure checks this rather
-/// than `!= 0`: `submit_seek` sets SEEK for exactly the dispatch that is
-/// about to run the seek this closure is guarding, and a bit that means "a
-/// seek was accepted" must not read as "abandon the seek that was just
-/// accepted." STOP and SHUTDOWN carry no such ambiguity - both mean the
-/// operation in progress must give up regardless of what it is.
+/// Whether the interrupt word carries a stop or a shutdown. Every local
+/// refinement loop's `cancelled` closure checks this rather than `!= 0`: the
+/// word exists to wake the worker between passes, and a bare `!= 0` would
+/// read any future out-of-band bit as "abandon the operation in progress."
+/// STOP and SHUTDOWN mean exactly that - the operation in progress must give
+/// up regardless of what it is.
 fn stop_or_shutdown(word: u8) -> bool {
     word & (STOP | SHUTDOWN) != 0
 }
@@ -3954,7 +3961,12 @@ mod tests {
     /// A worker over `NullOutput` whose loop never runs, the progress slot
     /// its hook publishes to, and the receiver its events reach. The spectrum
     /// thread is stopped at once: the worker only needs the port.
-    fn idle_worker() -> (Worker, Arc<Mutex<Progress>>, Receiver<PlaybackEvent>) {
+    fn idle_worker() -> (
+        Worker,
+        Arc<Mutex<Progress>>,
+        Receiver<PlaybackEvent>,
+        crossbeam_channel::Sender<OutputFault>,
+    ) {
         let (events_out, events) = outbox::channel();
         let progress = Arc::new(Mutex::new(Progress {
             session_rev: 0,
@@ -3965,7 +3977,7 @@ mod tests {
             buffering: false,
             load: None,
         }));
-        let (_faults_tx, faults) = crossbeam_channel::unbounded();
+        let (faults_tx, faults) = crossbeam_channel::unbounded();
         let (_commands_tx, commands) = crossbeam_channel::bounded(1);
         let (liveness, _liveness_rx) = crossbeam_channel::bounded(0);
         let (_wake_tx, wake) = crossbeam_channel::bounded(1);
@@ -3988,7 +4000,7 @@ mod tests {
             device_clock,
             port,
         );
-        (worker, progress, events)
+        (worker, progress, events, faults_tx)
     }
 
     /// Outbox spec §4.3. A read that blocks after a command emitted must not
@@ -3998,7 +4010,7 @@ mod tests {
     /// session would checkpoint that position over the seek.
     #[test]
     fn an_event_flushed_by_a_blocked_read_carries_progress_from_its_emission() {
-        let (mut worker, progress, events) = idle_worker();
+        let (mut worker, progress, events, _faults_tx) = idle_worker();
         worker.state = PlaybackState::Stopped;
         worker.session_rev = 7;
         worker.position = Duration::from_secs(1);
@@ -4036,7 +4048,7 @@ mod tests {
     /// so the next interval offers the same totals again.
     #[test]
     fn a_refused_warning_is_offered_again_at_the_next_interval() {
-        let (mut worker, _progress, events) = idle_worker();
+        let (mut worker, _progress, events, _faults_tx) = idle_worker();
         // Fill the channel to its ordinary limit (64 - 9 reserved = 55).
         for n in 0..55 {
             worker.outbox.emit(PlaybackEvent::Warning {
@@ -4200,6 +4212,59 @@ mod tests {
             established_duration(&metadata),
             Some(Duration::from_secs(100)),
             "an established duration is the M1/M2 ceiling, unchanged"
+        );
+    }
+
+    /// The worker-side generation is u32: 65,536 bumps — a held key-repeat's
+    /// worth of seeks, or one reopen per outage across a long session — must
+    /// not wrap back onto a mark recorded a lifetime ago. With the u16 this
+    /// replaced, exactly this many bumps landed the generation back on the
+    /// seeded mark's value, and `settle_heard`'s match arm would credit the
+    /// whole gap as newly heard. The wire's 16-bit truncation is the
+    /// handshake/link suites' concern, not this one's.
+    #[test]
+    fn a_generation_does_not_wrap_onto_a_live_mark_after_65_536_bumps() {
+        let (mut worker, _progress, _events, _faults_tx) = idle_worker();
+        worker.generation = 1;
+        worker.heard_mark = Some((1, Duration::from_millis(500)));
+
+        for _ in 0..65_536 {
+            worker.reset_generation_state();
+        }
+
+        assert_eq!(worker.generation, 65_537);
+        assert_ne!(
+            worker.heard_mark.map(|(marked, _)| marked),
+            Some(worker.generation),
+            "a mark from generation 1 must not match after 65,536 bumps"
+        );
+    }
+
+    /// An underrun counts no frames: the timeline freezes at what was really
+    /// heard, which stays exact, so a benign `Xrun` must not latch degraded
+    /// quality onto the whole generation. A rerouted device or denied
+    /// realtime scheduling still does — their timing base can jump.
+    #[test]
+    fn an_xrun_does_not_latch_degraded_quality() {
+        let (mut worker, _progress, _events, faults_tx) = idle_worker();
+        worker.degraded = false;
+
+        faults_tx
+            .send(OutputFault::Recoverable(cpal::ErrorKind::Xrun))
+            .expect("faults queue accepts an Xrun");
+        worker.service_faults();
+        assert!(
+            !worker.degraded,
+            "an underrun must not degrade the position quality"
+        );
+
+        faults_tx
+            .send(OutputFault::Recoverable(cpal::ErrorKind::DeviceChanged))
+            .expect("faults queue accepts a DeviceChanged");
+        worker.service_faults();
+        assert!(
+            worker.degraded,
+            "a rerouted device still degrades the position quality"
         );
     }
 }

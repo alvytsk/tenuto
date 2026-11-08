@@ -24,6 +24,7 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub fn replace_bytes(path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     prepare_directory(dir)?;
+    sweep_orphans(dir);
 
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -71,6 +72,44 @@ pub(crate) fn sync_parent_best_effort(dir: &Path) {
     {
         tracing::debug!(path = ?dir, %error, "cannot fsync the parent directory");
     }
+}
+
+/// Removes `.tmp-<pid>-<seq>` temporaries whose writing process is gone: a
+/// crash between the create and the rename of [`replace_bytes`] leaves one
+/// behind in the destination's directory, and the next write there sweeps
+/// it. A temporary whose pid is still alive — this process's own concurrent
+/// writes, or another running Tenuto's — is left alone, so the sweep can
+/// never pull a live writer's temporary out from under its rename. The pid
+/// check reads `/proc`, so this is a no-op off Linux: a documented platform
+/// gap (§17, D12), not a behavior difference in the writes themselves.
+#[cfg(target_os = "linux")]
+fn sweep_orphans(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let own = std::process::id();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(orphan_pid) else {
+            continue;
+        };
+        if pid == own || Path::new("/proc").join(pid.to_string()).exists() {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => tracing::debug!(path = ?entry.path(), pid, "swept an orphaned temporary"),
+            Err(error) => {
+                tracing::debug!(path = ?entry.path(), %error, "cannot sweep an orphaned temporary")
+            }
+        }
+    }
+}
+
+/// The pid embedded in a `<name>.tmp-<pid>-<seq>` temporary; `None` for
+/// anything else — real store files, other dot files, directories.
+#[cfg(target_os = "linux")]
+fn orphan_pid(name: &str) -> Option<u32> {
+    let (pid, _seq) = name.rsplit_once(".tmp-")?.1.split_once('-')?;
+    pid.parse().ok()
 }
 
 #[cfg(unix)]

@@ -1503,11 +1503,15 @@ impl PlayerRuntime {
             .collect();
         let mut fresh = Vec::new();
         let mut already = 0usize;
+        let mut unusable = 0usize;
         for path in &tree.items {
             match new_entry(EnqueueItem::Path(path.clone())) {
                 Ok(entry) if queued.contains(entry.media()) => already += 1,
                 Ok(entry) => fresh.push(entry),
-                Err(_) => {}
+                // Counted, not silent: the marked batch answers a bad item
+                // with a visible refusal, so a folder walk must at least
+                // tell the listener what did not make it in.
+                Err(_) => unusable += 1,
             }
         }
         let free =
@@ -1533,6 +1537,9 @@ impl PlayerRuntime {
         }
         if already > 0 {
             parts.push(format!("{already} already queued"));
+        }
+        if unusable > 0 {
+            parts.push(format!("{unusable} unusable"));
         }
         if !tree.unreadable.is_empty() {
             parts.push(format!("{} unreadable", tree.unreadable.len()));

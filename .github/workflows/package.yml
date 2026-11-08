@@ -46,7 +46,7 @@ jobs:
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" toolchain install 1.98.1 --profile minimal
+          "$HOME/.cargo/bin/rustup" toolchain install --profile minimal
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked --version 3.8.0

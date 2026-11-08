@@ -474,6 +474,23 @@ fn already_queued_files_are_skipped_and_counted() {
 }
 
 #[test]
+fn an_unusable_file_in_a_tree_is_counted_in_the_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut files = copies(dir.path(), 2);
+    // A path that cannot resolve to a media id - canonicalize fails - is
+    // what new_entry refuses.
+    files.insert(1, dir.path().join("gone.flac"));
+    let mut rig = rig_with(PersistedState::default());
+    let first = rig.runtime.viewed();
+    rig.runtime.handle(AppCommand::AddTree(tree(first, files)));
+    assert_eq!(rig.runtime.rows_of(first).len(), 2);
+    assert_eq!(
+        rig.runtime.view().status.as_deref(),
+        Some("added 2 · 1 unusable")
+    );
+}
+
+#[test]
 fn a_tree_for_a_deleted_playlist_is_dropped_with_a_notice() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut rig = rig_with(PersistedState::default());

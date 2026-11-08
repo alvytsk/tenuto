@@ -440,41 +440,45 @@ fn a_protected_store_unreadable_is_never_overwritten() {
     }
 }
 
+/// Quarantine moves a malformed file aside before refusing, and a failed
+/// quarantine disables writes precisely so the file is never overwritten.
+/// The contract is the store's, so it is tested on `StationStore::load`
+/// directly: a read-only directory is what turns quarantine's `fs::rename`
+/// into `QuarantineFailed`, and `add_station` cannot be the driver here —
+/// it now holds `stations.lock`, whose `prepare_directory` legitimately
+/// tightens the directory back to 0700 before anything else, which would
+/// defeat the wedge instead of exercising it.
 #[test]
 fn a_protected_store_quarantine_failure_is_never_overwritten() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
+        use tenuto::persistence::store::LoadReason;
+
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
         let path = root.path().join("stations.json");
         let original = b"not json at all".to_vec();
         fs::write(&path, &original).unwrap_or_else(|error| panic!("seed: {error}"));
-        // A read-only directory: `StationStore::quarantine`'s `fs::rename`
-        // needs write permission on the parent, not the file, so this is
-        // what turns quarantine into `QuarantineFailed` instead of moving
-        // the file aside.
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o555))
             .unwrap_or_else(|error| panic!("chmod dir: {error}"));
 
-        let server = TestServer::start(Script::from_fixture("sine-noxing.mp3").icy_station());
-        let http = service();
         let st = store(root.path());
-
-        let outcome = add(&http, &st, &server.url("/radio"));
+        let load = st.load();
 
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|error| panic!("chmod dir back: {error}"));
 
-        // Root, and some filesystems, ignore a read-only directory. As
-        // above: fail loudly rather than returning quietly, so a run in
-        // such an environment cannot pass having exercised nothing.
+        // Root, and some filesystems, ignore a read-only directory. Fail
+        // loudly rather than returning quietly, so a run in such an
+        // environment cannot pass having exercised nothing.
         assert!(
-            outcome.is_err(),
+            matches!(load.reason, LoadReason::QuarantineFailed) && !load.writable,
             "this environment does not enforce a read-only directory \
              (running as root, or a permissive filesystem); \
              a_protected_store_quarantine_failure_is_never_overwritten \
-             cannot exercise the path it targets here"
+             cannot exercise the path it targets here: {:?}",
+            load.reason
         );
 
         let after = fs::read(&path).unwrap_or_else(|error| panic!("reread: {error}"));
@@ -482,7 +486,6 @@ fn a_protected_store_quarantine_failure_is_never_overwritten() {
             after, original,
             "a file that could not be quarantined must be untouched"
         );
-        server.shutdown();
     }
 }
 

@@ -101,13 +101,10 @@ impl Inner {
 }
 
 impl Outbox {
-    /// A poisoned lock means a thread already panicked while holding it;
-    /// carry on with the state it left, as `wait.rs`'s `lock` does.
+    /// The shared poison-carrying lock: a panicked thread's state is still
+    /// consistent, so carry on with it (`super::lock`).
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        super::lock(&self.inner)
     }
 
     /// Queue `event` behind everything pending. At `PENDING_CAP`: a
