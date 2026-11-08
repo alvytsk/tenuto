@@ -1,3 +1,5 @@
+//! The decode worker and its command state machine.
+
 //! The decode worker: the state machine that owns every pipeline component.
 //!
 //! The invariant this module exists to enforce is that stopping or recreating
@@ -8,15 +10,13 @@
 //! stopping, a device disappearing, a handshake timing out — preserves it.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvError, Sender, TrySendError, select};
+use crossbeam_channel::{Receiver, RecvError, Sender, select};
 use url::Url;
 
-use crate::clock::{Clock, SystemClock};
 use crate::http::channel::{ByteChannel, ReadOutcome, SourceInterrupt, WaitHook};
 use crate::http::error::{Operation, RemoteFailure};
 use crate::http::limits::Limits;
@@ -29,656 +29,32 @@ use crate::media::source::SourceLocation;
 use crate::resume::{KnownDuration, ResumeDecision, decide_resume};
 use crate::telemetry::redact_url;
 
-use super::callback::CallbackCore;
-use super::command::{Admission, LoadRequestId, PlaybackCommand, ResumeIntent};
-use super::decode::{DecodedSource, SeekOutcome};
-use super::error::PlaybackError;
-use super::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
-use super::handshake::Handshake;
-use super::link::OutputLink;
-use super::lock;
-use super::outbox::{self, Outbox};
-use super::output::cpal_output::{CpalOutput, OutputFault};
-use super::output::null_output::NullOutput;
-use super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
-use super::prepare::{PrepareContext, prepare};
-use super::reconnect::{Next, Outage, ReconnectPolicy, retryable};
-use super::resample::Converter;
-use super::spectrum::registry::{TapMapping, TapRegistry};
-use super::spectrum::worker::{
-    self as spectrum_worker, SpectrumHandle, SpectrumPort, SpectrumThread,
-};
-use super::state::PlaybackState;
-use super::timeline::{PositionQuality, Timeline};
-use super::wait::{Servicing, SessionFacts, WaitService};
+use super::super::callback::CallbackCore;
+use super::super::command::{LoadRequestId, PlaybackCommand, ResumeIntent};
+use super::super::decode::{DecodedSource, SeekOutcome};
+use super::super::error::PlaybackError;
+use super::super::event::{PlaybackEvent, Progress, StartDisposition};
+use super::super::handshake::Handshake;
+use super::super::link::OutputLink;
+use super::super::lock;
+use super::super::outbox::Outbox;
+use super::super::output::cpal_output::OutputFault;
+use super::super::output::{AudioOutput, Nanos, NegotiatedOutput, OutputRequest, SpanRecord};
+use super::super::prepare::{PrepareContext, prepare};
+use super::super::reconnect::{Next, Outage, ReconnectPolicy, retryable};
+use super::super::resample::Converter;
+use super::super::spectrum::worker::SpectrumPort;
+use super::super::state::PlaybackState;
+use super::super::timeline::Timeline;
+use super::super::wait::{Servicing, SessionFacts, WaitService};
 use crate::media::provenance::PositionProvenance;
 use crate::volume::Volume;
 
-const STOP: u8 = 1;
-const SHUTDOWN: u8 = 2;
-const TICK: Duration = Duration::from_millis(10);
-/// `pub(crate)` so `wait.rs`'s `WaitService` — the hook's other caller — waits
-/// on the exact same deadline as the worker's own handshake calls.
-pub(crate) const DEADLINE: Duration = Duration::from_millis(250);
-/// Idle wait inside a handshake. The device runs on its own thread, so the
-/// worker only has to stop spinning while it waits for an acknowledgment.
-/// `pub(crate)`, shared with `wait.rs`, so the hook's `park`/`release` calls
-/// pump the wait exactly as the worker's own do.
-pub(crate) const PUMP_NAP: Duration = Duration::from_micros(250);
-
-const COMMAND_CAPACITY: usize = 1024;
-const SPAN_CAPACITY: usize = 64;
-/// How much audio the PCM ring holds. Large enough that one loop iteration
-/// cannot drain it, small enough that discarding it on a seek is cheap.
-const RING_MILLIS: u64 = 300;
-/// Floor on the interval between aggregated diagnostic warnings.
-const DIAGNOSTIC_INTERVAL: Duration = Duration::from_millis(500);
-/// Refinement budget for an *explicit* seek. Preserving seeks pass `None`.
-const SEEK_BUDGET: Duration = Duration::from_secs(5);
-/// A refined seek lands on a whole *source* frame, while the position it is
-/// asked to preserve is a whole *output* frame, so a preserving seek can come
-/// back a fraction of a frame short of what it promised. Within this tolerance
-/// the promise is kept, so that repeated stop/resume cycles cannot walk the
-/// position backwards a frame at a time. Pause and resume no longer need this -
-/// they never re-seek - but stop, resume-at-a-stored-target and device recovery
-/// still do.
-///
-/// One source frame at 44.1 kHz is 22.68 us, and the residues this actually
-/// absorbs measure 4.5 us and 13.6 us. 100 us is four of those frames: wide
-/// enough for the quantum, and an order of magnitude below the packet-sized
-/// miss a genuinely failed seek leaves, so a real miss surfaces rather than
-/// being swallowed.
-const RESUME_TOLERANCE: Duration = Duration::from_micros(100);
-
-/// The event stream, handed out as one unit.
-///
-/// The liveness receiver never carries a message. It exists so that dropping
-/// the stream is *observable*: a rendezvous send is ready only when the channel
-/// is disconnected, so the worker learns from the channel's own error that
-/// nobody is listening. Occupancy is never consulted for that question.
-pub struct EventStream {
-    events: Receiver<PlaybackEvent>,
-    _liveness: Receiver<()>,
-}
-
-impl EventStream {
-    fn disconnected() -> Self {
-        let (_events_tx, events) = crossbeam_channel::bounded(1);
-        let (_liveness_tx, liveness) = crossbeam_channel::bounded(0);
-        Self {
-            events,
-            _liveness: liveness,
-        }
-    }
-}
-
-/// What the handle is allowed to assume about the open source before the
-/// worker has looked at the command it is submitting (M7 §6.1).
-///
-/// A cache of two bits of `Worker::capabilities`, published by
-/// `Worker::set_capabilities` — the one place that field is written — so the
-/// two views cannot disagree for longer than the single command in flight.
-/// Wrong for that instant costs nothing either way: a seek the handle thought
-/// was seekable is still rejected by the worker, and one it thought was not
-/// simply reaches the worker without the retirement it did not need.
-#[derive(Debug, Default)]
-pub(crate) struct SourceTraits {
-    pub indefinite: AtomicBool,
-    pub seek_unsupported: AtomicBool,
-    /// A finite recovery is in progress (M10 §7): `submit_pause` must retire
-    /// the attempt's read, not freeze it, as for a station.
-    pub recovering: AtomicBool,
-    /// `Playing` or `Reconnecting`: the states a `TogglePause` pauses.
-    pub pausable: AtomicBool,
-}
-
-pub struct EngineHandle {
-    commands: Sender<PlaybackCommand>,
-    stream: EventStream,
-    progress: Arc<Mutex<Progress>>,
-    interrupt: Arc<AtomicU8>,
-    wake: Sender<()>,
-    worker: Option<JoinHandle<Vec<PlaybackEvent>>>,
-    /// The one `SourceInterrupt` this worker's whole life uses, shared with
-    /// every `HttpMediaSource` it ever opens (Carried Finding 2's "construct
-    /// a real one and replace the placeholder" - there is only ever one, so
-    /// there is nothing to swap). `submit` acts on it directly, out of band from
-    /// the command queue, so a blocked read is reachable without waiting for
-    /// the worker to drain its backlog.
-    source_interrupt: Arc<SourceInterrupt>,
-    /// The worker's published view of the open source, read by `submit_seek`
-    /// to decide whether retiring the source is worth anything (M7 §6.1).
-    traits: Arc<SourceTraits>,
-    /// `None` until `set_http` installs one. Shared with the worker so
-    /// `Worker::load` can build a `PrepareContext` from whatever is
-    /// installed at the moment it runs.
-    http: Arc<Mutex<Option<Arc<HttpService>>>>,
-    /// Shared with the worker, so a policy installed after the worker was
-    /// spawned governs the very next outage (M7 §7).
-    reconnect_policy: Arc<Mutex<ReconnectPolicy>>,
-    /// The analysis worker's application side (§10), handed out by
-    /// [`Self::spectrum`].
-    spectrum: SpectrumHandle,
-    /// The `tenuto-spectrum` thread: stopped and joined by [`Self::join`]
-    /// and by `Drop`, so it never outlives the engine.
-    spectrum_thread: SpectrumThread,
-}
-
-impl EngineHandle {
-    /// Spawn a worker over an output that reports no asynchronous faults.
-    pub fn spawn(output: Box<dyn AudioOutput>) -> Self {
-        Self::spawn_with(output, crossbeam_channel::never())
-    }
-
-    /// Spawn a worker over the default cpal device, wired for fault recovery.
-    pub fn spawn_cpal() -> Self {
-        let mut output = CpalOutput::default();
-        let faults = output.faults();
-        let (wake_tx, wake_rx) = crossbeam_channel::bounded(64);
-        output.set_wake(wake_tx.clone());
-        Self::assemble(
-            Box::new(output),
-            faults,
-            wake_tx,
-            wake_rx,
-            Arc::new(SystemClock),
-        )
-    }
-
-    /// Spawn over whichever output the environment calls for: the paced,
-    /// deviceless [`NullOutput`] when `TENUTO_AUDIO_OUTPUT=null` (what a
-    /// subprocess test sets on a CI machine with no sound device), otherwise
-    /// the real default device.
-    pub fn spawn_for_environment() -> Self {
-        if std::env::var("TENUTO_AUDIO_OUTPUT").as_deref() == Ok("null") {
-            Self::spawn(Box::new(NullOutput::new()))
-        } else {
-            Self::spawn_cpal()
-        }
-    }
-
-    /// Spawn a worker over any output, plus the fault stream it publishes to.
-    pub fn spawn_with(output: Box<dyn AudioOutput>, faults: Receiver<OutputFault>) -> Self {
-        Self::spawn_on_clock(output, faults, Arc::new(SystemClock))
-    }
-
-    /// [`Self::spawn_with`], with the network clock every stall, header,
-    /// seek and opening budget and every reconnect backoff is measured on
-    /// (M9.5). A test passes a `FakeClock` and steps it past a budget.
-    pub fn spawn_on_clock(
-        output: Box<dyn AudioOutput>,
-        faults: Receiver<OutputFault>,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
-        let (wake_tx, wake_rx) = crossbeam_channel::bounded(64);
-        Self::assemble(output, faults, wake_tx, wake_rx, clock)
-    }
-
-    fn assemble(
-        output: Box<dyn AudioOutput>,
-        faults: Receiver<OutputFault>,
-        wake_tx: Sender<()>,
-        wake_rx: Receiver<()>,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
-        let (commands_tx, commands_rx) = crossbeam_channel::bounded(COMMAND_CAPACITY);
-        let (events_out, events_rx) = outbox::channel();
-        let (liveness_tx, liveness_rx) = crossbeam_channel::bounded(0);
-        let progress = Arc::new(Mutex::new(Progress {
-            session_rev: 0,
-            media: None,
-            position: Duration::ZERO,
-            quality: PositionQuality::Exact,
-            provenance: PositionProvenance::Established,
-            buffering: false,
-            load: None,
-        }));
-        let interrupt = Arc::new(AtomicU8::new(0));
-        // One real capacity for the worker's whole life (Carried Finding 2):
-        // every `HttpMediaSource` this session ever opens is handed the same
-        // `Arc`, so its buffer has to be sized for real fetch throughput from
-        // the moment it exists, not the byte-at-a-time placeholder that used
-        // to sit here only so `WaitService` had something to poll.
-        let source_interrupt = SourceInterrupt::with_clock(Limits::default().buffer_bytes, clock);
-        let traits = Arc::new(SourceTraits::default());
-        let http = Arc::new(Mutex::new(None));
-        let reconnect_policy = Arc::new(Mutex::new(ReconnectPolicy::default()));
-        // Shared by the callback (writer), the decode worker, `WaitService`
-        // and the spectrum worker, which schedules frames against it.
-        let device_clock = Arc::new(AtomicU64::new(0));
-        let (spectrum, spectrum_port, spectrum_thread) =
-            spectrum_worker::spawn(Arc::clone(&device_clock));
-        let worker = Worker::new(
-            output,
-            faults,
-            Arc::clone(&progress),
-            commands_rx,
-            events_out,
-            liveness_tx,
-            wake_rx,
-            Arc::clone(&interrupt),
-            Arc::clone(&source_interrupt),
-            Arc::clone(&traits),
-            Arc::clone(&http),
-            Arc::clone(&reconnect_policy),
-            device_clock,
-            spectrum_port,
-        );
-        let join = std::thread::Builder::new()
-            .name("tenuto-decode".into())
-            .spawn(move || worker.run())
-            .ok();
-        Self {
-            commands: commands_tx,
-            stream: EventStream {
-                events: events_rx,
-                _liveness: liveness_rx,
-            },
-            progress,
-            interrupt,
-            wake: wake_tx,
-            worker: join,
-            source_interrupt,
-            traits,
-            http,
-            reconnect_policy,
-            spectrum,
-            spectrum_thread,
-        }
-    }
-
-    /// The spectrum analysis worker: enable it, read its latest frame.
-    /// Analysis starts disabled.
-    pub fn spectrum(&self) -> SpectrumHandle {
-        self.spectrum.clone()
-    }
-
-    /// The raw queue, with none of [`Self::submit`]'s out-of-band rules: a
-    /// command sent here reaches the worker only when it next looks. A test
-    /// seam for driving the worker's dispatch alone; production code goes
-    /// through `submit` (`tests/m9_4_submission_door.rs` checks it).
-    #[doc(hidden)]
-    pub fn commands(&self) -> &Sender<PlaybackCommand> {
-        &self.commands
-    }
-
-    pub fn events(&self) -> &Receiver<PlaybackEvent> {
-        &self.stream.events
-    }
-
-    /// The wake channel: a device backend pings it so a fault interrupts a
-    /// blocked wait rather than waiting out the tick. A test seam, like
-    /// [`Self::commands`].
-    #[doc(hidden)]
-    pub fn wake(&self) -> &Sender<()> {
-        &self.wake
-    }
-
-    /// Release the event stream. The worker sees the disconnection and shuts
-    /// down: an engine nobody listens to has no reason to hold a device open.
-    pub fn release_events(&mut self) {
-        self.stream = EventStream::disconnected();
-        let _ = self.wake.try_send(());
-    }
-
-    pub fn progress(&self) -> Progress {
-        lock(&self.progress).clone()
-    }
-
-    /// Out-of-band stop: travels on the interrupt flag plus the wake channel,
-    /// so a saturated event channel cannot delay it. Also retires the source
-    /// interrupt: a stop must reach a worker blocked inside a remote read,
-    /// not only one waiting on the command channel or the tick.
-    fn interrupt_stop(&self) {
-        // §11: cancellation, logged at the point the application actually
-        // decided on one - not inside `SourceInterrupt::retire` itself, which
-        // also runs on every ordinary remote-failure exit path and would
-        // mislabel a genuine fault as a user-requested cancellation.
-        tracing::debug!("stop requested; retiring the in-flight source read");
-        self.source_interrupt.retire();
-        self.interrupt.fetch_or(STOP, Ordering::Release);
-        let _ = self.wake.try_send(());
-    }
-
-    /// Out-of-band shutdown. `Drop` routes through here, so retiring the
-    /// source interrupt is what keeps a dropped `EngineHandle` from leaving
-    /// the worker thread blocked forever inside a remote read nobody will
-    /// ever answer.
-    fn interrupt_shutdown(&self) {
-        // §11: cancellation - see `interrupt_stop`'s comment for why this is
-        // logged here rather than inside `retire` itself.
-        tracing::debug!("shutdown requested; retiring the in-flight source read");
-        self.source_interrupt.retire();
-        self.interrupt.fetch_or(SHUTDOWN, Ordering::Release);
-        let _ = self.wake.try_send(());
-    }
-
-    fn try_send(&self, command: PlaybackCommand) -> Admission {
-        match self.commands.try_send(command) {
-            Ok(()) => Admission::Accepted,
-            Err(TrySendError::Full(_)) => Admission::Busy,
-            Err(TrySendError::Disconnected(_)) => Admission::Gone,
-        }
-    }
-
-    /// The one door (M9.4): every command, with whatever out-of-band rule it
-    /// needs to reach a worker blocked in a source read. §8: queue admission
-    /// and waking belong together, so no caller can queue a command and
-    /// forget to wake, retire, freeze or thaw anything.
-    ///
-    /// `Stop` and `Shutdown` never queue: they travel on the interrupt word,
-    /// so a saturated queue or a running refinement cannot delay them, and
-    /// they are always `Accepted`. `TogglePause` is resolved here, against
-    /// the worker's own published state, because only the direction chosen
-    /// knows whether to freeze or thaw.
-    pub fn submit(&self, command: PlaybackCommand) -> Admission {
-        match command {
-            PlaybackCommand::Stop => {
-                self.interrupt_stop();
-                Admission::Accepted
-            }
-            PlaybackCommand::Shutdown => {
-                self.interrupt_shutdown();
-                Admission::Accepted
-            }
-            PlaybackCommand::TogglePause => {
-                if self.traits.pausable.load(Ordering::Acquire) {
-                    self.submit_pause()
-                } else {
-                    self.submit_play()
-                }
-            }
-            PlaybackCommand::Pause => self.submit_pause(),
-            PlaybackCommand::Play => self.submit_play(),
-            PlaybackCommand::SeekTo(_) | PlaybackCommand::SeekBy(_) => self.submit_seek(command),
-            PlaybackCommand::Load { .. } => {
-                // A load tears the current source down whatever it is, so its
-                // blocked read or open is woken now rather than waited out
-                // (M7 §6.1). Aimed at the generation observed *before* the
-                // send, like a seek.
-                let generation = self.source_interrupt.generation();
-                let admission = self.try_send(command);
-                if admission == Admission::Accepted {
-                    self.source_interrupt.retire_generation(generation);
-                    let _ = self.wake.try_send(());
-                }
-                admission
-            }
-            other => {
-                let admission = self.try_send(other);
-                if admission == Admission::Accepted {
-                    let _ = self.wake.try_send(());
-                }
-                admission
-            }
-        }
-    }
-
-    /// A seek, published to the source interrupt only after the queue
-    /// accepts it (§8): a seek refused admission must not retire a fetch it
-    /// never got to replace.
-    ///
-    /// The retirement is aimed at the generation that was live *before* the
-    /// send, never at whatever is current afterwards. Between the send and
-    /// the retirement this thread can be preempted, and the worker - woken
-    /// by the send itself - can dispatch the seek and `begin()` the seek's
-    /// own generation in that gap; an unaimed retirement landing then kills
-    /// the reopen or trial the seek just opened and misreports the seek as
-    /// cancelled (CI on main, 2026-09-17, three different tests, all
-    /// `SeekCancelled` with no stop in sight). A superseded generation means
-    /// the worker is no longer blocked in anything this had to wake, so the
-    /// aimed retirement doing nothing is the correct outcome, not a missed
-    /// one.
-    fn submit_seek(&self, command: PlaybackCommand) -> Admission {
-        let generation = self.source_interrupt.generation();
-        let admission = self.try_send(command);
-        if admission != Admission::Accepted {
-            return admission;
-        }
-        // A source that cannot seek is going to answer `SeekRejected`; retiring
-        // it first would cost the listener the stream for nothing (M7 §3.4).
-        if !self.traits.seek_unsupported.load(Ordering::Acquire) {
-            self.source_interrupt.retire_generation(generation);
-        }
-        let _ = self.wake.try_send(());
-        admission
-    }
-
-    /// `Pause`, plus the freeze level that reaches a read already blocked
-    /// inside the byte channel (G2): a bit cleared by the loop's own
-    /// `swap(0)` would be gone before that read ever looked.
-    ///
-    /// A station is closed rather than frozen (M7 §6.2): freezing suspends
-    /// the stall timer, so a stalled live read that is frozen never wakes at
-    /// all. Aimed at the generation observed *before* the send, exactly like
-    /// a seek — a superseded generation means the worker is no longer
-    /// blocked in anything this had to wake. A finite recovery is retired too
-    /// (M10 §7): a frozen reopen or priming read would also never wake, and a
-    /// parked half-built transport would announce `Paused` mid-attempt.
-    fn submit_pause(&self) -> Admission {
-        let generation = self.source_interrupt.generation();
-        let admission = self.try_send(PlaybackCommand::Pause);
-        if admission == Admission::Accepted {
-            if self.traits.indefinite.load(Ordering::Acquire)
-                || self.traits.recovering.load(Ordering::Acquire)
-            {
-                self.source_interrupt.retire_generation(generation);
-            } else {
-                self.source_interrupt.freeze();
-            }
-            let _ = self.wake.try_send(());
-        }
-        admission
-    }
-
-    /// `Play`, plus the level's release.
-    fn submit_play(&self) -> Admission {
-        let admission = self.try_send(PlaybackCommand::Play);
-        if admission == Admission::Accepted {
-            self.source_interrupt.thaw();
-            let _ = self.wake.try_send(());
-        }
-        admission
-    }
-
-    /// The interrupt every source this session opens shares, for a caller
-    /// (a test harness among them) that needs to act on it directly.
-    pub fn source_interrupt(&self) -> Arc<SourceInterrupt> {
-        Arc::clone(&self.source_interrupt)
-    }
-
-    /// Install or remove the HTTP service `Worker::load` builds a
-    /// `PrepareContext` from. `None` (the default) means every `Load` of an
-    /// `Http` source fails with `RemoteFailure::InvalidSource` - "no HTTP
-    /// service in this session" - exactly as `prepare::open_http` already
-    /// documents.
-    pub fn set_http(&self, service: Option<Arc<HttpService>>) {
-        *lock(&self.http) = service;
-    }
-
-    /// Install the reconnect timing every later outage is judged against
-    /// (M7 §7). The default is `ReconnectPolicy::default()`; a test installs
-    /// a brisk one so a whole outage fits inside a test's patience.
-    pub fn set_reconnect_policy(&self, policy: ReconnectPolicy) {
-        *lock(&self.reconnect_policy) = policy;
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
-    }
-
-    /// Joins the worker, then drains what it left behind.
-    ///
-    /// The channel drain is safe only because the thread has already gone —
-    /// nothing can send again — and that is the same happens-before the final
-    /// `Progress` rests on. Channel first, backlog after: everything the worker
-    /// flushed was emitted before anything it could not.
-    pub fn join(mut self) -> ShutdownReport {
-        let backlog = match self.worker.take() {
-            Some(worker) => match worker.join() {
-                Ok(events) => events,
-                Err(panic) => {
-                    tracing::warn!(
-                        panic = %describe_panic(&panic),
-                        "the decode worker panicked; its shutdown backlog is lost"
-                    );
-                    Vec::new()
-                }
-            },
-            None => Vec::new(),
-        };
-        // After the decode worker, whose teardown retires the last mapping.
-        self.spectrum_thread.stop();
-        let mut events = Vec::new();
-        while let Ok(event) = self.stream.events.try_recv() {
-            events.push(event);
-        }
-        events.extend(backlog);
-        ShutdownReport {
-            progress: self.progress(),
-            events,
-        }
-    }
-}
-
-impl Drop for EngineHandle {
-    fn drop(&mut self) {
-        self.interrupt_shutdown();
-        // Idempotent after `join`. The spectrum thread wakes on this at once
-        // and never waits on the decode worker, so this cannot hang.
-        self.spectrum_thread.stop();
-    }
-}
-
-/// The transport state a blocked source read may service, behind one lock.
-///
-/// `Handshake` and `Timeline` live here rather than on `Worker` because the
-/// wait hook needs them and `Worker` is `&mut`-shaped: the hook runs from
-/// inside `pump_audio -> source.next_planar()`, which already holds
-/// `&mut self.source`, so it cannot also reach the rest of `Worker` and
-/// `unsafe_code = "forbid"` rules out a lifetime-erased slot back onto it.
-/// Contention is nil: the hook runs only while the worker is blocked inside a
-/// decoder read, which is precisely when the worker is not touching any of
-/// this (Ruling 1's lock order note lives in `wait.rs`, which is the module
-/// that actually has two lock-takers to order).
-///
-/// `pcm`, `link` and `config` stay off this struct and live as plain `Worker`
-/// fields instead: `pcm` is `rtrb::Producer<f32>`, which is `!Sync` and must
-/// stay on the worker regardless — the hook must never push audio — and
-/// `link`/`config` are not needed by the hook at all (`Handshake` already
-/// holds its own clone of `link`), so putting them under this lock would only
-/// widen the hook's reach for no benefit and force `pump_audio` to touch this
-/// lock for information it does not need (Ruling 3).
-pub struct TransportCore {
-    handshake: Handshake,
-    timeline: Timeline,
-    /// Media position the current generation's frame counting starts from.
-    anchor: Duration,
-    sample_rate: u32,
-    /// This transport's spectrum tap, when it has one: what every `Run`
-    /// publication must map first (decision 18).
-    tap: Option<TransportTap>,
-}
-
-/// What a transport needs to publish its tap mappings: the registry, its
-/// never-reused instance ID, and the revision and channel count it plays.
-pub(crate) struct TransportTap {
-    registry: TapRegistry,
-    instance: u64,
-    session_rev: u64,
-    channels: u16,
-}
-
-impl TransportCore {
-    /// `pub`, unlike the rest of this impl block, so a test can build a real
-    /// `TransportCore` and exercise `WaitService::service_as` against it with
-    /// no `Worker` in the loop at all — the only way to prove the clock path
-    /// `observed_position` depends on actually advances a published position,
-    /// which nothing in this crate's `tests/` could otherwise reach.
-    pub fn new(
-        handshake: Handshake,
-        timeline: Timeline,
-        anchor: Duration,
-        sample_rate: u32,
-    ) -> Self {
-        Self {
-            handshake,
-            timeline,
-            anchor,
-            sample_rate,
-            tap: None,
-        }
-    }
-
-    /// Attaches the spectrum tap's mapping state. Builder-style, so `new`
-    /// keeps its public signature.
-    pub(crate) fn with_tap(mut self, tap: TransportTap) -> Self {
-        self.tap = Some(tap);
-        self
-    }
-
-    /// Publishes the mapping for the `Run` about to be published for
-    /// `generation`, under the epoch that publication will use. Must run
-    /// immediately before `start_running` or `release` (decision 18).
-    fn publish_tap_mapping(&self, generation: u16) {
-        if let Some(tap) = &self.tap {
-            tap.registry.publish(TapMapping {
-                instance: tap.instance,
-                generation,
-                epoch: self.handshake.upcoming_epoch(),
-                session_rev: tap.session_rev,
-                sample_rate: self.sample_rate,
-                channels: tap.channels,
-            });
-        }
-    }
-
-    /// Retires every mapping of this transport's tap, for teardown.
-    fn retire_tap(&self) {
-        if let Some(tap) = &self.tap {
-            tap.registry.retire_instance(tap.instance);
-        }
-    }
-
-    /// Publishes `Run` for `generation`, mapping it first.
-    fn start_running(&mut self, generation: u16) {
-        self.publish_tap_mapping(generation);
-        let Self {
-            handshake,
-            timeline,
-            ..
-        } = self;
-        handshake.start_running(generation, timeline);
-    }
-
-    /// Drain spans and return the position implied by what has actually
-    /// played.
-    pub(crate) fn observed_position(&mut self, now: Nanos) -> Duration {
-        self.handshake.drain_spans(&mut self.timeline);
-        let played = self.timeline.played_frames(now);
-        self.anchor + frames_to_duration(played, self.sample_rate)
-    }
-
-    pub(crate) fn quality(&self) -> PositionQuality {
-        self.timeline.quality()
-    }
-
-    /// Park the callback, for the hook's freeze arm. Returns whether it was
-    /// acknowledged, exactly as `Handshake::park`'s `Result` does, just
-    /// flattened to a `bool` since the caller only branches on which.
-    pub(crate) fn park(&mut self, pump: &mut dyn FnMut(), deadline: Duration) -> bool {
-        self.handshake
-            .park(&mut self.timeline, pump, deadline)
-            .is_ok()
-    }
-
-    /// Release a parked callback: the hook's thaw arm and `Worker::play`'s
-    /// resume. The mapping goes out first (decision 18).
-    pub(crate) fn release(&mut self) {
-        self.publish_tap_mapping(self.handshake.generation());
-        self.handshake.release();
-    }
-}
+use super::handle::SourceTraits;
+use super::{
+    DEADLINE, DIAGNOSTIC_INTERVAL, PUMP_NAP, RESUME_TOLERANCE, RING_MILLIS, SEEK_BUDGET, SHUTDOWN,
+    SPAN_CAPACITY, STOP, TICK, TransportCore, TransportTap,
+};
 
 /// How [`Worker::land`] treats the decoder's answer (M9.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -727,7 +103,7 @@ impl PendingResume {
     }
 }
 
-struct Worker {
+pub(super) struct Worker {
     output: Box<dyn AudioOutput>,
     faults: Receiver<OutputFault>,
     transport: Arc<Mutex<Option<TransportCore>>>,
@@ -876,7 +252,7 @@ struct Worker {
 
 impl Worker {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(super) fn new(
         output: Box<dyn AudioOutput>,
         faults: Receiver<OutputFault>,
         progress: Arc<Mutex<Progress>>,
@@ -980,7 +356,7 @@ impl Worker {
         }
     }
 
-    fn run(mut self) -> Vec<PlaybackEvent> {
+    pub(super) fn run(mut self) -> Vec<PlaybackEvent> {
         let commands = self.commands.clone();
         let wake = self.wake.clone();
         let liveness = self.liveness.clone();
@@ -3905,14 +3281,14 @@ fn retire_faults(deferred: &mut Option<OutputFault>, faults: &Receiver<OutputFau
     while faults.try_recv().is_ok() {}
 }
 
-fn frames_to_duration(frames: u64, rate: u32) -> Duration {
+pub(super) fn frames_to_duration(frames: u64, rate: u32) -> Duration {
     Duration::from_secs_f64(frames as f64 / f64::from(rate.max(1)))
 }
 
 /// Best-effort text for a `std::thread::JoinHandle::join` panic payload. Panic
 /// payloads are almost always a `&'static str` or a `String`; anything else
 /// reports as opaque rather than being dropped silently.
-fn describe_panic(panic: &(dyn Any + Send)) -> String {
+pub(super) fn describe_panic(panic: &(dyn Any + Send)) -> String {
     if let Some(message) = panic.downcast_ref::<&str>() {
         (*message).to_string()
     } else if let Some(message) = panic.downcast_ref::<String>() {
@@ -3957,6 +3333,10 @@ fn established_duration(metadata: &MediaMetadata) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::outbox;
+    use crate::playback::output::null_output::NullOutput;
+    use crate::playback::spectrum::worker as spectrum_worker;
+    use crate::playback::timeline::PositionQuality;
 
     /// A worker over `NullOutput` whose loop never runs, the progress slot
     /// its hook publishes to, and the receiver its events reach. The spectrum
