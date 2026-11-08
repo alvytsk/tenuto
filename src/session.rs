@@ -937,22 +937,22 @@ impl Session {
                 // own number. `self.position_provenance` already tracks
                 // exactly that position: every tick and every landing event
                 // keeps it current, and nothing has touched it since.
-                // The writer does not deduplicate identical content, so
-                // every submission is a real disk write. A refused record
-                // left the snapshot byte-identical - in exactly the states
-                // the refusal exists for - so the right response to the
-                // refusal is no submission at all, not a delayed write of
-                // an unchanged snapshot.
+                // A refused record left the snapshot byte-identical, and
+                // `Forced` exists to defeat the batching that would coalesce
+                // such a write away - so a refused record must not cause one
+                // uncoalesced disk write per stored seek in precisely the
+                // states the refusal exists for. It still submits, but
+                // `Ordinary`, batched like any other unchanged snapshot.
                 let recorded = if self.position_provenance == PositionProvenance::Established {
                     self.record_current(*target, now)
                 } else {
                     self.record_current_estimated(*target, now)
                 };
-                if recorded {
-                    self.submit(Urgency::Forced)
+                self.submit(if recorded {
+                    Urgency::Forced
                 } else {
-                    Action::None
-                }
+                    Urgency::Ordinary
+                })
             }
             // The other one (D6): the end of the track is a position the engine
             // reached, carried by the event that reports it.
