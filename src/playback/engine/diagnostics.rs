@@ -382,9 +382,15 @@ impl Worker {
 
 fn severity(fault: OutputFault) -> u8 {
     match fault {
-        OutputFault::Recoverable(_) => 0,
-        OutputFault::Rebuild(_) => 1,
-        OutputFault::Fatal(_) => 2,
+        // An underrun counts no frames and disturbs no timing base; every
+        // other recoverable kind may have. When both are queued in one pass,
+        // the timing-affecting fault must survive the collapse - an earlier
+        // `Xrun` must not mask a `DeviceChanged` whose degradation the
+        // position honesty depends on.
+        OutputFault::Recoverable(cpal::ErrorKind::Xrun) => 0,
+        OutputFault::Recoverable(_) => 1,
+        OutputFault::Rebuild(_) => 2,
+        OutputFault::Fatal(_) => 3,
     }
 }
 

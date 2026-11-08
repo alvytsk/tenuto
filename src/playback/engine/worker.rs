@@ -2839,13 +2839,13 @@ fn established_duration(metadata: &MediaMetadata) -> Option<Duration> {
 mod tests {
     use super::super::diagnostics::DIAGNOSTIC_INTERVAL;
     use super::super::diagnostics::retire_faults;
-    use crate::playback::wait::Servicing;
     use super::*;
-    use crate::playback::output::SampleFormat;
     use crate::playback::outbox;
+    use crate::playback::output::SampleFormat;
     use crate::playback::output::null_output::NullOutput;
     use crate::playback::spectrum::worker as spectrum_worker;
     use crate::playback::timeline::PositionQuality;
+    use crate::playback::wait::Servicing;
 
     /// A worker over `NullOutput` whose loop never runs, the progress slot
     /// its hook publishes to, and the receiver its events reach. The spectrum
