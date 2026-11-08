@@ -1229,11 +1229,16 @@ impl TestEngine {
     }
 
     pub fn count_events(&mut self, predicate: impl Fn(&PlaybackEvent) -> bool) -> usize {
-        // Give anything still in flight a moment to arrive.
-        let until = Instant::now() + Duration::from_millis(200);
-        while Instant::now() < until {
+        // Drain until the engine goes quiet: several consecutive pumps that
+        // add nothing. No fixed wall-clock window - idle, this returns at
+        // once; loaded, the drain keeps going for as long as events are
+        // actually still arriving, which is what an exact count needs.
+        let mut quiet = 0;
+        while quiet < 5 {
+            let before = lock(&self.inbox).len();
             self.pump_events();
-            std::thread::sleep(Duration::from_millis(5));
+            let added = lock(&self.inbox).len() - before;
+            quiet = if added == 0 { quiet + 1 } else { 0 };
         }
         lock(&self.inbox).iter().filter(|e| predicate(e)).count()
     }

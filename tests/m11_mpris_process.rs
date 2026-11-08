@@ -18,7 +18,13 @@ fn wait_exit(child: &mut Child, patience: Duration) -> ExitStatus {
         if let Ok(Some(status)) = child.try_wait() {
             return status;
         }
-        assert!(Instant::now() < deadline, "the process did not exit");
+        if Instant::now() >= deadline {
+            // Kill on the deadline rather than leaving the child running: a
+            // hung process must fail this test, not leak onto the machine.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the process did not exit within {patience:?}; killed");
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 }

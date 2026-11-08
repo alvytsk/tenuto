@@ -20,6 +20,15 @@ if [ $# -eq 16 ] && [ "$1 $2 $3 $4 $5 $6 $7 $8" = "run list --workflow release.y
   exit 0
 fi
 
+if [ $# -eq 4 ] && [ "$1" = "api" ] && [[ "$2" =~ ^repos/.*/releases/tags/ ]] && [ "$3" = "--jq" ]; then
+  case "${STUB_GH_RELEASE:-none}" in
+    none) echo "HTTP 404: Not Found" >&2; exit 1 ;;
+    draft) echo '{"draft": true}'; exit 0 ;;
+    published) echo '{"draft": false}'; exit 0 ;;
+    error) echo "HTTP 502: Bad Gateway" >&2; exit 1 ;;
+  esac
+fi
+
 if [ $# -eq 5 ] && [ "$1 $2" = "release view" ] && [ "$4 $5" = "--json isDraft" ]; then
   case "${STUB_GH_RELEASE:-none}" in
     none) echo "release not found" >&2; exit 1 ;;
