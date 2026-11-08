@@ -179,7 +179,7 @@ pub(crate) fn source_matches(media: &MediaId, source: &QueueSource) -> bool {
         (MediaId::LocalFile(path), QueueSource::LocalFile(source)) => path == source,
         (MediaId::RemoteUrl(url), QueueSource::RemoteUrl(source)) => url == source,
         (MediaId::PodcastEpisode { .. }, QueueSource::Podcast { fallback }) => {
-            matches!(fallback.scheme(), "http" | "https") && fallback.host_str().is_some()
+            crate::media::is_public_source_url(fallback)
         }
         _ => false,
     }

@@ -50,8 +50,9 @@ pub struct BoundItem {
     pub enclosure_mime: Option<String>,
 }
 
-/// Whether an enclosure URL is a usable playback source: `http` or `https`
-/// with a host (§4.5).
+/// Whether an enclosure URL is a usable playback source: the public-source
+/// bar (`src/media`, one implementation for the whole crate) - http(s) with
+/// a host and no embedded credentials (§4.5).
 ///
 /// `parse_feed` already enforces this before an `Enclosure` ever reaches a
 /// `ParsedItem`, but it is checked again here: a caller can build a
@@ -59,7 +60,7 @@ pub struct BoundItem {
 /// trusts whatever URL it is handed as the enclosure without questioning
 /// its scheme.
 fn usable_enclosure_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+    crate::media::is_public_source_url(url)
 }
 
 /// Binds one parsed feed document to `feed_id`, producing real

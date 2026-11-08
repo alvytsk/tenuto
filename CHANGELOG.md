@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one whose stored position is under protection) no longer forces an
   uncoalesced state write per seek: the refused record leaves the snapshot
   unchanged, so the write that follows batches like any other.
+- An enclosure URL with embedded credentials (`https://user:pass@host/…`)
+  from an untrusted feed is refused when the feed is parsed, instead of
+  being admitted and only failing later, when the episode is played. The
+  public-source bar every remote URL is held to - scheme, host, no
+  credentials - is one shared implementation now, applied at feed parsing,
+  episode binding, cache validation, station logos, queue matching and the
+  identity type itself.
 
 ### Added
 

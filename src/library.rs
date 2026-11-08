@@ -487,11 +487,10 @@ fn load_mutating_stations(stations: &StationStore) -> Result<StationSnapshot, Fe
     .map_err(|reason| FeedError::StationsUnreadable { reason })
 }
 
-/// Parses `url` and validates it against the same public-source bar
-/// [`crate::http::document`] holds a feed's `origin` to (§6.7): HTTP(S)
-/// with a host, and no embedded userinfo. Re-expressed here, rather than
-/// reused from that module, because this check must run — and be able to
-/// reject a bad URL — *before* any [`HttpService`] call, including the ones
+/// Parses `url` and validates it against the public-source bar
+/// (`src/media`, one implementation for the whole crate; §6.7): HTTP(S)
+/// with a host, and no embedded userinfo. Runs here — and is able to reject
+/// a bad URL — *before* any [`HttpService`] call, including the ones
 /// `AlreadySubscribed` and slug derivation need first.
 fn validate_public_url(url: &str) -> Result<Url, FeedError> {
     let invalid = |reason: &'static str| {
@@ -501,10 +500,10 @@ fn validate_public_url(url: &str) -> Result<Url, FeedError> {
         })
     };
     let parsed = Url::parse(url).map_err(|_| invalid("not a valid URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if !crate::media::is_http_url_with_host(&parsed) {
         return Err(invalid("expected http(s) with a host"));
     }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    if !crate::media::is_public_source_url(&parsed) {
         return Err(invalid("URLs with embedded credentials are not supported"));
     }
     Ok(parsed)

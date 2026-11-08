@@ -97,10 +97,10 @@ pub(super) async fn fetch_document(
     }
 }
 
-/// Reuses `resolve_source`'s policy (`src/app.rs`) as a reference, not a
-/// dependency: HTTP(S) only, a host present, no embedded userinfo. Feed and
-/// HTTP code must not depend on `app.rs`, so the same three checks are
-/// re-expressed here directly against a parsed `Url`.
+/// Holds a URL to the public-source bar (`src/media`, one implementation for
+/// the whole crate): http(s) with a host, no embedded userinfo. Feed and
+/// HTTP code must not depend on `app.rs`, so the checks are expressed
+/// against a parsed `Url` and the bar itself lives in `media`.
 ///
 /// Both transports in this module use it: `fetch_document` on its origin and
 /// every redirect hop, `service::fetch` on each media redirect hop, so a
@@ -111,10 +111,10 @@ pub(super) fn validate_source_policy(url: &Url) -> Result<(), RemoteFailure> {
         input: redact_url(url.as_str()),
         reason,
     };
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+    if !crate::media::is_http_url_with_host(url) {
         return Err(invalid("expected http(s) with a host"));
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if !crate::media::is_public_source_url(url) {
         return Err(invalid("URLs with embedded credentials are not supported"));
     }
     Ok(())
