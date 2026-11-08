@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The real-time audio callback fills its buffers with one chunk read off
   the ring instead of one atomic operation per sample, roughly two orders
   of magnitude fewer ring movements per fill.
+- A stored seek on a medium that cannot be checkpointed (a live stream, or
+  one whose stored position is under protection) no longer forces an
+  uncoalesced state write per seek: the refused record leaves the snapshot
+  unchanged, so the write that follows batches like any other.
 
 ### Added
 
