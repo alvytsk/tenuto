@@ -670,6 +670,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(levels(&display), vec![0.6, 0.6]);
     }
@@ -684,12 +685,14 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         // Paused: the mapping and the frame are still there and still fresh.
         display.update(
             &source(PlaybackPhase::Paused, &np, Some(&fresh)),
             t0 + Duration::from_millis(10),
             VisualizerMode::Bars,
+            0,
         );
         assert!(decayed(&display, 0.8), "{:?}", levels(&display));
         // And past 150 ms, still paused, it keeps falling.
@@ -698,6 +701,7 @@ mod spectrum_display {
                 &source(PlaybackPhase::Paused, &np, Some(&fresh)),
                 t0 + Duration::from_millis(200 + step),
                 VisualizerMode::Bars,
+                0,
             );
         }
         assert!(levels(&display).iter().all(|level| *level < 0.01));
@@ -713,6 +717,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&stale)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         // Still Playing, same revision and token, same frame: only the clock
         // moved. A delayed worker cleanup must not freeze the display.
@@ -721,6 +726,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&stale)),
             later,
             VisualizerMode::Bars,
+            0,
         );
         assert!(decayed(&display, 0.8), "{:?}", levels(&display));
         // A new window resumes the display.
@@ -729,6 +735,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&resumed)),
             later,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(levels(&display), vec![0.5, 0.5]);
     }
@@ -742,6 +749,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.8))),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(display.peaks(), Some(&[0.8_f32, 0.8][..]));
 
@@ -751,6 +759,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t1, 0.2))),
             t1,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(levels(&display), vec![0.2, 0.2]);
         assert_eq!(display.peaks(), Some(&[0.8_f32, 0.8][..]));
@@ -761,6 +770,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t2, 0.2))),
             t2,
             VisualizerMode::Bars,
+            0,
         );
         let peak = display.peaks().unwrap()[0];
         assert!(peak < 0.8 && peak > 0.2, "{peak}");
@@ -771,12 +781,14 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t3, 0.2))),
             t3,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(display.peaks(), Some(&[0.2_f32, 0.2][..]));
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t3, 0.9))),
             t3,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(display.peaks(), Some(&[0.9_f32, 0.9][..]));
     }
@@ -791,6 +803,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
 
         let other_rev = SpectrumFrame {
@@ -801,6 +814,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&other_rev)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         assert!(decayed(&display, 0.8), "{:?}", levels(&display));
 
@@ -809,12 +823,13 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         let unadopted = DrawSource {
             adopted: Some(LoadRequestId::from_raw(5)),
             ..source(PlaybackPhase::Playing, &np, Some(&fresh))
         };
-        display.update(&unadopted, t0, VisualizerMode::Bars);
+        display.update(&unadopted, t0, VisualizerMode::Bars, 0);
         assert!(decayed(&display, 0.8), "{:?}", levels(&display));
     }
 
@@ -828,12 +843,14 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&old)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         // Disabled: the handle reports no frame.
         display.update(
             &source(PlaybackPhase::Playing, &np, None),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         assert!(decayed(&display, 0.8));
         // Re-enabled without new audio: still nothing, and the old frame is
@@ -843,6 +860,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&old)),
             later,
             VisualizerMode::Bars,
+            0,
         );
         assert!(levels(&display).iter().all(|level| *level < 0.8 * 0.85));
         let new = frame(later, 0.3);
@@ -850,6 +868,7 @@ mod spectrum_display {
             &source(PlaybackPhase::Playing, &np, Some(&new)),
             later,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(levels(&display), vec![0.3, 0.3]);
     }

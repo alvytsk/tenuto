@@ -437,7 +437,9 @@ fn run_loop(
 /// Runs analysis only while this frame has a spectrum row and playback is
 /// `Playing`, then settles what the row will draw: the latest frame's when it
 /// is fresh and belongs to the adopted playback, otherwise the previous
-/// levels (and scope waveform, and flow history) decayed.
+/// levels (and scope waveform, and flow history) decayed. The row's own
+/// width threads into the display, so the flow history lives at panel
+/// columns (none, when the row is gone).
 fn update_spectrum(
     runtime: &PlayerRuntime,
     terminal: &Tty,
@@ -468,6 +470,7 @@ fn update_spectrum(
         },
         Instant::now(),
         VisualizerMode::Bars,
+        row.map_or(0, |region| region.width),
     );
     Ok(())
 }

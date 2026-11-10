@@ -373,6 +373,7 @@ mod scope_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Scope,
+            0,
         );
         assert_eq!(display.waveform(), Some(&pairs[..]));
     }
@@ -389,12 +390,14 @@ mod scope_display {
             &source(PlaybackPhase::Playing, &np, Some(&stale)),
             t0,
             VisualizerMode::Scope,
+            0,
         );
         let later = t0 + Duration::from_millis(150);
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&stale)),
             later,
             VisualizerMode::Scope,
+            0,
         );
         assert!(decayed(&display, -1.0, 0.5), "{:?}", display.waveform());
     }
@@ -411,6 +414,7 @@ mod scope_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Bars,
+            0,
         );
         assert_eq!(display.waveform(), None);
     }
@@ -670,11 +674,13 @@ mod flow_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
             t0,
             VisualizerMode::Flow,
+            1,
         );
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.9))),
             t0,
             VisualizerMode::Flow,
+            1,
         );
         assert_eq!(display.flow().column(0), [0.5, 0.9], "newest last");
     }
@@ -690,11 +696,13 @@ mod flow_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
             t0,
             VisualizerMode::Flow,
+            1,
         );
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.9))),
             t0,
             VisualizerMode::Flow,
+            1,
         );
         assert_eq!(display.flow().column(0), [0.5, 0.9]);
 
@@ -702,6 +710,7 @@ mod flow_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
             t0,
             VisualizerMode::Bars,
+            1,
         );
         assert!(
             display.flow().is_empty(),
@@ -712,6 +721,7 @@ mod flow_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.2))),
             t0,
             VisualizerMode::Flow,
+            1,
         );
         assert_eq!(
             display.flow().column(0),
@@ -732,12 +742,14 @@ mod flow_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Flow,
+            1,
         );
         let later = t0 + Duration::from_millis(150);
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             later,
             VisualizerMode::Flow,
+            1,
         );
         assert_eq!(
             display.flow().column(0).len(),
@@ -759,10 +771,10 @@ mod flow_renderer {
     use ratatui::layout::Rect;
     use ratatui::style::Color;
 
-    use tenuto::tui::spectrum::{FlowHistory, draw_flow};
+    use tenuto::tui::spectrum::{FlowHistory, MAX_FLOW_DEPTH, draw_flow};
     use tenuto::tui::theme::Theme;
 
-    /// The test's own linear-RGB lerp, for the gradient's midpoints; the
+    /// The test's own sRGB-byte lerp, for the gradient's midpoints; the
     /// endpoints are asserted against the theme directly.
     fn lerp(from: Color, to: Color, t: f32) -> Color {
         let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
@@ -794,6 +806,45 @@ mod flow_renderer {
             assert_eq!(buffer[(x, 1)].fg, lerp(theme.amber, theme.cream, 0.5));
             assert_eq!(buffer[(x, 0)].fg, theme.cream, "the top endpoint");
             assert_eq!(buffer[(x, 0)].symbol(), "█");
+        }
+    }
+
+    /// A full ring resampled into three rows lands by nearest entry: the
+    /// bottom row takes the oldest entry, the top row the newest, and the
+    /// middle row the halfway entry — index 7 of a 16-deep ring, whose
+    /// value `8/16` sits exactly on `flow_color`'s amber midpoint, which
+    /// pins the arithmetic and not merely "some middle value".
+    #[test]
+    fn sixteen_entries_resample_into_three_rows_by_nearest_entry() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 1, 3);
+        let mut history = FlowHistory::default();
+        let last = MAX_FLOW_DEPTH as f32;
+        for entry in 1..=MAX_FLOW_DEPTH as u16 {
+            // A level per frame, in the unit interval the value rule clamps
+            // to: the ramp marks the entries' order.
+            history.push(1, Some(&[f32::from(entry) / last]));
+        }
+        let mut buffer = Buffer::empty(area);
+        draw_flow(&mut buffer, area, &history, None, &theme);
+
+        assert_eq!(
+            buffer[(0, 2)].fg,
+            lerp(theme.green, theme.amber, 0.125),
+            "the oldest entry, 1/16, at the bottom"
+        );
+        assert_eq!(
+            buffer[(0, 1)].fg,
+            theme.amber,
+            "the halfway entry, 8/16, in the middle"
+        );
+        assert_eq!(
+            buffer[(0, 0)].fg,
+            theme.cream,
+            "the newest entry, 1.0, on top"
+        );
+        for y in 0..3 {
+            assert_eq!(buffer[(0, y)].symbol(), "█", "row {y}");
         }
     }
 

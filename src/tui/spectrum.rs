@@ -191,17 +191,23 @@ pub struct FlowHistory {
 impl FlowHistory {
     /// Pushes one frame: `levels` resampled to `width` columns by the bars
     /// value rule (`resample_levels`). A `width` different from the last
-    /// push's rebuilds the columns empty first. `None` or empty levels push
-    /// nothing — time moves only when a frame (or [`Self::decay`]) says so.
+    /// push's rebuilds the columns empty first. A `width` of 0 is no panel:
+    /// it pushes nothing and leaves the columns it had. `None` or empty
+    /// levels push nothing too — time moves only when a frame (or
+    /// [`Self::decay`]) says so.
     pub fn push(&mut self, width: u16, levels: Option<&[f32]>) {
+        let count = usize::from(width);
+        if count == 0 {
+            return;
+        }
         if self.width != width {
             self.width = width;
-            self.columns = vec![Vec::new(); usize::from(width)];
+            self.columns = vec![Vec::new(); count];
         }
         let Some(levels) = levels.filter(|levels| !levels.is_empty()) else {
             return;
         };
-        let row = resample_levels(Some(levels), usize::from(width));
+        let row = resample_levels(Some(levels), count);
         for (column, value) in self.columns.iter_mut().zip(row) {
             column.push(value);
             if column.len() > MAX_FLOW_DEPTH {
@@ -224,12 +230,6 @@ impl FlowHistory {
     /// past the width the history was pushed at.
     pub fn column(&self, x: usize) -> &[f32] {
         self.columns.get(x).map_or(&[][..], Vec::as_slice)
-    }
-
-    /// The width the columns live at: the flow renderer maps the row's
-    /// columns onto it.
-    pub fn width(&self) -> u16 {
-        self.width
     }
 
     /// Whether no column carries an entry: fresh out of the box, just
@@ -264,9 +264,17 @@ impl SpectrumDisplay {
     /// `source` allows them at `now`; otherwise decays what was drawn last
     /// by [`DECAY_PER_DRAW`]. A `mode` different from the previous update's
     /// resets the flow history first: a mode switch starts fresh (spec
-    /// §1.2). The history lives at the levels' own band count; the flow
-    /// renderer maps the row's columns onto it.
-    pub fn update(&mut self, source: &DrawSource<'_>, now: Instant, mode: VisualizerMode) {
+    /// §1.2). The history lives at `width`, the spectrum row's own column
+    /// count (0 is no row, and then nothing pushes), so every panel column
+    /// owns a ring of its own and a resize rebuilds; the flow renderer
+    /// reads the rings column-for-column.
+    pub fn update(
+        &mut self,
+        source: &DrawSource<'_>,
+        now: Instant,
+        mode: VisualizerMode,
+        width: u16,
+    ) {
         if self.last_mode != Some(mode) {
             self.flow = FlowHistory::default();
         }
@@ -280,7 +288,6 @@ impl SpectrumDisplay {
                         .map(|level| if level.is_finite() { *level } else { 0.0 }),
                 );
                 if mode == VisualizerMode::Flow {
-                    let width = u16::try_from(self.levels.len()).unwrap_or(u16::MAX);
                     self.flow.push(width, Some(&self.levels));
                 }
             }
@@ -422,8 +429,8 @@ const FLOW_BLOCK: &str = "█";
 
 /// The flow's gradient: a value below one half blends `theme.green` into
 /// `theme.amber` and the rest blends `theme.amber` into `theme.cream`, each
-/// channel a linear-RGB lerp, so the lava runs green through amber to cream
-/// as it heats.
+/// channel lerped in sRGB bytes, so the lava runs green through amber to
+/// cream as it heats.
 fn flow_color(value: f32, theme: &Theme) -> Color {
     let (from, to, t) = if value < 0.5 {
         (theme.green, theme.amber, value / 0.5)
@@ -433,7 +440,7 @@ fn flow_color(value: f32, theme: &Theme) -> Color {
     lerp_color(from, to, t)
 }
 
-/// Blends two colors channel-wise in linear RGB; a pair that is not RGB
+/// Blends two colors channel-wise in sRGB bytes; a pair that is not RGB
 /// passes the first through (the built-in palettes are all RGB).
 fn lerp_color(from: Color, to: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
@@ -450,11 +457,11 @@ fn lerp_color(from: Color, to: Color, t: f32) -> Color {
 /// The flow: each column of `area` is one [`FlowHistory`] column stacked
 /// bottom-up — the oldest frame at the bottom row, the newest at the top —
 /// resampled to `area.height` rows by nearest entry and colored by value
-/// through `flow_color`. Columns map onto the history's own width by
-/// nearest, the bars rule, so the row is full at every width. A zero-value
-/// cell draws nothing, so silence stays silent; a history without any
-/// entries falls back to the live `levels`, so the first fresh frame shows
-/// at once.
+/// through `flow_color`. The history is pushed at this row's own width
+/// (see [`SpectrumDisplay::update`]), so each column reads its own ring; a
+/// column past it draws nothing. A zero-value cell draws nothing, so
+/// silence stays silent; a history without any entries falls back to the
+/// live `levels`, so the first fresh frame shows at once.
 pub fn draw_flow(
     buffer: &mut Buffer,
     area: Rect,
@@ -469,12 +476,11 @@ pub fn draw_flow(
     }
     // No history yet: the live frame is every column's whole stack.
     let live = history.is_empty().then(|| resample_levels(levels, width));
-    let hist_width = usize::from(history.width());
     for x in area.x..area.right() {
         let column = usize::from(x - area.x);
         let values: &[f32] = match live.as_deref() {
             Some(live) => live,
-            None => history.column(column * hist_width / width),
+            None => history.column(column),
         };
         if values.is_empty() {
             continue;
