@@ -101,10 +101,17 @@ fn the_tui_flags_keep_their_defaults_and_help() -> Result<(), Box<dyn std::error
         "          [default: auto]\n",
         "          [possible values: auto, blocks, off]\n",
         "\n",
+        "      --theme <THEME>\n",
+        "          The theme to start with; saved as the new default\n",
+        "\n",
+        "      --visualizer <VISUALIZER>\n",
+        "          The visualizer for this run; the saved mode is kept\n",
+        "\n",
         "  -h, --help\n",
         "          Print help\n",
     );
-    let Some(CliCommand::Tui { mouse, artwork }) = Cli::try_parse_from(["tenuto", "tui"])?.command
+    let Some(CliCommand::Tui { mouse, artwork, .. }) =
+        Cli::try_parse_from(["tenuto", "tui"])?.command
     else {
         panic!("`tenuto tui` parses to the tui subcommand");
     };
@@ -115,7 +122,7 @@ fn the_tui_flags_keep_their_defaults_and_help() -> Result<(), Box<dyn std::error
     );
 
     let flags = ["tenuto", "tui", "--mouse", "off", "--artwork", "blocks"];
-    let Some(CliCommand::Tui { mouse, artwork }) = Cli::try_parse_from(flags)?.command else {
+    let Some(CliCommand::Tui { mouse, artwork, .. }) = Cli::try_parse_from(flags)?.command else {
         panic!("the flags parse to the tui subcommand");
     };
     assert_eq!((mouse, artwork), (MouseMode::Off, ArtworkMode::Blocks));

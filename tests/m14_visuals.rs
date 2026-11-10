@@ -7,8 +7,10 @@ mod support;
 #[path = "support/runtime.rs"]
 mod runtime;
 
+use clap::Parser;
 use runtime::rig_with;
 use tenuto::application::runtime::AppCommand;
+use tenuto::cli::{Cli, CliCommand};
 use tenuto::persistence::model::PersistedState;
 use tenuto::session::{Action, Session};
 
@@ -109,4 +111,39 @@ fn the_set_theme_command_lands_in_state_through_the_runtime() {
         Some("winamp"),
         "the dispatched theme lands in state"
     );
+}
+
+/// M14 §1.3: `--visualizer` accepts a stored spelling and rejects an
+/// unknown one at parse time, naming the valid set.
+#[test]
+fn tui_visualizer_parses_a_stored_spelling_and_names_the_valid_set_when_rejected() {
+    let parsed =
+        Cli::try_parse_from(["tenuto", "tui", "--visualizer", "flow"]).expect("flow parses");
+    let Some(CliCommand::Tui { visualizer, .. }) = parsed.command else {
+        panic!("`tenuto tui --visualizer flow` parses to the tui subcommand");
+    };
+    assert_eq!(visualizer.as_deref(), Some("flow"));
+
+    let error = Cli::try_parse_from(["tenuto", "tui", "--visualizer", "plasma"])
+        .expect_err("an unknown visualizer is a usage error");
+    assert!(
+        error.to_string().contains("valid: bars, scope, flow"),
+        "{error}"
+    );
+}
+
+/// Both flags absent: `None` on each. That absence is what the startup
+/// (Task 9) reads as "use the saved state", so it must stay distinguishable
+/// from an explicitly passed value.
+#[test]
+fn absent_theme_and_visualizer_flags_parse_to_none() {
+    let parsed = Cli::try_parse_from(["tenuto", "tui"]).expect("the bare tui parses");
+    let Some(CliCommand::Tui {
+        theme, visualizer, ..
+    }) = parsed.command
+    else {
+        panic!("`tenuto tui` parses to the tui subcommand");
+    };
+    assert_eq!(theme, None);
+    assert_eq!(visualizer, None);
 }

@@ -75,6 +75,8 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
         return crate::tui::run(crate::tui::TuiOptions {
             mouse: crate::tui::MouseMode::default(),
             artwork: crate::tui::images::ArtworkMode::default(),
+            theme: None,
+            visualizer: None,
         })
         .map_err(AppError::from);
     };
@@ -127,9 +129,18 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
             // the enclosure, what is checkpointed is the episode.
             run_resolved(media, location)
         }
-        CliCommand::Tui { mouse, artwork } => {
-            crate::tui::run(crate::tui::TuiOptions { mouse, artwork }).map_err(AppError::from)
-        }
+        CliCommand::Tui {
+            mouse,
+            artwork,
+            theme,
+            visualizer,
+        } => crate::tui::run(crate::tui::TuiOptions {
+            mouse,
+            artwork,
+            theme,
+            visualizer,
+        })
+        .map_err(AppError::from),
         command => crate::commands::run(command)
             .map(|()| RunOutcome::Completed)
             .map_err(Into::into),

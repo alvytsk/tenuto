@@ -95,6 +95,14 @@ pub enum MouseMode {
 pub struct TuiOptions {
     pub mouse: MouseMode,
     pub artwork: ArtworkMode,
+    /// `--theme`'s raw spelling: written through to the saved state at
+    /// startup, so an explicitly chosen theme becomes the default for later
+    /// runs too. `None` leaves the saved theme alone.
+    pub theme: Option<String>,
+    /// `--visualizer`'s raw spelling: overrides the saved mode for this run
+    /// only and is never persisted, mirroring `--artwork`. `None` uses the
+    /// saved mode.
+    pub visualizer: Option<String>,
 }
 
 type Tty = Terminal<CrosstermBackend<Stdout>>;

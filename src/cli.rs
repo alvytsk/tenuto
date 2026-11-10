@@ -6,6 +6,8 @@ use clap::{Parser, Subcommand};
 
 use crate::tui::MouseMode;
 use crate::tui::images::ArtworkMode;
+use crate::tui::spectrum::VisualizerMode;
+use crate::tui::theme::ThemeId;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -60,6 +62,12 @@ pub enum CliCommand {
         /// How the player draws cover art.
         #[arg(long, value_enum, default_value_t = ArtworkMode::Auto)]
         artwork: ArtworkMode,
+        /// The theme to start with; saved as the new default.
+        #[arg(long, value_parser = validate_theme)]
+        theme: Option<String>,
+        /// The visualizer for this run; the saved mode is kept.
+        #[arg(long, value_parser = validate_visualizer)]
+        visualizer: Option<String>,
     },
     /// List every subscription.
     Feeds,
@@ -104,4 +112,22 @@ fn positive_count(value: &str) -> Result<NonZeroUsize, String> {
         .ok()
         .and_then(NonZeroUsize::new)
         .ok_or_else(|| "expected a positive count".into())
+}
+
+/// §2.1: a theme typo is a usage error, not a silent default, and the error
+/// names every valid spelling. The value travels as the raw string — the
+/// same spelling storage carries — so this stays a parse-time check only.
+fn validate_theme(value: &str) -> Result<String, String> {
+    ThemeId::from_stored(value)
+        .map(|_| value.to_owned())
+        .ok_or_else(|| {
+            format!("unknown theme \"{value}\" (valid: gruvbox, winamp, nord, solarized-dark)")
+        })
+}
+
+/// §1.3: the visualizer validates the same way, over its three-mode set.
+fn validate_visualizer(value: &str) -> Result<String, String> {
+    VisualizerMode::from_stored(value)
+        .map(|_| value.to_owned())
+        .ok_or_else(|| format!("unknown visualizer \"{value}\" (valid: bars, scope, flow)"))
 }
