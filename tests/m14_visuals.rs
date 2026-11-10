@@ -304,3 +304,230 @@ fn a_window_without_a_waveform_publishes_none() {
     let frame = published(schedule.tick(t0, Nanos(0)));
     assert_eq!(frame.waveform, None);
 }
+
+// -------------------------------------------- the scope's view state
+
+mod scope_display {
+    use std::time::{Duration, Instant};
+
+    use tenuto::application::transport::PlaybackPhase;
+    use tenuto::application::view::NowPlaying;
+    use tenuto::playback::command::LoadRequestId;
+    use tenuto::playback::output::Nanos;
+    use tenuto::playback::spectrum::worker::SpectrumFrame;
+    use tenuto::tui::spectrum::{DrawSource, SpectrumDisplay, VisualizerMode};
+
+    const TOKEN: LoadRequestId = LoadRequestId::from_raw(4);
+
+    fn now_playing() -> NowPlaying {
+        NowPlaying {
+            session_rev: 9,
+            load: Some(TOKEN),
+            ..NowPlaying::unloaded()
+        }
+    }
+
+    fn frame(published_at: Instant, waveform: Option<Vec<(f32, f32)>>) -> SpectrumFrame {
+        SpectrumFrame {
+            session_rev: 9,
+            bands: vec![(40.0, 85.0)],
+            levels: vec![0.5],
+            waveform,
+            at: Nanos(0),
+            published_at,
+        }
+    }
+
+    fn source<'a>(
+        phase: PlaybackPhase,
+        now_playing: &'a NowPlaying,
+        frame: Option<&'a SpectrumFrame>,
+    ) -> DrawSource<'a> {
+        DrawSource {
+            phase,
+            now_playing: Some(now_playing),
+            adopted: Some(TOKEN),
+            frame,
+        }
+    }
+
+    /// Both tuple entries decayed once toward zero by `DECAY_PER_DRAW`.
+    fn decayed(display: &SpectrumDisplay, min: f32, peak: f32) -> bool {
+        display.waveform().is_some_and(|waveform| {
+            waveform.iter().all(|&(drawn_min, drawn_peak)| {
+                (drawn_min - min * 0.85).abs() < 1e-6 && (drawn_peak - peak * 0.85).abs() < 1e-6
+            })
+        })
+    }
+
+    /// Scope takes the frame's fresh waveform, under the same gate chain the
+    /// levels follow.
+    #[test]
+    fn scope_takes_a_fresh_matching_waveform() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let pairs = vec![(-0.5_f32, 0.25_f32), (0.0_f32, 0.75_f32)];
+        let fresh = frame(t0, Some(pairs.clone()));
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&fresh)),
+            t0,
+            VisualizerMode::Scope,
+        );
+        assert_eq!(display.waveform(), Some(&pairs[..]));
+    }
+
+    /// A stale waveform (only the clock moved) decays both tuple entries
+    /// toward zero, exactly as bars fall.
+    #[test]
+    fn a_stale_waveform_decays_both_entries() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let stale = frame(t0, Some(vec![(-1.0_f32, 0.5_f32)]));
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&stale)),
+            t0,
+            VisualizerMode::Scope,
+        );
+        let later = t0 + Duration::from_millis(150);
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&stale)),
+            later,
+            VisualizerMode::Scope,
+        );
+        assert!(decayed(&display, -1.0, 0.5), "{:?}", display.waveform());
+    }
+
+    /// Bars never take the waveform: its state stays `None` even when the
+    /// frame carries one.
+    #[test]
+    fn bars_mode_never_takes_the_waveform() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let fresh = frame(t0, Some(vec![(-1.0_f32, 1.0_f32)]));
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&fresh)),
+            t0,
+            VisualizerMode::Bars,
+        );
+        assert_eq!(display.waveform(), None);
+    }
+
+    /// The same gate chain as `fresh_levels`: a frame for another revision or
+    /// the unadopted token is refused, and a frame that carries no waveform
+    /// (nobody wanted scope since it was analyzed) refuses too.
+    #[test]
+    fn fresh_waveform_refuses_a_foreign_revision_or_token() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let fresh = frame(t0, Some(vec![(0.0_f32, 0.5_f32)]));
+        let own = source(PlaybackPhase::Playing, &np, Some(&fresh));
+        assert_eq!(own.fresh_waveform(t0), Some(&[(0.0, 0.5)][..]));
+
+        let other_rev = SpectrumFrame {
+            session_rev: 10,
+            ..frame(t0, Some(vec![(0.0, 1.0)]))
+        };
+        let foreign = source(PlaybackPhase::Playing, &np, Some(&other_rev));
+        assert_eq!(foreign.fresh_waveform(t0), None);
+
+        let unadopted = DrawSource {
+            adopted: Some(LoadRequestId::from_raw(5)),
+            ..source(PlaybackPhase::Playing, &np, Some(&fresh))
+        };
+        assert_eq!(unadopted.fresh_waveform(t0), None);
+
+        let bare = frame(t0, None);
+        let sourceless = source(PlaybackPhase::Playing, &np, Some(&bare));
+        assert_eq!(sourceless.fresh_waveform(t0), None);
+    }
+}
+
+// ------------------------------------------- the scope's renderer
+
+mod scope_renderer {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    use tenuto::playback::spectrum::worker::WAVEFORM_COLUMNS;
+    use tenuto::tui::spectrum::draw_scope;
+    use tenuto::tui::theme::Theme;
+
+    /// Column `x` as one `(symbol, fg)` per row, top to bottom.
+    fn column(buffer: &Buffer, x: u16) -> Vec<(&str, Color)> {
+        (0..buffer.area.height)
+            .map(|y| (buffer[(x, y)].symbol(), buffer[(x, y)].fg))
+            .collect()
+    }
+
+    /// A spike renders green blocks above and below the midline at its
+    /// column: width 48 resamples column `x` to the waveform's `2x`, so the
+    /// spike at 48 lands on x 24; ten rows put the midline at 5, half at 5,
+    /// so peak 0.4 reaches two rows up and min −0.6 three rows down. Every
+    /// other column is silence: the muted midline and nothing else.
+    #[test]
+    fn a_spike_draws_green_blocks_about_the_midline_at_its_column() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 48, 10);
+        let mut waveform = vec![(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS];
+        waveform[48] = (-0.6, 0.4);
+        let mut buffer = Buffer::empty(area);
+        draw_scope(&mut buffer, area, Some(&waveform), &theme);
+
+        let blank = (" ", Color::Reset);
+        let mut silent = vec![blank; 10];
+        silent[5] = ("█", theme.muted);
+        let mut spike = vec![blank; 10];
+        for y in 3..=8 {
+            spike[y as usize] = ("█", theme.green);
+        }
+        for x in 0..48 {
+            let expected = match x {
+                24 => &spike,
+                _ => &silent,
+            };
+            assert_eq!(column(&buffer, x), *expected, "column {x}");
+        }
+    }
+
+    /// §1.2: silence looks silent — an all-zero waveform is the flat muted
+    /// midline and nothing else; an absent waveform falls flat the same way;
+    /// at one row tall a silent column draws nothing at all.
+    #[test]
+    fn silence_draws_only_the_muted_midline_and_nothing_at_one_row() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 12, 6);
+        let mut silent = vec![(" ", Color::Reset); 6];
+        silent[3] = ("█", theme.muted);
+
+        let mut buffer = Buffer::empty(area);
+        draw_scope(
+            &mut buffer,
+            area,
+            Some(&[(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS][..]),
+            &theme,
+        );
+        for x in 0..12 {
+            assert_eq!(column(&buffer, x), silent, "column {x}");
+        }
+
+        let mut buffer = Buffer::empty(area);
+        draw_scope(&mut buffer, area, None, &theme);
+        for x in 0..12 {
+            assert_eq!(column(&buffer, x), silent, "absent, column {x}");
+        }
+
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buffer = Buffer::empty(area);
+        draw_scope(
+            &mut buffer,
+            area,
+            Some(&[(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS][..]),
+            &theme,
+        );
+        assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+    }
+}

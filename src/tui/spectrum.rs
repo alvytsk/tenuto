@@ -13,19 +13,24 @@
 //! the bar, and never below it.
 //!
 //! M14 makes the row selectable: [`VisualizerMode`] names what it draws,
-//! and `v` cycles bars → scope → flow → bars. Storage folds the default to
+//! and `v` cycles bars → scope → flow → bars. The scope draws the frame's
+//! decimated waveform about a midline ([`draw_scope`]); like the levels, the
+//! drawn waveform lives in [`SpectrumDisplay`] between draws and decays when
+//! no fresh frame carries one. Storage folds the default to
 //! absent — `Bars` never serializes — but the spelling vocabulary here is
 //! the CLI's `--visualizer` too, where `bars` is a legal value; parsing is
 //! total over the vocabulary, and only storage hides the default.
 
 use std::time::{Duration, Instant};
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use crate::application::transport::PlaybackPhase;
 use crate::application::view::NowPlaying;
 use crate::playback::command::LoadRequestId;
-use crate::playback::spectrum::worker::{SpectrumFrame, frame_is_fresh};
+use crate::playback::spectrum::worker::{SpectrumFrame, WAVEFORM_COLUMNS, frame_is_fresh};
+use crate::tui::theme::Theme;
 
 /// What the spectrum row draws.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -98,17 +103,35 @@ pub struct DrawSource<'a> {
 }
 
 impl<'a> DrawSource<'a> {
+    /// Whether `frame` may be drawn at `now`: playback is still `Playing`,
+    /// the frame belongs to the adopted playback's revision, that playback's
+    /// token is the adopted one, and the frame is fresh.
+    fn drawable(&self, frame: &SpectrumFrame, now: Instant) -> bool {
+        let Some(now_playing) = self.now_playing else {
+            return false;
+        };
+        self.phase == PlaybackPhase::Playing
+            && frame.session_rev == now_playing.session_rev
+            && now_playing.load.is_some()
+            && now_playing.load == self.adopted
+            && frame_is_fresh(frame, now)
+    }
+
     /// The frame's levels, when they may be drawn at `now`: playback is still
     /// `Playing`, the frame belongs to the adopted playback's revision, that
     /// playback's token is the adopted one, and the frame is fresh.
     pub fn fresh_levels(&self, now: Instant) -> Option<&'a [f32]> {
-        let now_playing = self.now_playing?;
         let frame = self.frame?;
-        let owned = self.phase == PlaybackPhase::Playing
-            && frame.session_rev == now_playing.session_rev
-            && now_playing.load.is_some()
-            && now_playing.load == self.adopted;
-        (owned && frame_is_fresh(frame, now)).then_some(frame.levels.as_slice())
+        self.drawable(frame, now).then_some(frame.levels.as_slice())
+    }
+
+    /// The frame's decimated `(min, peak)` waveform, under the same gate
+    /// chain as [`Self::fresh_levels`]. `None` also when the frame carries no
+    /// waveform, as when nobody has asked for scope since it was analyzed.
+    pub fn fresh_waveform(&self, now: Instant) -> Option<&'a [(f32, f32)]> {
+        let frame = self.frame?;
+        let waveform = frame.waveform.as_deref()?;
+        self.drawable(frame, now).then_some(waveform)
     }
 }
 
@@ -117,15 +140,20 @@ impl<'a> DrawSource<'a> {
 pub struct SpectrumDisplay {
     levels: Vec<f32>,
     peaks: Vec<f32>,
+    /// The drawn waveform between draws, scope mode's state: `(min, peak)`
+    /// pairs about the midline, decayed like the levels when no fresh frame
+    /// carries one.
+    waveform: Option<Vec<(f32, f32)>>,
     /// When each peak was last pushed up by its bar.
     raised: Vec<Instant>,
     updated: Option<Instant>,
 }
 
 impl SpectrumDisplay {
-    /// Takes fresh levels when `source` allows them at `now`; otherwise
-    /// decays what was drawn last by [`DECAY_PER_DRAW`].
-    pub fn update(&mut self, source: &DrawSource<'_>, now: Instant) {
+    /// Takes fresh levels — and, in scope mode, the fresh waveform — when
+    /// `source` allows them at `now`; otherwise decays what was drawn last
+    /// by [`DECAY_PER_DRAW`].
+    pub fn update(&mut self, source: &DrawSource<'_>, now: Instant, mode: VisualizerMode) {
         match source.fresh_levels(now) {
             Some(levels) => {
                 self.levels.clear();
@@ -138,6 +166,24 @@ impl SpectrumDisplay {
             None => {
                 for level in &mut self.levels {
                     *level *= DECAY_PER_DRAW;
+                }
+            }
+        }
+        // Only scope takes the waveform; everything it held otherwise decays
+        // toward the midline exactly as bars fall.
+        let fresh = if mode == VisualizerMode::Scope {
+            source.fresh_waveform(now)
+        } else {
+            None
+        };
+        match fresh {
+            Some(waveform) => self.waveform = Some(waveform.to_vec()),
+            None => {
+                if let Some(waveform) = &mut self.waveform {
+                    for (min, peak) in waveform {
+                        *min *= DECAY_PER_DRAW;
+                        *peak *= DECAY_PER_DRAW;
+                    }
                 }
             }
         }
@@ -178,6 +224,67 @@ impl SpectrumDisplay {
     /// Each band's peak, alongside [`Self::levels`].
     pub fn peaks(&self) -> Option<&[f32]> {
         (!self.peaks.is_empty()).then_some(self.peaks.as_slice())
+    }
+
+    /// The drawn waveform between draws, `None` until scope took one: the
+    /// row then shows the flat midline.
+    pub fn waveform(&self) -> Option<&[(f32, f32)]> {
+        self.waveform
+            .as_deref()
+            .filter(|waveform| !waveform.is_empty())
+    }
+}
+
+/// The scope's one glyph: a full block, stacked from the peak's reach above
+/// the midline down to the minimum's below it.
+const SCOPE_BLOCK: &str = "█";
+
+/// The waveform's `(min, peak)` envelope about the midline: one column per
+/// `area.width`, resampled from the frame's [`WAVEFORM_COLUMNS`] by nearest
+/// index, green from where the peak reaches up to where the minimum dips
+/// down, both clamped into the area. A silent column (`min == peak == 0`) is
+/// the midline cell in the muted color while two rows can spare a line,
+/// nothing one row tall; absent or short data is silence, so a stale or
+/// waveform-less frame falls flat exactly as bars fall.
+pub fn draw_scope(buffer: &mut Buffer, area: Rect, waveform: Option<&[(f32, f32)]>, theme: &Theme) {
+    let width = usize::from(area.width);
+    let height = usize::from(area.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let midline = area.y + area.height / 2;
+    let half = f32::from(area.height / 2);
+    for x in area.x..area.right() {
+        let column = usize::from(x - area.x) * WAVEFORM_COLUMNS / width;
+        // A non-finite bound is silence, the rule the levels draw by.
+        let (min, peak) = waveform
+            .and_then(|waveform| waveform.get(column))
+            .and_then(|&(min, peak)| {
+                min.is_finite()
+                    .then_some(min)
+                    .zip(peak.is_finite().then_some(peak))
+            })
+            .unwrap_or((0.0, 0.0));
+        if min == 0.0 && peak == 0.0 {
+            if height >= 2
+                && let Some(cell) = buffer.cell_mut((x, midline))
+            {
+                cell.set_symbol(SCOPE_BLOCK).set_fg(theme.muted);
+            }
+            continue;
+        }
+        // Both extents round into [0, half], so they stay in the area.
+        let up = (peak.clamp(0.0, 1.0) * half).round() as u16;
+        let down = (min.abs().clamp(0.0, 1.0) * half).round() as u16;
+        let top = midline.saturating_sub(up);
+        let bottom = midline
+            .saturating_add(down)
+            .min(area.bottom().saturating_sub(1));
+        for y in top..=bottom {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_symbol(SCOPE_BLOCK).set_fg(theme.green);
+            }
+        }
     }
 }
 

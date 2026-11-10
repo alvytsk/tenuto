@@ -75,7 +75,7 @@ use crate::tui::images::{ArtworkMode, CoverCache, failure_status, picker_for, qu
 use crate::tui::input::{Effect, handle_key, handle_mouse, routes_to_browser};
 use crate::tui::layout::{regions, tier_for};
 use crate::tui::render::{CoverView, HitMap, Visuals};
-use crate::tui::spectrum::{DrawSource, SpectrumDisplay, wants_analysis};
+use crate::tui::spectrum::{DrawSource, SpectrumDisplay, VisualizerMode, wants_analysis};
 use crate::tui::state::{Overlay, UiState};
 
 /// How long one loop pass waits for terminal input before pumping the
@@ -406,7 +406,7 @@ fn run_loop(
             // pointer comparison, not a rebuild.
             browser.sync_queue(&runtime.rows_of(browser.dest));
         }
-        if let Err(error) = update_spectrum(runtime, terminal, &view, &mut spectrum) {
+        if let Err(error) = update_spectrum(runtime, terminal, &view, &mut ui, &mut spectrum) {
             return Ending::Failed(LifecycleError::Terminal(error));
         }
         let visuals = Visuals {
@@ -417,6 +417,7 @@ fn run_loop(
             browser: browsing.state.as_ref(),
             spectrum: spectrum.levels(),
             peaks: spectrum.peaks(),
+            waveform: spectrum.waveform(),
         };
         // Checked again at the last moment: a worker's fatal panic can
         // restore the primary screen while this pass prepares its frame, and
@@ -433,13 +434,17 @@ fn run_loop(
 }
 
 /// Runs analysis only while this frame has a spectrum row and playback is
-/// `Playing`, then settles the levels the row will draw: the latest frame's
-/// when it is fresh and belongs to the adopted playback, otherwise the
-/// previous levels decayed.
+/// `Playing`, then settles what the row will draw: the latest frame's when it
+/// is fresh and belongs to the adopted playback, otherwise the previous
+/// levels (and scope waveform) decayed.
 fn update_spectrum(
     runtime: &PlayerRuntime,
     terminal: &Tty,
     view: &PlayerView,
+    // The visualizer mode is the UI's once `v` lands (M14); until then the
+    // row stays bars, and this parameter is where the mode and flow's row
+    // history will live.
+    _ui: &mut UiState,
     display: &mut SpectrumDisplay,
 ) -> io::Result<()> {
     let size = terminal.size()?;
@@ -462,6 +467,7 @@ fn update_spectrum(
             frame: frame.as_ref(),
         },
         Instant::now(),
+        VisualizerMode::Bars,
     );
     Ok(())
 }

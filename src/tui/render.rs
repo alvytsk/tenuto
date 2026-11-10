@@ -33,8 +33,8 @@ use crate::tui::state::{ClockMode, InputPurpose, Overlay, UiState};
 use crate::tui::tabs;
 use crate::tui::theme::Theme;
 
-/// What the frame shows beyond the view: prepared artwork, spectrum levels
-/// and the open browser.
+/// What the frame shows beyond the view: prepared artwork, spectrum levels,
+/// the scope's waveform and the open browser.
 #[derive(Default)]
 pub struct Visuals<'a> {
     pub cover: CoverView<'a>,
@@ -42,6 +42,9 @@ pub struct Visuals<'a> {
     pub spectrum: Option<&'a [f32]>,
     /// Each band's falling peak, 0.0 to 1.0; drawn as a cap above its bar.
     pub peaks: Option<&'a [f32]>,
+    /// The scope's drawn `(min, peak)` waveform, kept across draws so it can
+    /// decay.
+    pub waveform: Option<&'a [(f32, f32)]>,
     /// Drawn while `UiState::overlay` is `Overlay::Browser`.
     pub browser: Option<&'a BrowserState>,
 }
