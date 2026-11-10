@@ -179,9 +179,17 @@ pub fn draw(
     let area = frame.area();
     let tier = tier_for(area.width, area.height);
     let regions = regions(area, tier, info_line_count(view));
-    let theme = Theme::default();
+    let theme = ui.theme;
     let buffer = frame.buffer_mut();
-    buffer.set_style(area, Style::new().fg(theme.text));
+    // The frame's first render step (M14 §2.2): the theme's text colour
+    // everywhere, plus its background when the theme paints one, before
+    // the layout is carved. `set_style` patches, so widgets that set
+    // explicit styles draw over it unchanged.
+    let mut base = Style::new().fg(theme.text);
+    if let Some(bg) = theme.bg {
+        base = base.bg(bg);
+    }
+    buffer.set_style(area, base);
 
     if tier == Tier::Resize {
         draw_resize(buffer, &regions, &theme);
