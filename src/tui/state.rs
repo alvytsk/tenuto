@@ -1,10 +1,13 @@
 //! What the terminal front end remembers between frames that the player
 //! itself does not: the selected queue row, the open overlay, whether mouse
-//! capture is on, the text being typed and how far the queue is scrolled.
+//! capture is on, the text being typed, how far the queue is scrolled, and
+//! the session's appearance — its theme and the visualizer's mode.
 
 use crate::application::view::PlayerView;
 use crate::playlist::PlaylistId;
 use crate::queue::QueueEntryId;
+use crate::tui::spectrum::VisualizerMode;
+use crate::tui::theme::Theme;
 
 /// What the input overlay is collecting, and for which playlist (§10): the
 /// target is captured when the overlay opens, so a view that moves on before
@@ -91,6 +94,15 @@ pub struct UiState {
     /// The first queue row the listing tries to show; drawing still scrolls
     /// as far as it must to keep the selection visible.
     pub queue_offset: usize,
+    /// The palette this session opened with (M14 §2.1): themes apply at
+    /// startup and never switch live, so nothing mutates it afterwards.
+    pub theme: Theme,
+    /// What the spectrum row draws (M14 §1.2): startup restores the saved
+    /// (or flagged) mode and `v` cycles it from there.
+    pub visualizer: VisualizerMode,
+    /// The spectrum row's height as the last frame drew it; 0 before the
+    /// first frame, and `v`'s minimal-tier skip reads it.
+    pub spectrum_rows: u16,
     /// The playlist the last reconciled view showed, so switching playlists
     /// starts its listing at the top instead of inheriting a scroll.
     viewed: Option<PlaylistId>,
@@ -108,8 +120,20 @@ impl UiState {
             filter: String::new(),
             sort_cursor: 0,
             queue_offset: 0,
+            theme: Theme::default(),
+            visualizer: VisualizerMode::default(),
+            spectrum_rows: 0,
             viewed: None,
         }
+    }
+
+    /// The session's appearance, resolved once at startup (M14 §1.3, §2.1):
+    /// the theme applies only here — there is no live-switch key — and the
+    /// visualizer is the saved (or flagged) mode `v` then cycles.
+    pub fn with_appearance(mut self, theme: Theme, visualizer: VisualizerMode) -> Self {
+        self.theme = theme;
+        self.visualizer = visualizer;
+        self
     }
 
     /// Keeps the selection pointing at a row that exists after the queue

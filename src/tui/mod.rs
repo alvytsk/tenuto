@@ -77,6 +77,7 @@ use crate::tui::layout::{regions, tier_for};
 use crate::tui::render::{CoverView, HitMap, Visuals};
 use crate::tui::spectrum::{DrawSource, SpectrumDisplay, VisualizerMode, wants_analysis};
 use crate::tui::state::{Overlay, UiState};
+use crate::tui::theme::ThemeId;
 
 /// How long one loop pass waits for terminal input before pumping the
 /// runtime again; also the bound on how late a signal or fatal panic is seen.
@@ -175,6 +176,16 @@ macro_rules! attempt {
     };
 }
 
+/// The run's visualizer (M14 §1.3): the `--visualizer` flag first —
+/// run-scoped, never dispatched — then the saved raw string, then the
+/// default. The CLI has already validated the flag's spelling, and a saved
+/// one it cannot read (a hand-edited file) is the default, never an error.
+pub fn resolve_visualizer(flag: Option<&str>, saved: Option<&str>) -> VisualizerMode {
+    flag.or(saved)
+        .and_then(VisualizerMode::from_stored)
+        .unwrap_or_default()
+}
+
 fn start_and_loop(
     hook: TestHook,
     options: &TuiOptions,
@@ -233,7 +244,19 @@ fn start_and_loop(
     let artwork = Artwork::new(options.artwork, picker, hook);
     stage!(signals, cleanup);
 
-    let ui = UiState::new(options.mouse == MouseMode::On);
+    // The appearance (M14 §1.3, §2.1): an explicit `--theme` writes through
+    // to the saved state — it becomes later runs' default too — while the
+    // `--visualizer` flag is run-scoped and never dispatched. Both resolve
+    // once, here, before the loop reads them.
+    if let Some(theme) = &options.theme {
+        runtime.handle(AppCommand::SetTheme(Some(theme.clone())));
+    }
+    let state = runtime.session().state();
+    let theme = ThemeId::from_stored(state.theme().unwrap_or(""))
+        .unwrap_or_default()
+        .theme();
+    let visualizer = resolve_visualizer(options.visualizer.as_deref(), state.visualizer_mode());
+    let ui = UiState::new(options.mouse == MouseMode::On).with_appearance(theme, visualizer);
     run_loop(runtime, terminal, ui, artwork, cleanup, signals)
 }
 
@@ -439,14 +462,14 @@ fn run_loop(
 /// is fresh and belongs to the adopted playback, otherwise the previous
 /// levels (and scope waveform, and flow history) decayed. The row's own
 /// width threads into the display, so the flow history lives at panel
-/// columns (none, when the row is gone).
+/// columns (none, when the row is gone), and its height seeds
+/// `ui.spectrum_rows`, which `v`'s minimal-tier skip reads. Scope is the
+/// only mode that reads the waveform, so only it asks the worker for one.
 fn update_spectrum(
     runtime: &PlayerRuntime,
     terminal: &Tty,
     view: &PlayerView,
-    // The visualizer mode is the UI's once `v` is wired (M14 Task 9); until
-    // then the row stays bars.
-    _ui: &mut UiState,
+    ui: &mut UiState,
     display: &mut SpectrumDisplay,
 ) -> io::Result<()> {
     let size = terminal.size()?;
@@ -457,8 +480,10 @@ fn update_spectrum(
         render::info_line_count(view),
     )
     .spectrum;
+    ui.spectrum_rows = row.map_or(0, |region| region.height);
     let frame = runtime.spectrum().and_then(|handle| {
         handle.set_enabled(wants_analysis(row, view.phase));
+        handle.set_wants_waveform(ui.visualizer == VisualizerMode::Scope);
         handle.latest()
     });
     display.update(
@@ -469,7 +494,7 @@ fn update_spectrum(
             frame: frame.as_ref(),
         },
         Instant::now(),
-        VisualizerMode::Bars,
+        ui.visualizer,
         row.map_or(0, |region| region.width),
     );
     Ok(())

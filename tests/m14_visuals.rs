@@ -7,6 +7,9 @@ mod support;
 #[path = "support/runtime.rs"]
 mod runtime;
 
+#[path = "support/views.rs"]
+mod views;
+
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -890,5 +893,279 @@ mod flow_renderer {
         let mut buffer = Buffer::empty(area);
         draw_flow(&mut buffer, area, &FlowHistory::default(), None, &theme);
         assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+    }
+}
+
+// ------------------------------- the v key, the skip rule and the ui state
+
+mod v_key {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use tenuto::application::runtime::AppCommand;
+    use tenuto::tui::input::{Effect, handle_key};
+    use tenuto::tui::spectrum::VisualizerMode;
+    use tenuto::tui::state::UiState;
+    use tenuto::tui::theme::{Theme, ThemeId};
+
+    use crate::views;
+
+    fn plain(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+    }
+
+    /// The spelling the one `SetVisualizer` effect carried — `None` when the
+    /// cycle landed back on the default, which is what clears the field.
+    fn dispatched(effects: &[Effect]) -> Option<String> {
+        match effects {
+            [Effect::App(AppCommand::SetVisualizer(spelling))] => spelling.clone(),
+            other => panic!("expected one SetVisualizer effect, got {other:?}"),
+        }
+    }
+
+    /// M14 §1.2: `v` on a panel with rows cycles bars → scope → flow →
+    /// bars, mutating the state and dispatching each new spelling — the
+    /// bars leg as `None`, the shape that clears the stored field.
+    #[test]
+    fn v_cycles_the_modes_and_dispatches_each_spelling() {
+        let view = views::sample_view();
+        let mut ui = UiState::new(true);
+        ui.spectrum_rows = 8;
+
+        let effects = handle_key(plain('v'), &mut ui, &view);
+        assert_eq!(ui.visualizer, VisualizerMode::Scope);
+        assert_eq!(dispatched(&effects).as_deref(), Some("scope"));
+
+        let effects = handle_key(plain('v'), &mut ui, &view);
+        assert_eq!(ui.visualizer, VisualizerMode::Flow);
+        assert_eq!(dispatched(&effects).as_deref(), Some("flow"));
+
+        let effects = handle_key(plain('v'), &mut ui, &view);
+        assert_eq!(ui.visualizer, VisualizerMode::Bars);
+        assert_eq!(dispatched(&effects), None, "bars stores as absent");
+    }
+
+    /// Spec §1.2: flow needs more than one row to mean anything, so a
+    /// one-row panel cycles bars → scope → bars — flow skipped.
+    #[test]
+    fn a_one_row_panel_skips_flow() {
+        let view = views::sample_view();
+        let mut ui = UiState::new(true);
+        ui.spectrum_rows = 1;
+        handle_key(plain('v'), &mut ui, &view);
+        assert_eq!(ui.visualizer, VisualizerMode::Scope);
+
+        let effects = handle_key(plain('v'), &mut ui, &view);
+        assert_eq!(ui.visualizer, VisualizerMode::Bars, "flow skipped");
+        assert_eq!(dispatched(&effects), None);
+    }
+
+    /// A fresh state is the default palette on bars with no panel seen yet;
+    /// `with_appearance` replaces the theme and the mode — the startup's
+    /// one resolution — and leaves the panel height alone.
+    #[test]
+    fn with_appearance_sets_the_startup_theme_and_mode() {
+        let ui = UiState::new(true);
+        assert_eq!(ui.theme, Theme::default());
+        assert_eq!(ui.visualizer, VisualizerMode::Bars);
+        assert_eq!(ui.spectrum_rows, 0, "no panel seen yet");
+
+        let ui = UiState::new(true).with_appearance(
+            ThemeId::Winamp.theme(),
+            VisualizerMode::from_stored("flow").expect("flow parses"),
+        );
+        assert_eq!(ui.theme, ThemeId::Winamp.theme());
+        assert_eq!(ui.visualizer, VisualizerMode::Flow);
+        assert_eq!(ui.spectrum_rows, 0);
+    }
+}
+
+// --------------------------------------- a restored mode renders at startup
+
+mod restored_mode_render {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
+
+    use tenuto::application::transport::PlaybackPhase;
+    use tenuto::tui::render::{Visuals, draw};
+    use tenuto::tui::spectrum::{FlowHistory, VisualizerMode};
+    use tenuto::tui::state::UiState;
+    use tenuto::tui::theme::Theme;
+
+    use crate::views::{self, decoded, ids, playing};
+
+    fn draw_at(ui: &UiState, visuals: &Visuals<'_>, width: u16, height: u16) -> Buffer {
+        let view = views::view(
+            PlaybackPhase::Playing,
+            Some(playing(ids()[0], true, Some(decoded(185)), false)),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
+        terminal
+            .draw(|frame| {
+                draw(frame, &view, ui, visuals);
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// A rising ramp history, pushed at the panel's own width so every
+    /// column owns a ring.
+    fn ramp(width: u16) -> FlowHistory {
+        let mut history = FlowHistory::default();
+        for level in [0.25_f32, 0.5, 0.75, 1.0] {
+            history.push(width, Some(&vec![level; usize::from(width)]));
+        }
+        history
+    }
+
+    /// The test's own sRGB-byte lerp, for the gradient's midpoints; the
+    /// endpoints are asserted against the theme directly.
+    fn lerp(from: Color, to: Color, t: f32) -> Color {
+        let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+        match (from, to) {
+            (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+                Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+            }
+            _ => from,
+        }
+    }
+
+    /// A persisted `flow` mode, restored at startup through
+    /// `with_appearance`, renders the lava through `draw`: 100×30 is the
+    /// normal tier with three information lines, so the panel is
+    /// Rect::new(25, 6, 71, 6), the newest frame's value on the top row in
+    /// cream and the oldest at the bottom at the green→amber midpoint.
+    /// Under the pre-M14 hard-coded bars the top row would be an amber bar
+    /// instead, so the cream pins the mode to the UI's.
+    #[test]
+    fn a_restored_flow_mode_renders_flow_through_draw() {
+        let theme = Theme::default();
+        let visuals = Visuals {
+            flow: Some(&ramp(71)),
+            ..Visuals::default()
+        };
+        let ui = UiState::new(true).with_appearance(theme, VisualizerMode::Flow);
+        let buffer = draw_at(&ui, &visuals, 100, 30);
+        assert_eq!(buffer[(25, 6)].symbol(), "█", "the panel's top row draws");
+        assert_eq!(
+            buffer[(25, 6)].fg,
+            theme.cream,
+            "the newest entry, 1.0, on top"
+        );
+        assert_eq!(
+            buffer[(25, 11)].fg,
+            lerp(theme.green, theme.amber, 0.5),
+            "the oldest entry, 0.25, at the bottom"
+        );
+    }
+
+    /// The same restored mode at a one-row panel (100×20, the short tier's
+    /// Rect::new(12, 3, 85, 1)): every mode renders the bars row there
+    /// (spec §1.2) — a loud bar in amber, which neither the flow gradient
+    /// nor the scope's midline would paint.
+    #[test]
+    fn a_restored_flow_mode_at_one_row_renders_bars() {
+        let theme = Theme::default();
+        let visuals = Visuals {
+            spectrum: Some(&[1.0_f32; 85]),
+            flow: Some(&ramp(85)),
+            ..Visuals::default()
+        };
+        let ui = UiState::new(true).with_appearance(theme, VisualizerMode::Flow);
+        let buffer = draw_at(&ui, &visuals, 100, 20);
+        assert_eq!(buffer[(12, 3)].symbol(), "█");
+        assert_eq!(
+            buffer[(12, 3)].fg,
+            theme.amber,
+            "the bars row, not the flow gradient"
+        );
+    }
+}
+
+// ------------------------------------------ startup resolution precedence
+
+mod startup_resolution {
+    use clap::Parser;
+    use tenuto::cli::{Cli, CliCommand};
+    use tenuto::persistence::model::PersistedState;
+    use tenuto::tui::resolve_visualizer;
+    use tenuto::tui::spectrum::VisualizerMode;
+    use tenuto::tui::theme::{Theme, ThemeId};
+
+    use crate::runtime::rig_with;
+
+    /// M14 §1.3: the `--visualizer` flag is run-scoped — it beats the saved
+    /// mode, the saved mode beats the default.
+    #[test]
+    fn the_flag_beats_the_saved_mode_and_the_saved_beats_the_default() {
+        assert_eq!(
+            resolve_visualizer(Some("flow"), Some("scope")),
+            VisualizerMode::Flow,
+            "the run-scoped flag wins"
+        );
+        assert_eq!(
+            resolve_visualizer(None, Some("scope")),
+            VisualizerMode::Scope,
+            "the saved mode beats the default"
+        );
+        assert_eq!(
+            resolve_visualizer(None, None),
+            VisualizerMode::Bars,
+            "nothing saved is the default"
+        );
+    }
+
+    /// A hand-edited state file never errors: an unknown saved spelling is
+    /// the default (plan risk 1), and a valid flag still beats it.
+    #[test]
+    fn a_saved_unknown_spelling_loses_to_the_default() {
+        assert_eq!(
+            resolve_visualizer(None, Some("plasma")),
+            VisualizerMode::Bars
+        );
+        assert_eq!(
+            resolve_visualizer(Some("scope"), Some("plasma")),
+            VisualizerMode::Scope
+        );
+    }
+
+    /// Spec §2.1/§7: an explicit `--theme` writes through — the startup
+    /// dispatches the flag's value as `SetTheme`, so it lands in state and
+    /// becomes later runs' default — and the startup resolution reads the
+    /// saved spelling back into its palette, defaulting what it cannot
+    /// read.
+    #[test]
+    fn the_theme_flag_writes_through_and_startup_resolution_reads_it_back() {
+        let parsed =
+            Cli::try_parse_from(["tenuto", "tui", "--theme", "winamp"]).expect("winamp parses");
+        let Some(CliCommand::Tui { theme, .. }) = parsed.command else {
+            panic!("`tenuto tui --theme winamp` parses to the tui subcommand");
+        };
+
+        let mut rig = rig_with(PersistedState::default());
+        assert_eq!(rig.runtime.session().state().theme(), None);
+        if let Some(theme) = &theme {
+            rig.runtime
+                .handle(tenuto::application::runtime::AppCommand::SetTheme(Some(
+                    theme.clone(),
+                )));
+        }
+        assert_eq!(
+            rig.runtime.session().state().theme(),
+            Some("winamp"),
+            "the flag lands in state"
+        );
+        let saved = rig.runtime.session().state().theme().unwrap_or("");
+        assert_eq!(
+            ThemeId::from_stored(saved).unwrap_or_default().theme(),
+            ThemeId::Winamp.theme(),
+            "the saved spelling resolves to its palette"
+        );
+        assert_eq!(
+            ThemeId::from_stored("").unwrap_or_default().theme(),
+            Theme::default(),
+            "nothing saved is the default palette"
+        );
     }
 }

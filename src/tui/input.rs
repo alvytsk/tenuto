@@ -20,6 +20,7 @@ use crate::playlist::{PlaylistId, SortKey};
 use crate::queue::{Direction, DisplayDuration, DurationSource, QueueEntryId};
 use crate::tui::jump;
 use crate::tui::render::{HitMap, TransportButton};
+use crate::tui::spectrum::VisualizerMode;
 use crate::tui::state::{InputPurpose, OrganizeOp, Overlay, UiState};
 
 const VOLUME_STEP: f32 = 0.05;
@@ -486,6 +487,12 @@ fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect>
             ui.clock_mode = ui.clock_mode.next();
             Vec::new()
         }
+        KeyCode::Char('v') => {
+            ui.visualizer = next_visual(ui.visualizer, ui.spectrum_rows);
+            vec![Effect::App(AppCommand::SetVisualizer(
+                ui.visualizer.as_stored().map(str::to_owned),
+            ))]
+        }
         KeyCode::Char('n') => open_input(ui, InputPurpose::NewPlaylist, ""),
         KeyCode::Char('r') => {
             let name = view
@@ -524,6 +531,17 @@ fn open_input(ui: &mut UiState, purpose: InputPurpose, initial: &str) -> Vec<Eff
     ui.input.push_str(initial);
     ui.input_error = None;
     Vec::new()
+}
+
+/// The `v` key's next mode (M14 §1.2): flow needs more than one row to mean
+/// anything, so a panel of at most one row cycles bars → scope → bars.
+fn next_visual(mode: VisualizerMode, rows: u16) -> VisualizerMode {
+    let next = mode.next();
+    if next == VisualizerMode::Flow && rows <= 1 {
+        VisualizerMode::Bars
+    } else {
+        next
+    }
 }
 
 /// Moves the selection by one row, never wrapping; an empty queue selects

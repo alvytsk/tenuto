@@ -201,8 +201,6 @@ pub fn draw(
     }
     draw_info(buffer, &regions, view, &theme);
     if let Some(spectrum) = regions.spectrum {
-        // The mode is the UI's once `v` is wired (M14 Task 9); until then
-        // the row stays bars.
         draw_spectrum(
             buffer,
             spectrum,
@@ -210,7 +208,7 @@ pub fn draw(
             visuals.peaks,
             visuals.waveform,
             visuals.flow,
-            VisualizerMode::Bars,
+            ui.visualizer,
             &theme,
         );
     }
