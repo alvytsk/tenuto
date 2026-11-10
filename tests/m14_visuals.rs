@@ -7,11 +7,18 @@ mod support;
 #[path = "support/runtime.rs"]
 mod runtime;
 
+use std::time::{Duration, Instant};
+
 use clap::Parser;
 use runtime::rig_with;
 use tenuto::application::runtime::AppCommand;
 use tenuto::cli::{Cli, CliCommand};
 use tenuto::persistence::model::PersistedState;
+use tenuto::playback::output::Nanos;
+use tenuto::playback::spectrum::worker::{
+    AnalyzedWindow, FrameSchedule, MappingKey, SlotUpdate, SpectrumFrame, WAVEFORM_COLUMNS,
+    decimate_waveform,
+};
 use tenuto::session::{Action, Session};
 
 /// M14 §1.3: the visualizer mode round-trips through the state file. The
@@ -146,4 +153,154 @@ fn absent_theme_and_visualizer_flags_parse_to_none() {
     };
     assert_eq!(theme, None);
     assert_eq!(visualizer, None);
+}
+
+// ------------------------------------------------ the decimated waveform
+
+/// §1.1: a constant block decimates to the same `(min, peak)` pair in every
+/// one of the 96 output columns.
+#[test]
+fn a_constant_block_decimates_to_the_same_pair_in_every_column() {
+    let waveform = decimate_waveform(&vec![0.5_f32; 2048]);
+    assert_eq!(waveform.len(), WAVEFORM_COLUMNS);
+    assert!(
+        waveform.iter().all(|pair| *pair == (0.5, 0.5)),
+        "every column is (0.5, 0.5), got {waveform:?}"
+    );
+}
+
+/// §1.1: column `c` covers samples `[c * len / 96, (c+1) * len / 96)`, so a
+/// spike at sample 1024 of 2048 lands in column 48 (`48 * 2048 / 96 == 1024`)
+/// and nowhere else.
+#[test]
+fn a_spike_lands_in_the_column_that_covers_its_sample() {
+    let mut samples = vec![0.0_f32; 2048];
+    samples[1024] = -1.0;
+    let waveform = decimate_waveform(&samples);
+    assert_eq!(waveform[48], (-1.0, 0.0), "column 48 covers sample 1024");
+    assert!(
+        waveform
+            .iter()
+            .enumerate()
+            .all(|(c, pair)| c == 48 || *pair == (0.0, 0.0)),
+        "every other column stays on the midline: {waveform:?}"
+    );
+}
+
+/// §1.1: a block shorter than the columns it precedes still decimates to 96
+/// pairs, and every column without samples is the flat midline. With ten
+/// samples the samples tile into columns 9, 19, 28, ... (`c * 10 / 96`
+/// reaches 1 only at `c == 10`), so the zeros after the first keep every
+/// column from 10 up empty.
+#[test]
+fn a_short_block_zero_fills_the_columns_without_samples() {
+    let mut samples = vec![0.0_f32; 10];
+    samples[0] = 0.5;
+    let waveform = decimate_waveform(&samples);
+    assert_eq!(waveform.len(), WAVEFORM_COLUMNS);
+    assert_eq!(waveform[9], (0.5, 0.5), "column 9 covers sample 0");
+    assert!(
+        waveform
+            .iter()
+            .enumerate()
+            .all(|(c, pair)| c == 9 || *pair == (0.0, 0.0)),
+        "columns without samples are zero-filled: {waveform:?}"
+    );
+    assert!(
+        waveform[10..].iter().all(|pair| *pair == (0.0, 0.0)),
+        "columns 10 and up carry no sample: {waveform:?}"
+    );
+}
+
+/// §1.1: an empty block is silence — 96 midline pairs, the scope's flat line.
+#[test]
+fn an_empty_block_decimates_to_96_midline_pairs() {
+    assert_eq!(
+        decimate_waveform(&[]),
+        vec![(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS]
+    );
+}
+
+/// §1.1: NaN is silence — the same rule the levels follow in
+/// `Analysis::accept` — and finite values beyond ±1 clamp into the unit
+/// interval the widget renders.
+#[test]
+fn non_finite_samples_are_silence_and_out_of_range_samples_clamp() {
+    let waveform = decimate_waveform(&[f32::NAN; 2048]);
+    assert!(
+        waveform.iter().all(|pair| *pair == (0.0, 0.0)),
+        "all-NaN input decimates to the midline: {waveform:?}"
+    );
+
+    // A NaN beside real samples vanishes from that column's envelope.
+    let mut samples = vec![0.5_f32; 2048];
+    samples[3] = f32::NAN;
+    assert_eq!(decimate_waveform(&samples)[0], (0.0, 0.5));
+
+    let mut samples = vec![0.0_f32; 2048];
+    samples[10] = 2.5;
+    samples[15] = -4.0;
+    assert_eq!(decimate_waveform(&samples)[0], (-1.0, 1.0), "clamped");
+}
+
+// ------------------------------------------ the frame carries the waveform
+
+const KEY: MappingKey = MappingKey {
+    instance: 1,
+    generation: 1,
+    epoch: 2,
+};
+
+fn window(level: f32, waveform: Option<Vec<(f32, f32)>>) -> AnalyzedWindow {
+    AnalyzedWindow {
+        key: KEY,
+        session_rev: 7,
+        bands: vec![(40.0, 85.0)],
+        levels: vec![level],
+        waveform,
+        predicted: Nanos(0),
+    }
+}
+
+fn published(update: SlotUpdate) -> SpectrumFrame {
+    match update {
+        SlotUpdate::Publish(frame) => frame,
+        other => panic!("expected a publication, got {other:?}"),
+    }
+}
+
+/// §1.1: the waveform rides the frame exactly as the window carried it — no
+/// smoothing, no reshaping — while the levels beside it still smooth, so the
+/// pass-through is not vacuous.
+#[test]
+fn a_published_frame_carries_its_window_s_waveform_untouched() {
+    let t0 = Instant::now();
+    let mut schedule = FrameSchedule::default();
+    let first = vec![(0.25_f32, 0.75_f32), (-0.5_f32, 0.5_f32)];
+    schedule.offer(window(1.0, Some(first.clone())));
+    let frame = published(schedule.tick(t0, Nanos(0)));
+    assert_eq!(frame.waveform, Some(first));
+
+    // The second publication's level smooths against the first; its
+    // waveform must arrive verbatim.
+    let second = vec![(-1.0_f32, 1.0_f32); WAVEFORM_COLUMNS];
+    schedule.offer(window(0.0, Some(second.clone())));
+    let frame = published(schedule.tick(t0 + Duration::from_millis(50), Nanos(10)));
+    assert_eq!(
+        frame.waveform,
+        Some(second),
+        "the waveform is copied untouched"
+    );
+    assert_eq!(frame.levels, vec![0.85], "levels smoothed");
+}
+
+/// §1.1: a window analyzed while nobody wanted the waveform publishes a
+/// frame with `waveform: None`.
+#[test]
+fn a_window_without_a_waveform_publishes_none() {
+    let t0 = Instant::now();
+    let mut schedule = FrameSchedule::default();
+    schedule.offer(window(0.5, None));
+    let frame = published(schedule.tick(t0, Nanos(0)));
+    assert_eq!(frame.waveform, None);
 }

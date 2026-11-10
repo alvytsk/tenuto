@@ -631,6 +631,7 @@ mod spectrum_display {
             session_rev: 9,
             bands: vec![(40.0, 85.0), (85.0, 170.0)],
             levels: vec![level, level],
+            waveform: None,
             at: Nanos(0),
             published_at,
         }
