@@ -11,6 +11,12 @@
 //! Each band also keeps a peak: where its bar last reached, held for
 //! [`PEAK_HOLD`] and then falling at [`PEAK_FALL_PER_SECOND`], slower than
 //! the bar, and never below it.
+//!
+//! M14 makes the row selectable: [`VisualizerMode`] names what it draws,
+//! and `v` cycles bars → scope → flow → bars. Storage folds the default to
+//! absent — `Bars` never serializes — but the spelling vocabulary here is
+//! the CLI's `--visualizer` too, where `bars` is a legal value; parsing is
+//! total over the vocabulary, and only storage hides the default.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +26,52 @@ use crate::application::transport::PlaybackPhase;
 use crate::application::view::NowPlaying;
 use crate::playback::command::LoadRequestId;
 use crate::playback::spectrum::worker::{SpectrumFrame, frame_is_fresh};
+
+/// What the spectrum row draws.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VisualizerMode {
+    /// Frequency bars: the pre-M14 row.
+    #[default]
+    Bars,
+    /// An oscilloscope of the waveform.
+    Scope,
+    /// An energy-history color field over the bars data.
+    Flow,
+}
+
+impl VisualizerMode {
+    /// The `v` key's cycle: bars → scope → flow → bars.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Bars => Self::Scope,
+            Self::Scope => Self::Flow,
+            Self::Flow => Self::Bars,
+        }
+    }
+
+    /// The spelling for a mode, shared with the CLI's `--visualizer`: `bars`
+    /// is a legal value there, so parsing is total over the vocabulary. An
+    /// unknown string is refused and the caller defaults, as `RepeatMode`
+    /// does for a hand-edited file.
+    pub fn from_stored(raw: &str) -> Option<Self> {
+        match raw {
+            "bars" => Some(Self::Bars),
+            "scope" => Some(Self::Scope),
+            "flow" => Some(Self::Flow),
+            _ => None,
+        }
+    }
+
+    /// The storage spelling (`RawState`'s additive field): the default
+    /// serializes as absent, like `RepeatMode::Off`.
+    pub fn as_stored(self) -> Option<&'static str> {
+        match self {
+            Self::Bars => None,
+            Self::Scope => Some("scope"),
+            Self::Flow => Some("flow"),
+        }
+    }
+}
 
 /// How much of each drawn level survives a draw without a fresh frame.
 pub const DECAY_PER_DRAW: f32 = 0.85;
@@ -126,5 +178,33 @@ impl SpectrumDisplay {
     /// Each band's peak, alongside [`Self::levels`].
     pub fn peaks(&self) -> Option<&[f32]> {
         (!self.peaks.is_empty()).then_some(self.peaks.as_slice())
+    }
+}
+
+#[cfg(test)]
+mod visualizer_mode_tests {
+    use super::VisualizerMode;
+
+    #[test]
+    fn the_cycle_returns_to_bars() {
+        assert_eq!(VisualizerMode::Bars.next(), VisualizerMode::Scope);
+        assert_eq!(VisualizerMode::Scope.next(), VisualizerMode::Flow);
+        assert_eq!(VisualizerMode::Flow.next(), VisualizerMode::Bars);
+    }
+
+    #[test]
+    fn storage_round_trips_and_defaults_unknown_values() {
+        assert_eq!(VisualizerMode::Bars.as_stored(), None);
+        for mode in [VisualizerMode::Scope, VisualizerMode::Flow] {
+            let stored = mode.as_stored().expect("a spelling for a non-default mode");
+            assert_eq!(VisualizerMode::from_stored(stored), Some(mode));
+        }
+        assert_eq!(
+            VisualizerMode::from_stored("bars"),
+            Some(VisualizerMode::Bars)
+        );
+        assert_eq!(VisualizerMode::from_stored("Scope"), None);
+        assert_eq!(VisualizerMode::from_stored(""), None);
+        assert_eq!(VisualizerMode::from_stored("plasma"), None);
     }
 }
