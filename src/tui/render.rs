@@ -29,12 +29,13 @@ use crate::tui::jump;
 use crate::tui::layout::{
     Regions, Tier, inset, queue_body, regions, take_left, take_right, tier_for, visible_rows,
 };
+use crate::tui::spectrum::{FlowHistory, VisualizerMode, draw_flow, draw_scope};
 use crate::tui::state::{ClockMode, InputPurpose, Overlay, UiState};
 use crate::tui::tabs;
 use crate::tui::theme::Theme;
 
 /// What the frame shows beyond the view: prepared artwork, spectrum levels,
-/// the scope's waveform and the open browser.
+/// the scope's waveform, the flow's history and the open browser.
 #[derive(Default)]
 pub struct Visuals<'a> {
     pub cover: CoverView<'a>,
@@ -45,6 +46,9 @@ pub struct Visuals<'a> {
     /// The scope's drawn `(min, peak)` waveform, kept across draws so it can
     /// decay.
     pub waveform: Option<&'a [(f32, f32)]>,
+    /// The flow's per-column energy history, kept across draws so each frame
+    /// pushes into it.
+    pub flow: Option<&'a FlowHistory>,
     /// Drawn while `UiState::overlay` is `Overlay::Browser`.
     pub browser: Option<&'a BrowserState>,
 }
@@ -197,7 +201,18 @@ pub fn draw(
     }
     draw_info(buffer, &regions, view, &theme);
     if let Some(spectrum) = regions.spectrum {
-        draw_spectrum(buffer, spectrum, visuals.spectrum, visuals.peaks, &theme);
+        // The mode is the UI's once `v` is wired (M14 Task 9); until then
+        // the row stays bars.
+        draw_spectrum(
+            buffer,
+            spectrum,
+            visuals.spectrum,
+            visuals.peaks,
+            visuals.waveform,
+            visuals.flow,
+            VisualizerMode::Bars,
+            &theme,
+        );
     }
     let buttons = draw_transport(buffer, regions.transport, view, tier, slider, &theme);
     let (time, progress) = draw_progress(buffer, &regions, view, tier, ui.clock_mode, &theme);
@@ -568,6 +583,38 @@ fn draw_info(buffer: &mut Buffer, regions: &Regions, view: &PlayerView, theme: &
     }
 }
 
+/// The spectrum row's visual: `mode` picks the renderer, but the minimal
+/// tier's single row is bars' alone (spec §1.2) — a row cannot stack a
+/// scope's envelope or a flow's history, and the flat eighth-row bar is what
+/// the tier has always shown.
+#[allow(clippy::too_many_arguments)] // mirrors the brief's dispatch signature exactly.
+fn draw_spectrum(
+    buffer: &mut Buffer,
+    area: Rect,
+    levels: Option<&[f32]>,
+    peaks: Option<&[f32]>,
+    waveform: Option<&[(f32, f32)]>,
+    flow: Option<&FlowHistory>,
+    mode: VisualizerMode,
+    theme: &Theme,
+) {
+    if area.height <= 1 {
+        draw_bars(buffer, area, levels, peaks, theme);
+        return;
+    }
+    match mode {
+        VisualizerMode::Bars => draw_bars(buffer, area, levels, peaks, theme),
+        VisualizerMode::Scope => draw_scope(buffer, area, waveform, theme),
+        VisualizerMode::Flow => {
+            // A history the caller has not handed over is the same as one
+            // with no entries yet: the live levels carry the frame.
+            let empty = FlowHistory::default();
+            let history = flow.unwrap_or(&empty);
+            draw_flow(buffer, area, history, levels, theme);
+        }
+    }
+}
+
 /// Flat bars without analysis; otherwise each bar's level in eighths of a
 /// row, never below the floor glyph, with an amber cap on a loud bar. Bars
 /// are equally wide with a one-column gap between them, as wide as one bar
@@ -579,7 +626,7 @@ fn draw_info(buffer: &mut Buffer, regions: &Regions, view: &PlayerView, theme: &
 /// enough to spare a row, the bottom row numbers the bars instead. A peak
 /// is a cream cap in the row it has fallen to, while that row is above the
 /// bar.
-fn draw_spectrum(
+fn draw_bars(
     buffer: &mut Buffer,
     area: Rect,
     levels: Option<&[f32]>,
@@ -1196,6 +1243,9 @@ mod tests {
                 area,
                 Some(&vec![1.0; bands]),
                 None,
+                None,
+                None,
+                VisualizerMode::Bars,
                 &Theme::default(),
             );
             let bars = runs(&buffer, width, 0);
@@ -1226,6 +1276,9 @@ mod tests {
             area,
             Some(&[0.0, 0.5, 0.5, 1.0]),
             None,
+            None,
+            None,
+            VisualizerMode::Bars,
             &Theme::default(),
         );
         let full_rows = |x: u16| (0..8).filter(|y| buffer[(x, *y)].symbol() == "█").count();
@@ -1245,6 +1298,9 @@ mod tests {
             area,
             Some(&[0.25, 0.25]),
             Some(&[0.75, 0.25]),
+            None,
+            None,
+            VisualizerMode::Bars,
             &theme,
         );
         let column = |x: u16| -> Vec<&str> { (0..4).map(|y| buffer[(x, y)].symbol()).collect() };
@@ -1252,5 +1308,47 @@ mod tests {
         assert_eq!(buffer[(0, 1)].fg, theme.cream);
         // A peak resting on its bar's top cell is the bar itself.
         assert_eq!(column(2), [" ", " ", " ", "█"]);
+    }
+
+    /// §1.2's minimal tier: one row cannot stack a scope's envelope or a
+    /// flow's history, so every mode renders the bars row there — spare on
+    /// the left, the gap column blank, loud bars amber. Scope at this height
+    /// would paint its midline green and flow would paint every column
+    /// cream, so the amber bar beside the blanks proves the fallback.
+    #[test]
+    fn one_row_of_any_mode_is_bars() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 4, 1);
+        let levels = [1.0_f32; 2];
+        let peaks = [1.0_f32; 2];
+        let waveform = [(-1.0_f32, 1.0_f32); 4];
+        let mut history = FlowHistory::default();
+        history.push(4, Some(&[1.0_f32; 4]));
+        for mode in [
+            VisualizerMode::Bars,
+            VisualizerMode::Scope,
+            VisualizerMode::Flow,
+        ] {
+            let mut buffer = Buffer::empty(area);
+            draw_spectrum(
+                &mut buffer,
+                area,
+                Some(&levels),
+                Some(&peaks),
+                Some(&waveform),
+                Some(&history),
+                mode,
+                &theme,
+            );
+            assert_eq!(buffer[(0, 0)].symbol(), " ", "the spare column, {mode:?}");
+            assert_eq!(buffer[(1, 0)].symbol(), "█", "{mode:?}");
+            assert_eq!(
+                buffer[(1, 0)].fg,
+                theme.amber,
+                "a loud bar keeps its amber under {mode:?}"
+            );
+            assert_eq!(buffer[(2, 0)].symbol(), " ", "the gap column, {mode:?}");
+            assert_eq!(buffer[(3, 0)].symbol(), "█", "{mode:?}");
+        }
     }
 }

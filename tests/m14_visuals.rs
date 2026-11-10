@@ -531,3 +531,313 @@ mod scope_renderer {
         assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
     }
 }
+
+// ------------------------------------------- the flow's per-column history
+
+mod flow_history {
+    use tenuto::tui::spectrum::{DECAY_PER_DRAW, FlowHistory, MAX_FLOW_DEPTH};
+
+    /// §1.2: a width change rebuilds the history from scratch — the old
+    /// columns are dropped, so nothing of the four-column past carries into
+    /// the five-column present.
+    #[test]
+    fn a_width_change_rebuilds_from_scratch() {
+        let mut history = FlowHistory::default();
+        let first = [1.0_f32, 0.8, 0.6, 0.4];
+        history.push(4, Some(&first));
+        history.push(4, Some(&first));
+        assert_eq!(history.column(0).len(), 2, "two pushes, newest last");
+
+        let second = [0.9_f32, 0.7, 0.5, 0.3, 0.1];
+        history.push(5, Some(&second));
+        assert!(!history.is_empty());
+        assert_eq!(history.column(0), [0.9], "one fresh entry, no carry-over");
+        assert_eq!(history.column(4), [0.1], "the new width's last column");
+        assert!(
+            history.column(5).is_empty(),
+            "the width owns the column count"
+        );
+    }
+
+    /// Frames stop, the lava cools: every entry shrinks by
+    /// [`DECAY_PER_DRAW`], not by a half.
+    #[test]
+    fn decay_multiplies_every_entry_by_the_draw_factor() {
+        let mut history = FlowHistory::default();
+        history.push(2, Some(&[1.0_f32; 2]));
+        history.decay();
+        let once = history.column(0)[0];
+        assert!(
+            (once - 0.85).abs() < 1e-6 && (once - DECAY_PER_DRAW).abs() < 1e-6,
+            "× 0.85, not a half: {once}"
+        );
+        history.decay();
+        assert!(
+            (history.column(0)[0] - 0.85 * 0.85).abs() < 1e-6,
+            "cools again: {:?}",
+            history.column(0)
+        );
+    }
+
+    /// The ring remembers [`MAX_FLOW_DEPTH`] entries per column, newest last.
+    #[test]
+    fn the_ring_is_capped_and_newest_last() {
+        let mut history = FlowHistory::default();
+        let last = (MAX_FLOW_DEPTH + 3) as f32;
+        for entry in 1..=(MAX_FLOW_DEPTH + 3) as u16 {
+            // A level per frame, in the unit interval the value rule clamps
+            // to: the ramp marks the entries' order.
+            history.push(1, Some(&[f32::from(entry) / (last + 1.0)]));
+        }
+        assert_eq!(history.column(0).len(), MAX_FLOW_DEPTH, "the cap holds");
+        let first = history.column(0)[0];
+        assert!(
+            (first - 4.0 / (last + 1.0)).abs() < 1e-6,
+            "the oldest survivors: {first}"
+        );
+        let newest = history.column(0)[MAX_FLOW_DEPTH - 1];
+        assert!(
+            (newest - last / (last + 1.0)).abs() < 1e-6,
+            "newest last: {newest}"
+        );
+    }
+
+    /// A push without levels advances nothing: time moves only when a frame
+    /// (or `decay`) says so.
+    #[test]
+    fn a_push_without_levels_pushes_nothing() {
+        let mut history = FlowHistory::default();
+        history.push(3, Some(&[0.5_f32; 3]));
+        history.push(3, None);
+        history.push(3, Some(&[]));
+        assert_eq!(history.column(0), [0.5], "absent levels are not a frame");
+    }
+}
+
+// ---------------------------------------- the flow's view state
+
+mod flow_display {
+    use std::time::{Duration, Instant};
+
+    use tenuto::application::transport::PlaybackPhase;
+    use tenuto::application::view::NowPlaying;
+    use tenuto::playback::command::LoadRequestId;
+    use tenuto::playback::output::Nanos;
+    use tenuto::playback::spectrum::worker::SpectrumFrame;
+    use tenuto::tui::spectrum::{DrawSource, SpectrumDisplay, VisualizerMode};
+
+    const TOKEN: LoadRequestId = LoadRequestId::from_raw(4);
+
+    fn now_playing() -> NowPlaying {
+        NowPlaying {
+            session_rev: 9,
+            load: Some(TOKEN),
+            ..NowPlaying::unloaded()
+        }
+    }
+
+    fn frame(published_at: Instant, level: f32) -> SpectrumFrame {
+        SpectrumFrame {
+            session_rev: 9,
+            bands: vec![(40.0, 85.0)],
+            levels: vec![level],
+            waveform: None,
+            at: Nanos(0),
+            published_at,
+        }
+    }
+
+    fn source<'a>(
+        phase: PlaybackPhase,
+        now_playing: &'a NowPlaying,
+        frame: Option<&'a SpectrumFrame>,
+    ) -> DrawSource<'a> {
+        DrawSource {
+            phase,
+            now_playing: Some(now_playing),
+            adopted: Some(TOKEN),
+            frame,
+        }
+    }
+
+    /// §1.2: fresh Flow frames push, newest last.
+    #[test]
+    fn fresh_flow_frames_push_newest_last() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
+            t0,
+            VisualizerMode::Flow,
+        );
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.9))),
+            t0,
+            VisualizerMode::Flow,
+        );
+        assert_eq!(display.flow().column(0), [0.5, 0.9], "newest last");
+    }
+
+    /// §1.2: a mode switch starts a fresh history — the lava of a different
+    /// visual is not this one's, and the reset happens at the switch itself.
+    #[test]
+    fn a_mode_switch_resets_the_history() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
+            t0,
+            VisualizerMode::Flow,
+        );
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.9))),
+            t0,
+            VisualizerMode::Flow,
+        );
+        assert_eq!(display.flow().column(0), [0.5, 0.9]);
+
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
+            t0,
+            VisualizerMode::Bars,
+        );
+        assert!(
+            display.flow().is_empty(),
+            "the switch to bars wipes the history"
+        );
+
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.2))),
+            t0,
+            VisualizerMode::Flow,
+        );
+        assert_eq!(
+            display.flow().column(0),
+            [0.2],
+            "flow restarts from its own first frame"
+        );
+    }
+
+    /// §1.2: a stale frame cools the history instead of pushing into it —
+    /// the same rule the drawn levels follow.
+    #[test]
+    fn stale_frames_cool_the_history_instead_of_pushing() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let fresh = frame(t0, 0.5);
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&fresh)),
+            t0,
+            VisualizerMode::Flow,
+        );
+        let later = t0 + Duration::from_millis(150);
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&fresh)),
+            later,
+            VisualizerMode::Flow,
+        );
+        assert_eq!(
+            display.flow().column(0).len(),
+            1,
+            "a stale frame pushes nothing"
+        );
+        let cooled = display.flow().column(0)[0];
+        assert!(
+            (cooled - 0.5 * 0.85).abs() < 1e-6,
+            "it cools instead: {cooled}"
+        );
+    }
+}
+
+// ------------------------------------------- the flow's renderer
+
+mod flow_renderer {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+
+    use tenuto::tui::spectrum::{FlowHistory, draw_flow};
+    use tenuto::tui::theme::Theme;
+
+    /// The test's own linear-RGB lerp, for the gradient's midpoints; the
+    /// endpoints are asserted against the theme directly.
+    fn lerp(from: Color, to: Color, t: f32) -> Color {
+        let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+        match (from, to) {
+            (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+                Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+            }
+            _ => from,
+        }
+    }
+
+    /// A rising ramp stacks the column green-side down and cream-side up:
+    /// the oldest, coolest entry sits at the bottom row and the newest at
+    /// the top, so the gradient runs green → amber → cream upward. The two
+    /// anchor rows land exactly on `flow_color`'s endpoints.
+    #[test]
+    fn a_rising_ramp_stacks_green_at_the_bottom_and_cream_at_the_top() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 2, 4);
+        let mut history = FlowHistory::default();
+        for level in [0.25_f32, 0.5, 0.75, 1.0] {
+            history.push(2, Some(&[level; 2]));
+        }
+        let mut buffer = Buffer::empty(area);
+        draw_flow(&mut buffer, area, &history, None, &theme);
+        for x in 0..2 {
+            assert_eq!(buffer[(x, 3)].fg, lerp(theme.green, theme.amber, 0.5));
+            assert_eq!(buffer[(x, 2)].fg, theme.amber, "the gradient's midpoint");
+            assert_eq!(buffer[(x, 1)].fg, lerp(theme.amber, theme.cream, 0.5));
+            assert_eq!(buffer[(x, 0)].fg, theme.cream, "the top endpoint");
+            assert_eq!(buffer[(x, 0)].symbol(), "█");
+        }
+    }
+
+    /// §1.2: silence stays silent — an all-zero history draws nothing, and
+    /// an empty history with silent levels neither.
+    #[test]
+    fn an_all_zero_history_draws_nothing() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 3, 4);
+        let mut history = FlowHistory::default();
+        history.push(3, Some(&[0.0_f32; 3]));
+        history.push(3, Some(&[0.0_f32; 3]));
+        let mut buffer = Buffer::empty(area);
+        draw_flow(&mut buffer, area, &history, Some(&[0.0_f32; 3]), &theme);
+        assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+
+        let mut buffer = Buffer::empty(area);
+        draw_flow(&mut buffer, area, &history, None, &theme);
+        assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+    }
+
+    /// Without a history the live frame is the whole column: the first
+    /// fresh frame shows immediately, the scope's absent-fallback shape.
+    #[test]
+    fn an_empty_history_falls_back_to_the_live_levels() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 3, 2);
+        let mut buffer = Buffer::empty(area);
+        draw_flow(
+            &mut buffer,
+            area,
+            &FlowHistory::default(),
+            Some(&[0.5_f32; 3]),
+            &theme,
+        );
+        for x in 0..3 {
+            for y in 0..2 {
+                assert_eq!(buffer[(x, y)].symbol(), "█", "column {x}, row {y}");
+                assert_eq!(buffer[(x, y)].fg, theme.amber);
+            }
+        }
+
+        let mut buffer = Buffer::empty(area);
+        draw_flow(&mut buffer, area, &FlowHistory::default(), None, &theme);
+        assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+    }
+}

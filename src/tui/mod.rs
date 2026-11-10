@@ -418,6 +418,7 @@ fn run_loop(
             spectrum: spectrum.levels(),
             peaks: spectrum.peaks(),
             waveform: spectrum.waveform(),
+            flow: Some(spectrum.flow()),
         };
         // Checked again at the last moment: a worker's fatal panic can
         // restore the primary screen while this pass prepares its frame, and
@@ -436,14 +437,13 @@ fn run_loop(
 /// Runs analysis only while this frame has a spectrum row and playback is
 /// `Playing`, then settles what the row will draw: the latest frame's when it
 /// is fresh and belongs to the adopted playback, otherwise the previous
-/// levels (and scope waveform) decayed.
+/// levels (and scope waveform, and flow history) decayed.
 fn update_spectrum(
     runtime: &PlayerRuntime,
     terminal: &Tty,
     view: &PlayerView,
-    // The visualizer mode is the UI's once `v` lands (M14); until then the
-    // row stays bars, and this parameter is where the mode and flow's row
-    // history will live.
+    // The visualizer mode is the UI's once `v` is wired (M14 Task 9); until
+    // then the row stays bars.
     _ui: &mut UiState,
     display: &mut SpectrumDisplay,
 ) -> io::Result<()> {
