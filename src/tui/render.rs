@@ -108,7 +108,7 @@ const CONFIRM_CLEAR_TEXT: &str = "Clear the queue? Listening history is kept. y 
 /// 80x24 terminal loses two rows to a multiplexer's status line, and the
 /// last lines here are the ones a listener most needs.
 const HELP_LINES: [&str; 24] = [
-    "Space           Pause/resume; unloaded/ended behavior follows §4",
+    "Space           Pause/resume; unloaded resumes the entry, ended replays it",
     "Enter           Play selected queue entry",
     "Up/Down or j/k  Move selection; J/K move the selected entry",
     "Left/Right      Seek backward/forward 10 seconds; Home restarts",

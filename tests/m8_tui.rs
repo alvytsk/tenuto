@@ -309,15 +309,17 @@ fn a_hostile_playlist_name_reaches_the_strip_defused() {
 }
 
 /// The help overlay must still fit the terminal it fitted before M8, grown
-/// for M13's five new lines: 24 lines plus a border is 26 rows, and its
-/// widest line (the organize one, 71 bytes — `draw_help_overlay` measures
-/// with `str::len`) plus the border and padding is 75 columns. At 75x26 the
-/// last line, the one that says how to leave, has to be on screen.
+/// for M13's five new lines and the self-contained Space line: 24 lines
+/// plus a border is 26 rows, and its widest line (the Space one, 74 bytes —
+/// `draw_help_overlay` measures with `str::len`) plus the border and
+/// padding is 78 columns, which still clears an 80-column terminal. At
+/// 78x26 the last line, the one that says how to leave, has to be on
+/// screen.
 #[test]
 fn the_help_overlay_still_shows_its_quit_line_at_the_size_it_fitted_before_m8() {
     let mut ui = UiState::new(false);
     ui.overlay = Overlay::Help;
-    let mut terminal = Terminal::new(TestBackend::new(75, 26)).expect("backend");
+    let mut terminal = Terminal::new(TestBackend::new(78, 26)).expect("backend");
     terminal
         .draw(|frame| {
             draw(frame, &views::sample_view(), &ui, &Visuals::default());
@@ -326,7 +328,7 @@ fn the_help_overlay_still_shows_its_quit_line_at_the_size_it_fitted_before_m8() 
     let buffer: Buffer = terminal.backend().buffer().clone();
     let rendered: String = buffer
         .content()
-        .chunks(75)
+        .chunks(78)
         .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n");
@@ -339,10 +341,11 @@ fn the_help_overlay_still_shows_its_quit_line_at_the_size_it_fitted_before_m8() 
         "R ",
         "S ",
         "Ctrl-J",
+        "Pause/resume",
     ] {
         assert!(
             rendered.contains(line),
-            "the overlay lost {line:?} at 75x26\n{rendered}"
+            "the overlay lost {line:?} at 78x26\n{rendered}"
         );
     }
 }
