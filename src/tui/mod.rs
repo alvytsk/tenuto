@@ -26,6 +26,7 @@
 pub mod browser;
 pub mod images;
 pub mod input;
+pub mod jump;
 pub mod layout;
 pub mod render;
 pub mod spectrum;

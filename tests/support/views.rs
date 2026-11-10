@@ -63,6 +63,7 @@ pub fn view(phase: PlaybackPhase, now: Option<NowPlaying>) -> PlayerView {
     let ids = ids();
     let viewed = PersistedState::default().playlists().playing();
     PlayerView {
+        repeat: tenuto::playlist::RepeatMode::Off,
         tabs: vec![PlaylistTab {
             id: viewed,
             name: "Default".into(),

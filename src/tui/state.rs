@@ -14,6 +14,46 @@ pub enum InputPurpose {
     AddUrl(PlaylistId),
     NewPlaylist,
     Rename(PlaylistId),
+    JumpToTime,
+}
+
+/// Which side of the clock the time label shows (M13 §1.3). Transient
+/// `UiState`: the player always opens on elapsed, and nothing persists it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ClockMode {
+    #[default]
+    Elapsed,
+    Remaining,
+    Total,
+}
+
+impl ClockMode {
+    /// The `t` key's cycle: elapsed → −remaining → total → elapsed.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Elapsed => Self::Remaining,
+            Self::Remaining => Self::Total,
+            Self::Total => Self::Elapsed,
+        }
+    }
+}
+
+/// What the organize confirmation asks about (M13 §1.5): the two destructive
+/// operations. Sorts run at once — they are reversible by re-sorting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrganizeOp {
+    Deduplicate,
+    Prune,
+}
+
+impl OrganizeOp {
+    /// The confirmation's line, `y` to run.
+    pub fn question(self) -> &'static str {
+        match self {
+            Self::Deduplicate => "Remove duplicate entries? y to confirm",
+            Self::Prune => "Remove entries whose files are gone? y to confirm",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +62,10 @@ pub enum Overlay {
     Help,
     ConfirmClear(PlaylistId),
     ConfirmDelete(PlaylistId),
+    ConfirmOrganize(PlaylistId, OrganizeOp),
     Input(InputPurpose),
+    JumpToFile,
+    SortMenu(PlaylistId),
     Browser,
 }
 
@@ -33,6 +76,18 @@ pub struct UiState {
     pub overlay: Overlay,
     pub mouse_capture: bool,
     pub input: String,
+    /// The typed-input overlay's parse error (M13 §1.2), shown under the
+    /// input until the overlay closes or Enter runs again.
+    pub input_error: Option<&'static str>,
+    /// The time label's mode (M13 §1.3); `t` and a click on the label cycle
+    /// it.
+    pub clock_mode: ClockMode,
+    /// The jump-to-file filter (M13 §1.4), live only while
+    /// [`Overlay::JumpToFile`] is open.
+    pub filter: String,
+    /// The organize menu's cursor (M13 §1.5), valid while
+    /// [`Overlay::SortMenu`] is open.
+    pub sort_cursor: usize,
     /// The first queue row the listing tries to show; drawing still scrolls
     /// as far as it must to keep the selection visible.
     pub queue_offset: usize,
@@ -48,6 +103,10 @@ impl UiState {
             overlay: Overlay::None,
             mouse_capture,
             input: String::new(),
+            input_error: None,
+            clock_mode: ClockMode::Elapsed,
+            filter: String::new(),
+            sort_cursor: 0,
             queue_offset: 0,
             viewed: None,
         }

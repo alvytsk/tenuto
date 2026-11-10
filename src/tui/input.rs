@@ -16,9 +16,11 @@ use ratatui::layout::Rect;
 use crate::application::runtime::{AppCommand, EnqueueItem};
 use crate::application::transport::QUEUE_EMPTY;
 use crate::application::view::PlayerView;
-use crate::queue::{Direction, DisplayDuration, DurationSource};
+use crate::playlist::{PlaylistId, SortKey};
+use crate::queue::{Direction, DisplayDuration, DurationSource, QueueEntryId};
+use crate::tui::jump;
 use crate::tui::render::{HitMap, TransportButton};
-use crate::tui::state::{InputPurpose, Overlay, UiState};
+use crate::tui::state::{InputPurpose, OrganizeOp, Overlay, UiState};
 
 const VOLUME_STEP: f32 = 0.05;
 const SEEK_STEP: i64 = 10;
@@ -58,6 +60,9 @@ pub fn handle_key(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Eff
         Overlay::ConfirmClear(id) => confirm_overlay(key, ui, AppCommand::ClearPlaylist(id)),
         Overlay::ConfirmDelete(id) => confirm_overlay(key, ui, AppCommand::DeletePlaylist(id)),
         Overlay::Help => help_overlay(key, ui),
+        Overlay::JumpToFile => jump_file_overlay(key, ui, view),
+        Overlay::SortMenu(id) => sort_menu_overlay(key, ui, id),
+        Overlay::ConfirmOrganize(id, op) => confirm_overlay(key, ui, organize_command(id, op)),
         // Every other key belongs to the browser: `tui::run` forwards it to
         // `BrowserState::handle_key` (see `routes_to_browser`), whose own
         // close becomes `Effect::CloseBrowser`. Ctrl-C and Ctrl-L never get
@@ -132,6 +137,13 @@ fn left_click(
             ui.selected = Some(*id);
             Vec::new()
         };
+    }
+    // M13 §1.3: a click on the time label cycles it, mirroring Winamp's
+    // click on its time display. It must precede the progress bar, whose
+    // seek is the fallback below.
+    if hits.time.contains(point) {
+        ui.clock_mode = ui.clock_mode.next();
+        return Vec::new();
     }
     seek_effect(point, hits.progress, view)
         .into_iter()
@@ -214,6 +226,25 @@ fn input_overlay(key: KeyEvent, ui: &mut UiState, purpose: InputPurpose) -> Vec<
         }
         KeyCode::Enter => {
             let trimmed = ui.input.trim().to_owned();
+            if let InputPurpose::JumpToTime = purpose {
+                if trimmed.is_empty() {
+                    ui.overlay = Overlay::None;
+                    ui.input.clear();
+                    return Vec::new();
+                }
+                return match jump::parse_hms(&trimmed) {
+                    Ok(target) => {
+                        ui.overlay = Overlay::None;
+                        ui.input.clear();
+                        ui.input_error = None;
+                        vec![Effect::App(AppCommand::SeekTo(target))]
+                    }
+                    Err(error) => {
+                        ui.input_error = Some(error);
+                        Vec::new()
+                    }
+                };
+            }
             ui.overlay = Overlay::None;
             ui.input.clear();
             if trimmed.is_empty() {
@@ -226,12 +257,16 @@ fn input_overlay(key: KeyEvent, ui: &mut UiState, purpose: InputPurpose) -> Vec<
                     },
                     InputPurpose::NewPlaylist => AppCommand::CreatePlaylist(trimmed),
                     InputPurpose::Rename(id) => AppCommand::RenamePlaylist(id, trimmed),
+                    // Returned above with its own Enter rule; this arm only
+                    // keeps the match exhaustive.
+                    InputPurpose::JumpToTime => return Vec::new(),
                 })]
             }
         }
         KeyCode::Esc => {
             ui.overlay = Overlay::None;
             ui.input.clear();
+            ui.input_error = None;
             Vec::new()
         }
         KeyCode::Char(c) if !c.is_control() && !blocks_ordinary_bindings(&key) => {
@@ -262,7 +297,136 @@ fn help_overlay(key: KeyEvent, ui: &mut UiState) -> Vec<Effect> {
     Vec::new()
 }
 
+/// The jump-to-file filter (M13 §1.4): typing narrows the viewed playlist's
+/// matches, the arrows move within them, Enter plays the selected match —
+/// the same door as Enter on a row — and Esc cancels. The overlay itself is
+/// display-only: it never mutates the playlist.
+fn jump_file_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect> {
+    let matches = jump::file_matches(view, &ui.filter);
+    match key.code {
+        KeyCode::Backspace => {
+            ui.filter.pop();
+            Vec::new()
+        }
+        KeyCode::Enter => {
+            if let Some(id) = ui.selected
+                && matches.contains(&id)
+            {
+                ui.overlay = Overlay::None;
+                ui.filter.clear();
+                vec![Effect::App(AppCommand::PlayEntry(id))]
+            } else {
+                Vec::new()
+            }
+        }
+        KeyCode::Esc => {
+            ui.overlay = Overlay::None;
+            ui.filter.clear();
+            Vec::new()
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            move_within_matches(ui, &matches, Direction::Up);
+            Vec::new()
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            move_within_matches(ui, &matches, Direction::Down);
+            Vec::new()
+        }
+        KeyCode::Char(c) if !c.is_control() && !blocks_ordinary_bindings(&key) => {
+            ui.filter.push(c);
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Moves the selection within the filtered matches, never past either end;
+/// with nothing selected, Down takes the first match and Up the last.
+fn move_within_matches(ui: &mut UiState, matches: &[QueueEntryId], direction: Direction) {
+    if matches.is_empty() {
+        return;
+    }
+    let index = ui
+        .selected
+        .and_then(|id| matches.iter().position(|m| *m == id));
+    let next = match (index, direction) {
+        (Some(index), Direction::Up) => index.saturating_sub(1),
+        (Some(index), Direction::Down) => (index + 1).min(matches.len() - 1),
+        (None, Direction::Up) => matches.len() - 1,
+        (None, Direction::Down) => 0,
+    };
+    ui.selected = Some(matches[next]);
+}
+
+/// The organize menu's items in display order (M13 §1.5); the cursor's
+/// index into this table is what Enter runs. The last two are destructive
+/// and route through a confirmation first.
+pub(crate) const ORGANIZE_ITEMS: [&str; 8] = [
+    "Sort by title",
+    "Sort by artist",
+    "Sort by path",
+    "Sort by duration",
+    "Reverse",
+    "Randomize",
+    "Remove duplicates",
+    "Remove dead entries",
+];
+
+/// The organize menu (M13 §1.5): arrows move, Enter runs the item, Esc
+/// closes. The two removals close into a confirmation instead of acting.
+fn sort_menu_overlay(key: KeyEvent, ui: &mut UiState, id: PlaylistId) -> Vec<Effect> {
+    let last = ORGANIZE_ITEMS.len() - 1;
+    match key.code {
+        KeyCode::Esc => {
+            ui.overlay = Overlay::None;
+            Vec::new()
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            ui.sort_cursor = ui.sort_cursor.saturating_sub(1);
+            Vec::new()
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            ui.sort_cursor = (ui.sort_cursor + 1).min(last);
+            Vec::new()
+        }
+        KeyCode::Enter => {
+            ui.overlay = Overlay::None;
+            match ui.sort_cursor {
+                0 => vec![Effect::App(AppCommand::SortPlaylist(id, SortKey::Title))],
+                1 => vec![Effect::App(AppCommand::SortPlaylist(id, SortKey::Artist))],
+                2 => vec![Effect::App(AppCommand::SortPlaylist(id, SortKey::Path))],
+                3 => vec![Effect::App(AppCommand::SortPlaylist(id, SortKey::Duration))],
+                4 => vec![Effect::App(AppCommand::ReversePlaylist(id))],
+                5 => vec![Effect::App(AppCommand::RandomizePlaylist(id))],
+                6 => {
+                    ui.overlay = Overlay::ConfirmOrganize(id, OrganizeOp::Deduplicate);
+                    Vec::new()
+                }
+                7 => {
+                    ui.overlay = Overlay::ConfirmOrganize(id, OrganizeOp::Prune);
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn organize_command(id: PlaylistId, op: OrganizeOp) -> AppCommand {
+    match op {
+        OrganizeOp::Deduplicate => AppCommand::DeduplicatePlaylist(id),
+        OrganizeOp::Prune => AppCommand::PruneDeadPlaylist(id),
+    }
+}
+
 fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect> {
+    // Ctrl-J (M13 §1.2) is the third chord with an effect, and like Ctrl-C
+    // and Ctrl-L it is intercepted before the CONTROL check below, which
+    // turns every other chord off.
+    if key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return open_input(ui, InputPurpose::JumpToTime, "");
+    }
     // Ctrl-C and Ctrl-L are the only chords with an effect here, and both
     // are handled in `handle_key` before any overlay; every other CONTROL or
     // ALT chord — Ctrl-D, Alt-d, and so on — must not fall through to the
@@ -307,6 +471,21 @@ fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect>
         KeyCode::Tab => vec![Effect::App(AppCommand::ViewNext)],
         KeyCode::BackTab => vec![Effect::App(AppCommand::ViewPrevious)],
         KeyCode::Char('z') => vec![Effect::App(AppCommand::ToggleShuffle(view.viewed))],
+        KeyCode::Char('R') => vec![Effect::App(AppCommand::CycleRepeat)],
+        KeyCode::Char('f') => {
+            ui.overlay = Overlay::JumpToFile;
+            ui.filter.clear();
+            Vec::new()
+        }
+        KeyCode::Char('S') => {
+            ui.overlay = Overlay::SortMenu(view.viewed);
+            ui.sort_cursor = 0;
+            Vec::new()
+        }
+        KeyCode::Char('t') => {
+            ui.clock_mode = ui.clock_mode.next();
+            Vec::new()
+        }
         KeyCode::Char('n') => open_input(ui, InputPurpose::NewPlaylist, ""),
         KeyCode::Char('r') => {
             let name = view
@@ -343,6 +522,7 @@ fn open_input(ui: &mut UiState, purpose: InputPurpose, initial: &str) -> Vec<Eff
     ui.overlay = Overlay::Input(purpose);
     ui.input.clear();
     ui.input.push_str(initial);
+    ui.input_error = None;
     Vec::new()
 }
 

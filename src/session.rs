@@ -17,7 +17,7 @@
 //! it may touch history at all (D20); a stale or unowned event changes
 //! nothing, not even the revision the policy tracks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,7 @@ use crate::persistence::writer::Urgency;
 use crate::playback::command::{LoadRequestId, ResumeIntent};
 use crate::playback::event::{PlaybackEvent, Progress, ShutdownReport, StartDisposition};
 use crate::playback::state::PlaybackState;
-use crate::playlist::{PlaylistError, PlaylistId};
+use crate::playlist::{PlaylistError, PlaylistId, RepeatMode, SortKey};
 pub use crate::queue::DisplayUpdate;
 use crate::queue::{
     Direction, DisplayDuration, DurationSource, NewQueueEntry, QueueEntryId, QueueError,
@@ -504,6 +504,105 @@ impl Session {
             .is_some_and(|adopted| adopted.target == LoadTarget::Queue(id))
     }
 
+    /// Sorts the viewed playlist (M13 §1.5). Reordering never removes an
+    /// entry, so nothing is released and no pending load is invalidated:
+    /// playback and in-flight loads are untouched, and the cursor follows
+    /// its entry by identity inside the set.
+    pub fn sort_playlist(&mut self, id: PlaylistId, key: SortKey) -> Result<Action, PlaylistError> {
+        if self.state.edit().sort_playlist(id, key)? {
+            Ok(self.submit(Urgency::Forced))
+        } else {
+            Ok(Action::None)
+        }
+    }
+
+    pub fn reverse_playlist(&mut self, id: PlaylistId) -> Result<Action, PlaylistError> {
+        if self.state.edit().reverse_playlist(id)? {
+            Ok(self.submit(Urgency::Forced))
+        } else {
+            Ok(Action::None)
+        }
+    }
+
+    pub fn randomize_playlist(
+        &mut self,
+        id: PlaylistId,
+        seed: u64,
+    ) -> Result<Action, PlaylistError> {
+        if self.state.edit().randomize_playlist(id, seed)? {
+            Ok(self.submit(Urgency::Forced))
+        } else {
+            Ok(Action::None)
+        }
+    }
+
+    /// Deduplicates `id` by identity (M13 §1.5). The owned entry is always
+    /// kept — when it duplicates an earlier occurrence, the earlier one
+    /// goes instead — so playback is never released. Returns what was
+    /// removed beside the action, for the notice.
+    pub fn deduplicate_playlist(
+        &mut self,
+        id: PlaylistId,
+    ) -> Result<(Action, usize), PlaylistError> {
+        let owned: BTreeSet<QueueEntryId> = self
+            .state
+            .playlists()
+            .playlist(id)
+            .map(|playlist| {
+                playlist
+                    .queue()
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.id())
+                    .filter(|entry| self.owns_entry(*entry))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let removed = self
+            .state
+            .edit()
+            .deduplicate_playlist(id, &|entry| owned.contains(&entry))?;
+        let action = if removed > 0 {
+            self.submit(Urgency::Forced)
+        } else {
+            Action::None
+        };
+        Ok((action, removed))
+    }
+
+    /// Removes the dead entries `dead` names from `id` (M13 §1.5). Entries
+    /// that left the playlist between the check and this call are skipped;
+    /// so is the owned entry — a dead file keeps playing from its open
+    /// handle, and a later stop-and-play surfaces the ordinary load failure
+    /// on its own. Pending loads into removed entries are invalidated
+    /// first. Returns what was removed beside the action.
+    pub fn prune_dead(
+        &mut self,
+        id: PlaylistId,
+        dead: &[QueueEntryId],
+    ) -> Result<(Action, usize), PlaylistError> {
+        let removable: Vec<QueueEntryId> = dead
+            .iter()
+            .copied()
+            .filter(|entry| {
+                self.state
+                    .playlists()
+                    .playlist(id)
+                    .is_some_and(|playlist| playlist.queue().get(*entry).is_some())
+                    && !self.owns_entry(*entry)
+            })
+            .collect();
+        if removable.is_empty() {
+            return Ok((Action::None, 0));
+        }
+        self.invalidate_pending(
+            |target| matches!(target, LoadTarget::Queue(entry) if removable.contains(&entry)),
+        );
+        let removed = self.state.edit().prune_playlist(id, &removable)?;
+        let action = self.submit(Urgency::Forced);
+        Ok((action, removed))
+    }
+
     /// Whether `id` is the playlist that owns the adopted entry (M8 §5).
     pub fn owns_playlist(&self, id: PlaylistId) -> bool {
         match self.adopted.map(|adopted| adopted.target) {
@@ -639,6 +738,14 @@ impl Session {
     /// `observe`'s own `VolumeChanged` handling.
     pub fn set_volume(&mut self, volume: Volume) -> Action {
         self.state.edit().set_volume(volume);
+        self.submit(Urgency::Ordinary)
+    }
+
+    /// Winamp's repeat toggle (M13 §1.1). No engine command either way: it
+    /// is policy over the advance decision, so a playing track keeps
+    /// playing.
+    pub fn set_repeat(&mut self, mode: RepeatMode) -> Action {
+        self.state.edit().set_repeat(mode);
         self.submit(Urgency::Ordinary)
     }
 
@@ -1003,12 +1110,29 @@ impl Session {
                 // Both provenances advance (§6); only a queue target has
                 // anywhere to advance to.
                 if let LoadTarget::Queue(id) = adopted.target {
-                    let next = self
-                        .state
-                        .playlists()
+                    // M13 §1.1's policy table, applied where the successor
+                    // was already computed. Repeat-one reloads the ended
+                    // entry through the ordinary advance path: the entry is
+                    // completed by the lines above, and D1 replays a
+                    // completed entry from zero — the same mechanism as
+                    // Space's replay-after-end — so an episode restarts
+                    // rather than resuming, without a separate intent.
+                    let playlists = self.state.playlists();
+                    let owner = playlists
                         .owner_of(id)
-                        .and_then(|owner| self.state.playlists().playlist(owner))
-                        .and_then(|playlist| playlist.neighbor(id, Direction::Down));
+                        .and_then(|owner| playlists.playlist(owner));
+                    let repeat = self.state.repeat();
+                    let next = match repeat {
+                        RepeatMode::One => Some(id),
+                        RepeatMode::All => owner.and_then(|playlist| {
+                            playlist
+                                .neighbor(id, Direction::Down)
+                                .or_else(|| playlist.first_in_order())
+                        }),
+                        RepeatMode::Off => {
+                            owner.and_then(|playlist| playlist.neighbor(id, Direction::Down))
+                        }
+                    };
                     self.advance = Some(next.map_or(Advance::EndOfQueue, Advance::Next));
                 }
                 self.submit(Urgency::Forced)

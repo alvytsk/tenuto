@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::application::browse::TreeCollected;
+use crate::application::browse::{BrowseRequest, BrowseResult, BrowseWorker, TreeCollected};
 use crate::application::cover::{Covers, Shown};
 use crate::application::enrich::{EnrichOutcome, MetadataWorkers, TagProbe};
 use crate::application::mpris::cover::CoverImage;
@@ -57,7 +57,7 @@ use crate::playback::event::{PlaybackEvent, Progress};
 use crate::playback::spectrum::worker::SpectrumHandle;
 use crate::playback::state::PlaybackState;
 use crate::playback::timeline::PositionQuality;
-use crate::playlist::PlaylistId;
+use crate::playlist::{PlaylistId, RepeatMode, SortKey};
 use crate::queue::{
     Direction, DisplayDuration, DisplayMetadata, DurationSource, MAX_PLAYLIST_ENTRIES,
     NewQueueEntry, QueueEntry, QueueEntryId, QueueError, QueueSource,
@@ -206,6 +206,19 @@ pub enum AppCommand {
     RenamePlaylist(PlaylistId, String),
     DeletePlaylist(PlaylistId),
     ToggleShuffle(PlaylistId),
+    /// Winamp's repeat toggle (M13 §1.1): `R` cycles off → one → all.
+    CycleRepeat,
+    /// An absolute repeat mode, from MPRIS's `LoopStatus`.
+    SetRepeat(RepeatMode),
+    /// The organize menu's reorders and dedup (M13 §1.5). They act on the
+    /// playlist captured when the menu opened.
+    SortPlaylist(PlaylistId, SortKey),
+    ReversePlaylist(PlaylistId),
+    RandomizePlaylist(PlaylistId),
+    DeduplicatePlaylist(PlaylistId),
+    /// Remove-dead: the existence check runs on the browse worker first;
+    /// this command only starts it.
+    PruneDeadPlaylist(PlaylistId),
     ViewNext,
     ViewPrevious,
     View(PlaylistId),
@@ -419,6 +432,9 @@ pub struct PlayerRuntime {
     /// The playlist the front end is looking at (M8 §10). Transient: never
     /// persisted, and it starts on whichever playlist was playing.
     viewed: PlaylistId,
+    /// The organize menu's remove-dead checks (M13 §1.5), started the first
+    /// time one runs. Its answers are drained each pump.
+    browse: Option<BrowseWorker>,
     /// The viewed playlist's rows as last built, keyed by the
     /// `Session::state_edits` and the playlist they were built from, so a
     /// frame over an unchanged 4,096-entry playlist rebuilds nothing.
@@ -505,6 +521,7 @@ impl PlayerRuntime {
             cover_seen: None,
             loading_seen: None,
             podcast_name: None,
+            browse: None,
         }
     }
 
@@ -776,6 +793,54 @@ impl PlayerRuntime {
                 Err(error) => self.status = Some(error.to_string()),
             },
             AppCommand::ToggleShuffle(id) => self.toggle_shuffle(id),
+            AppCommand::CycleRepeat => {
+                let next = self.session.state().repeat().next();
+                let action = self.session.set_repeat(next);
+                self.submit(action);
+            }
+            AppCommand::SetRepeat(mode) => {
+                let action = self.session.set_repeat(mode);
+                self.submit(action);
+            }
+            AppCommand::SortPlaylist(id, key) => match self.session.sort_playlist(id, key) {
+                Ok(action) => {
+                    self.submit(action);
+                    self.status = Some("Sorted".to_owned());
+                }
+                Err(error) => self.status = Some(error.to_string()),
+            },
+            AppCommand::ReversePlaylist(id) => match self.session.reverse_playlist(id) {
+                Ok(action) => {
+                    self.submit(action);
+                    self.status = Some("Reversed".to_owned());
+                }
+                Err(error) => self.status = Some(error.to_string()),
+            },
+            AppCommand::RandomizePlaylist(id) => {
+                let mut bytes = [0u8; 8];
+                if getrandom::fill(&mut bytes).is_err() {
+                    self.status = Some("Randomize unavailable: no randomness source".to_owned());
+                    return;
+                }
+                match self
+                    .session
+                    .randomize_playlist(id, u64::from_le_bytes(bytes))
+                {
+                    Ok(action) => {
+                        self.submit(action);
+                        self.status = Some("Randomized".to_owned());
+                    }
+                    Err(error) => self.status = Some(error.to_string()),
+                }
+            }
+            AppCommand::DeduplicatePlaylist(id) => match self.session.deduplicate_playlist(id) {
+                Ok((action, removed)) => {
+                    self.submit(action);
+                    self.status = Some(format!("Removed {removed} duplicates"));
+                }
+                Err(error) => self.status = Some(error.to_string()),
+            },
+            AppCommand::PruneDeadPlaylist(id) => self.start_dead_check(id),
             AppCommand::ViewNext => self.step_view(1),
             AppCommand::ViewPrevious => self.step_view(-1),
             AppCommand::View(id) => {
@@ -805,6 +870,7 @@ impl PlayerRuntime {
         }
         self.pump_engine();
         self.track_covers();
+        self.drain_dead_checks();
         // Seeks mark themselves where they execute — a drained widget
         // request and a pressed key land in the same `transport` — so the
         // snapshot this pump publishes reports the jump whatever the gap.
@@ -981,6 +1047,7 @@ impl PlayerRuntime {
             },
             phase: self.phase(),
             volume: self.volume,
+            repeat: state.repeat(),
             status: self.status.as_deref().map(displayable),
             persistence: if !self.persisting {
                 PersistenceStatus::Unsaved
@@ -1638,6 +1705,54 @@ impl PlayerRuntime {
                 }
             }
             Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    /// Starts the remove-dead check (M13 §1.5): the local candidates are
+    /// read here and stat-ed on the browse worker, whose answer `pump`
+    /// applies. Nothing is removed by this call.
+    fn start_dead_check(&mut self, id: PlaylistId) {
+        let Some(playlist) = self.session.state().playlists().playlist(id) else {
+            self.status = Some("No such playlist".to_owned());
+            return;
+        };
+        let candidates: Vec<(QueueEntryId, PathBuf)> = playlist
+            .queue()
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.source() {
+                QueueSource::LocalFile(path) => Some((entry.id(), path.as_path().to_path_buf())),
+                _ => None,
+            })
+            .collect();
+        if candidates.is_empty() {
+            self.status = Some("Nothing to check: no local entries".to_owned());
+            return;
+        }
+        let worker = self.browse.get_or_insert_with(|| BrowseWorker::spawn(None));
+        worker.request(BrowseRequest::CheckDead {
+            playlist: id,
+            candidates,
+        });
+        self.status = Some("Checking for dead entries".to_owned());
+    }
+
+    /// Applies the dead-entry answers: each prune keeps the owned entry
+    /// (decided in `Session`), reports the count, and never starts or stops
+    /// playback on its own.
+    fn drain_dead_checks(&mut self) {
+        let Some(worker) = &self.browse else {
+            return;
+        };
+        while let Some(BrowseResult::DeadEntries { playlist, dead }) = worker.try_result() {
+            match self.session.prune_dead(playlist, &dead) {
+                Ok((action, removed)) if removed > 0 => {
+                    self.submit(action);
+                    self.status = Some(format!("Removed {removed} dead entries"));
+                }
+                Ok(_) => self.status = Some("No dead entries".to_owned()),
+                Err(error) => self.status = Some(error.to_string()),
+            }
         }
     }
 

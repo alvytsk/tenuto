@@ -308,16 +308,16 @@ fn a_hostile_playlist_name_reaches_the_strip_defused() {
     assert!(row.contains(r"Jazz\u{1b}[31m\u{7}"), "{row}");
 }
 
-/// The help overlay must still fit the terminal it fitted before M8: 19
-/// lines plus a border is 21 rows, and its widest line (the Podcasts one, 67
-/// bytes — `draw_help_overlay` measures with `str::len`) plus the border and
-/// padding is 71 columns. At 71x21 the last line, the one that says how to
-/// leave, has to be on screen.
+/// The help overlay must still fit the terminal it fitted before M8, grown
+/// for M13's five new lines: 24 lines plus a border is 26 rows, and its
+/// widest line (the organize one, 71 bytes — `draw_help_overlay` measures
+/// with `str::len`) plus the border and padding is 75 columns. At 75x26 the
+/// last line, the one that says how to leave, has to be on screen.
 #[test]
 fn the_help_overlay_still_shows_its_quit_line_at_the_size_it_fitted_before_m8() {
     let mut ui = UiState::new(false);
     ui.overlay = Overlay::Help;
-    let mut terminal = Terminal::new(TestBackend::new(71, 21)).expect("backend");
+    let mut terminal = Terminal::new(TestBackend::new(75, 26)).expect("backend");
     terminal
         .draw(|frame| {
             draw(frame, &views::sample_view(), &ui, &Visuals::default());
@@ -326,14 +326,23 @@ fn the_help_overlay_still_shows_its_quit_line_at_the_size_it_fitted_before_m8() 
     let buffer: Buffer = terminal.backend().buffer().clone();
     let rendered: String = buffer
         .content()
-        .chunks(71)
+        .chunks(75)
         .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n");
-    for line in ["q / Ctrl-C", "? / Esc", "z ", "Tab/Shift-Tab", "n / r / D"] {
+    for line in [
+        "q / Ctrl-C",
+        "? / Esc",
+        "z ",
+        "Tab/Shift-Tab",
+        "n / r / D",
+        "R ",
+        "S ",
+        "Ctrl-J",
+    ] {
         assert!(
             rendered.contains(line),
-            "the overlay lost {line:?} at 71x21\n{rendered}"
+            "the overlay lost {line:?} at 75x26\n{rendered}"
         );
     }
 }

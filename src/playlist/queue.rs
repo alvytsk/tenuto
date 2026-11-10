@@ -166,6 +166,8 @@ pub enum QueueError {
     UnknownEntry(QueueEntryId),
     #[error("playlist {0} no longer exists")]
     UnknownPlaylist(u64),
+    #[error("a reorder must name every entry exactly once")]
+    NotAPermutation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -395,6 +397,36 @@ impl Queue {
             return Err(QueueError::UnknownEntry(id));
         }
         self.active = id;
+        Ok(())
+    }
+
+    /// Rewrites the list order to `order`, which must be a permutation of
+    /// the entries this queue already holds. The cursor survives by
+    /// identity: `active` still names the same entry, wherever it now sits
+    /// (M13 §1.5).
+    pub(in crate::playlist) fn reorder(
+        &mut self,
+        order: Vec<QueueEntryId>,
+    ) -> Result<(), QueueError> {
+        if order.len() != self.entries.len() {
+            return Err(QueueError::NotAPermutation);
+        }
+        let mut used = vec![false; self.entries.len()];
+        let mut positions = Vec::with_capacity(order.len());
+        for id in &order {
+            match self.index_of(*id) {
+                Some(index) if !used[index] => {
+                    used[index] = true;
+                    positions.push(index);
+                }
+                _ => return Err(QueueError::UnknownEntry(*id)),
+            }
+        }
+        let snapshot = self.entries.clone();
+        self.entries = positions
+            .iter()
+            .map(|&index| snapshot[index].clone())
+            .collect();
         Ok(())
     }
 

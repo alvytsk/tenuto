@@ -13,7 +13,7 @@ use crate::media::id::MediaId;
 use crate::persistence::model::{PersistedCheckpoint, PersistedState};
 use crate::playback::command::LoadRequestId;
 use crate::playback::state::PlaybackState;
-use crate::playlist::PlaylistId;
+use crate::playlist::{PlaylistId, RepeatMode};
 use crate::queue::{DisplayDuration, QueueEntry, QueueEntryId};
 use crate::telemetry::displayable;
 use crate::volume::Volume;
@@ -150,6 +150,8 @@ pub struct PlayerView {
     pub now_playing: Option<NowPlaying>,
     pub phase: PlaybackPhase,
     pub volume: Volume,
+    /// Winamp's repeat toggle (M13 §1.1), session-wide.
+    pub repeat: RepeatMode,
     pub status: Option<String>,
     pub persistence: PersistenceStatus,
     pub last_requested: Option<QueueEntryId>,

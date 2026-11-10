@@ -24,10 +24,12 @@ use crate::media::provenance::PositionProvenance;
 use crate::playlist::PlaylistId;
 use crate::queue::{DisplayDuration, DurationSource, QueueEntryId};
 use crate::tui::browser::BrowserState;
+use crate::tui::input::ORGANIZE_ITEMS;
+use crate::tui::jump;
 use crate::tui::layout::{
     Regions, Tier, inset, queue_body, regions, take_left, take_right, tier_for, visible_rows,
 };
-use crate::tui::state::{InputPurpose, Overlay, UiState};
+use crate::tui::state::{ClockMode, InputPurpose, Overlay, UiState};
 use crate::tui::tabs;
 use crate::tui::theme::Theme;
 
@@ -63,6 +65,10 @@ pub struct HitMap {
     pub queue: Rect,
     /// The bar alone, so a click's column maps to a fraction of the track.
     pub progress: Rect,
+    /// The time label, where it has a region of its own (M13 §1.3): a click
+    /// cycles the clock. Zero in the tiers where the label shares the
+    /// progress row, so a click there still seeks.
+    pub time: Rect,
     pub buttons: Vec<(Rect, TransportButton)>,
     /// Each label of the playlist tab strip; empty in the Minimal tier,
     /// whose compact strip names only the viewed playlist.
@@ -101,11 +107,12 @@ const CONFIRM_CLEAR_TEXT: &str = "Clear the queue? Listening history is kept. y 
 /// (19 lines, 21 rows with the border) by pairing related keys: a classic
 /// 80x24 terminal loses two rows to a multiplexer's status line, and the
 /// last lines here are the ones a listener most needs.
-const HELP_LINES: [&str; 19] = [
+const HELP_LINES: [&str; 24] = [
     "Space           Pause/resume; unloaded/ended behavior follows §4",
     "Enter           Play selected queue entry",
     "Up/Down or j/k  Move selection; J/K move the selected entry",
     "Left/Right      Seek backward/forward 10 seconds; Home restarts",
+    "Ctrl-J          Jump to a typed time (SS, MM:SS or HH:MM:SS)",
     "- _ / + =       Decrease / increase volume",
     "s / p           Stop / play",
     "[ / ]           Previous / next queue entry",
@@ -118,6 +125,10 @@ const HELP_LINES: [&str; 19] = [
     "Tab/Shift-Tab   Next / previous playlist",
     "n / r / D       New / rename / delete playlist",
     "z               Shuffle this playlist",
+    "R               Repeat off → one → all → off",
+    "t / click time  Clock: elapsed → −remaining → total",
+    "f               Jump to file: type to filter, Enter plays",
+    "S               Organize this playlist: sort, reverse, randomize, prune",
     "m / Ctrl-L      Toggle mouse capture / redraw the whole view",
     "? / Esc         Show help / close the overlay or cancel input",
     "q / Ctrl-C      Graceful quit",
@@ -186,7 +197,7 @@ pub fn draw(
         draw_spectrum(buffer, spectrum, visuals.spectrum, visuals.peaks, &theme);
     }
     let buttons = draw_transport(buffer, regions.transport, view, tier, slider, &theme);
-    let progress = draw_progress(buffer, &regions, view, tier, &theme);
+    let (time, progress) = draw_progress(buffer, &regions, view, tier, ui.clock_mode, &theme);
     let mut tabs = Vec::new();
     let rows = draw_queue(buffer, regions.queue, view, ui, tier, &theme, &mut tabs);
     draw_footer(buffer, regions.footer, view, &theme);
@@ -194,6 +205,7 @@ pub fn draw(
     HitMap {
         rows,
         queue: regions.queue,
+        time,
         progress,
         buttons,
         tabs,
@@ -227,7 +239,12 @@ fn draw_overlay(
                 theme,
             );
         }
-        Overlay::Input(purpose) => draw_input_overlay(buffer, area, purpose, &ui.input, theme),
+        Overlay::ConfirmOrganize(_, op) => draw_confirm_overlay(buffer, area, op.question(), theme),
+        Overlay::SortMenu(id) => draw_sort_menu_overlay(buffer, area, id, ui.sort_cursor, theme),
+        Overlay::Input(purpose) => {
+            draw_input_overlay(buffer, area, purpose, &ui.input, ui.input_error, theme)
+        }
+        Overlay::JumpToFile => draw_jump_file_overlay(buffer, area, view, ui, theme),
         Overlay::Browser => {
             if let Some(browser) = browser {
                 browser::draw_browser(buffer, area, browser, theme);
@@ -293,15 +310,17 @@ fn draw_input_overlay(
     area: Rect,
     purpose: InputPurpose,
     input: &str,
+    error: Option<&'static str>,
     theme: &Theme,
 ) {
     let title = match purpose {
         InputPurpose::AddUrl(_) => " add path or URL — Enter to add, Esc to cancel ",
         InputPurpose::NewPlaylist => " new playlist — Enter to create, Esc to cancel ",
         InputPurpose::Rename(_) => " rename playlist — Enter to rename, Esc to cancel ",
+        InputPurpose::JumpToTime => " jump to time — SS, MM:SS or HH:MM:SS; Esc cancels ",
     };
-    let width = area.width.min(60);
-    let box_area = centered_box(area, width, 3);
+    let width = area.width.clamp(0, 60);
+    let box_area = centered_box(area, width, if error.is_some() { 4 } else { 3 });
     Clear.render(box_area, buffer);
     Block::bordered()
         .title(title)
@@ -310,6 +329,98 @@ fn draw_input_overlay(
     Paragraph::new(format!("{input}▏"))
         .style(Style::new().fg(theme.cream))
         .render(inset(box_area), buffer);
+    if let Some(error) = error {
+        let line = Rect {
+            y: box_area.y.saturating_add(2),
+            height: 1,
+            ..inset(box_area)
+        };
+        Line::styled(error, Style::new().fg(theme.amber)).render(line, buffer);
+    }
+}
+
+/// The jump-to-file overlay (M13 §1.4): the filter line, up to eight
+/// matches in row order with the selected one marked, and the match count.
+/// The rows are the same text the queue shows.
+fn draw_jump_file_overlay(
+    buffer: &mut Buffer,
+    area: Rect,
+    view: &PlayerView,
+    ui: &UiState,
+    theme: &Theme,
+) {
+    let matches = jump::file_matches(view, &ui.filter);
+    let visible = matches.len().min(8);
+    let height = u16::try_from(visible + 2).unwrap_or(u16::MAX).max(3);
+    let box_area = centered_box(area, area.width.min(56), height);
+    Clear.render(box_area, buffer);
+    let count = format!(" {} matched ", matches.len());
+    Block::bordered()
+        .title(" jump to file — type to filter, Enter plays, Esc cancels ")
+        .title(Line::from(count).right_aligned())
+        .border_style(Style::new().fg(theme.green))
+        .render(box_area, buffer);
+    let inner = inset(box_area);
+    Paragraph::new(format!("{}▏", ui.filter))
+        .style(Style::new().fg(theme.cream))
+        .render(inner, buffer);
+    for (line, id) in matches.iter().take(visible).enumerate() {
+        let Some(row) = view.rows.iter().find(|row| row.id == *id) else {
+            continue;
+        };
+        let selected = ui.selected == Some(*id);
+        let marker = if selected { "▶" } else { " " };
+        let text = row.subtitle.as_deref().map_or_else(
+            || row.title.clone(),
+            |artist| format!("{artist} — {}", row.title),
+        );
+        let line_rect = Rect {
+            y: inner.y.saturating_add(1 + line as u16),
+            height: 1,
+            ..inner
+        };
+        let style = if selected {
+            Style::new().fg(theme.ink).bg(theme.green)
+        } else {
+            Style::new().fg(theme.text)
+        };
+        Line::styled(format!("{marker} {text}"), style).render(line_rect, buffer);
+    }
+}
+
+/// The organize menu (M13 §1.5): the eight items, the cursor marked, the
+/// playlist's name in the border.
+fn draw_sort_menu_overlay(
+    buffer: &mut Buffer,
+    area: Rect,
+    id: PlaylistId,
+    cursor: usize,
+    theme: &Theme,
+) {
+    let height = u16::try_from(ORGANIZE_ITEMS.len() + 2).unwrap_or(u16::MAX);
+    let box_area = centered_box(area, area.width.min(40), height);
+    Clear.render(box_area, buffer);
+    Block::bordered()
+        .title(" organize ")
+        .border_style(Style::new().fg(theme.green))
+        .render(box_area, buffer);
+    let inner = inset(box_area);
+    for (line, item) in ORGANIZE_ITEMS.iter().enumerate() {
+        let line_rect = Rect {
+            y: inner.y.saturating_add(line as u16),
+            height: 1,
+            ..inner
+        };
+        let selected = line == cursor;
+        let marker = if selected { "▶" } else { " " };
+        let style = if selected {
+            Style::new().fg(theme.ink).bg(theme.green)
+        } else {
+            Style::new().fg(theme.text)
+        };
+        Line::styled(format!("{marker} {item}"), style).render(line_rect, buffer);
+    }
+    let _ = id;
 }
 
 fn bordered(theme: &Theme) -> Block<'static> {
@@ -668,23 +779,29 @@ fn state_line(view: &PlayerView, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Draws the time label and the bar; returns the bar's rectangle. With a
-/// time row of its own the label goes there, with the phase glyph before
-/// it, and the bar fills its row between brackets; otherwise the bar follows
-/// the label on the shared row.
+/// Draws the time label and the bar; returns the time label's rectangle
+/// (empty where it has no region of its own) and the bar's rectangle. With
+/// a time row of its own the label goes there, with the phase glyph before
+/// it, and the bar fills its row between brackets; otherwise the bar
+/// follows the label on the shared row.
 fn draw_progress(
     buffer: &mut Buffer,
     regions: &Regions,
     view: &PlayerView,
     tier: Tier,
+    mode: ClockMode,
     theme: &Theme,
-) -> Rect {
+) -> (Rect, Rect) {
     if view.live {
         return draw_live_progress(buffer, regions, view, tier, theme);
     }
-    let (label, ratio) = progress_label(view.now_playing.as_ref());
+    let (label, ratio) = progress_label(view.now_playing.as_ref(), mode);
     let mut bar = regions.progress;
+    let mut time_hit = regions.time;
     if regions.time == regions.progress {
+        // The label shares the bar's row: no click target of its own, so a
+        // click anywhere here keeps seeking.
+        time_hit = Rect::default();
         let mut spans = Vec::new();
         if tier == Tier::Minimal {
             spans.extend(state_line(view, theme).spans);
@@ -717,7 +834,7 @@ fn draw_progress(
         ),
     ])
     .render(bar, buffer);
-    bar
+    (time_hit, bar)
 }
 
 /// A live source has no timeline: the listening time replaces the
@@ -730,7 +847,7 @@ fn draw_live_progress(
     view: &PlayerView,
     tier: Tier,
     theme: &Theme,
-) -> Rect {
+) -> (Rect, Rect) {
     let time = view
         .now_playing
         .as_ref()
@@ -744,14 +861,15 @@ fn draw_live_progress(
         }
         spans.push(Span::styled(label, Style::new().fg(theme.text)));
         Line::from(spans).render(regions.progress, buffer);
+        (Rect::default(), regions.progress)
     } else {
         Line::from(vec![
             phase_glyph(view, theme),
             Span::styled(label, Style::new().fg(theme.green)),
         ])
         .render(regions.time, buffer);
+        (regions.time, regions.progress)
     }
-    regions.progress
 }
 
 /// `▶ ` or `‖ ` before the time on its own row: the transport button shows
@@ -768,7 +886,7 @@ fn phase_glyph(view: &PlayerView, theme: &Theme) -> Span<'static> {
 /// The time label and how much of the bar it fills. Only a loaded entry with
 /// a decoder-confirmed duration fills anything; before loading the label is
 /// the saved history instead of a position.
-fn progress_label(now: Option<&NowPlaying>) -> (String, Option<f64>) {
+fn progress_label(now: Option<&NowPlaying>, mode: ClockMode) -> (String, Option<f64>) {
     let Some(now) = now else {
         return (format!("{UNKNOWN_TIME} / {UNKNOWN_TIME}"), None);
     };
@@ -784,20 +902,25 @@ fn progress_label(now: Option<&NowPlaying>) -> (String, Option<f64>) {
         return (label, None);
     }
     let mark = if now.estimated_position { "~" } else { "" };
-    let label = format!(
-        "{mark}{} / {}",
-        clock(now.position),
-        duration.as_deref().unwrap_or(UNKNOWN_TIME)
-    );
-    let ratio = match now.duration {
+    // −remaining and total need a decoder-confirmed duration; with only a
+    // declared one or none, the label falls back to elapsed (M13 §1.3).
+    let decoded = match now.duration {
         Some(DisplayDuration {
             value,
             source: DurationSource::Decoded(_),
-        }) if !value.is_zero() => {
-            Some((now.position.as_secs_f64() / value.as_secs_f64()).clamp(0.0, 1.0))
-        }
+        }) if !value.is_zero() => Some(value),
         _ => None,
     };
+    let left = match (mode, decoded) {
+        (ClockMode::Remaining, Some(value)) => {
+            format!("-{}", clock(value.saturating_sub(now.position)))
+        }
+        (ClockMode::Total, Some(value)) => clock(value),
+        _ => format!("{mark}{}", clock(now.position)),
+    };
+    let label = format!("{left} / {}", duration.as_deref().unwrap_or(UNKNOWN_TIME));
+    let ratio =
+        decoded.map(|value| (now.position.as_secs_f64() / value.as_secs_f64()).clamp(0.0, 1.0));
     (label, ratio)
 }
 
@@ -836,7 +959,12 @@ fn draw_queue(
         // No border to put the strip in: its first row carries the compact
         // form and the listing takes the rest.
         let head = row(area, area.y);
-        let strip = tabs::compact(&view.tabs, view.viewed, usize::from(area.width));
+        let strip = tabs::compact(
+            &view.tabs,
+            view.viewed,
+            usize::from(area.width),
+            view.repeat.badge(),
+        );
         Line::styled(strip, Style::new().fg(theme.muted)).render(head, buffer);
         Rect {
             y: area.y.saturating_add(1),
@@ -851,7 +979,7 @@ fn draw_queue(
         // The strip sits where ` QUEUE ` did: inside the corners, with a
         // column of air at each end, and clear of the right-aligned count.
         let room = usize::from(area.width).saturating_sub(4 + count.width());
-        let labels = tabs::strip(&view.tabs, view.viewed, room);
+        let labels = tabs::strip(&view.tabs, view.viewed, room, view.repeat.badge());
         // The title starts a column inside the corner and `tab_strip` leads
         // with a space, so the first label sits two columns in.
         let mut x = area.x.saturating_add(2);
