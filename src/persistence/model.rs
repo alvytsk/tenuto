@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 use super::queue_codec::{self, QueueReset};
 use crate::media::id::MediaId;
-use crate::playlist::{PlaylistError, PlaylistId, PlaylistSet};
+use crate::playlist::{PlaylistError, PlaylistId, PlaylistSet, RepeatMode, SortKey};
 use crate::queue::{Direction, DisplayUpdate, NewQueueEntry, QueueEntryId, QueueError, Removed};
 use crate::resume::PlaybackCheckpoint;
 use crate::volume::Volume;
@@ -70,6 +70,11 @@ pub struct PersistedState {
     /// Private: every change goes through the forwarding methods below, and
     /// nothing outside hands out `&mut PlaylistSet`.
     playlists: PlaylistSet,
+    /// Winamp's repeat toggle (M13 §1.1), session-wide. Additive with the
+    /// same rule as `volume`: absent on disk means [`RepeatMode::Off`], and
+    /// the schema stays 4 — a build without the field ignores it, a build
+    /// with it defaults it (M13 §1.1's recorded precedent).
+    repeat_mode: RepeatMode,
     next_seq: u64,
 }
 
@@ -94,6 +99,8 @@ pub(super) struct RawState {
     playlists: Option<serde_json::Value>,
     #[serde(default)]
     playing: Option<serde_json::Value>,
+    #[serde(default)]
+    repeat_mode: Option<String>,
     #[serde(default, deserialize_with = "present")]
     next_entry_id: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "present")]
@@ -156,6 +163,10 @@ impl RawState {
                 volume: self.volume,
                 checkpoints: Arc::new(self.checkpoints),
                 playlists: recovered.set,
+                repeat_mode: self
+                    .repeat_mode
+                    .and_then(|raw| RepeatMode::from_stored(&raw))
+                    .unwrap_or(RepeatMode::Off),
                 next_seq,
             },
             recovered.reset,
@@ -182,6 +193,9 @@ impl Serialize for PersistedState {
             /// `None` serializes as `null`: an exhausted namespace (M8 §4).
             next_entry_id: Option<u64>,
             next_playlist_id: Option<u64>,
+            /// M13 §1.1's additive field: `Off` serializes as `null`, so a
+            /// file written by this build stays readable by an older one.
+            repeat_mode: Option<&'static str>,
         }
         Out {
             schema_version: self.schema_version,
@@ -192,6 +206,7 @@ impl Serialize for PersistedState {
             playing: self.playlists.playing().get(),
             next_entry_id: self.playlists.next_entry_id(),
             next_playlist_id: self.playlists.next_playlist_id(),
+            repeat_mode: self.repeat_mode.as_stored(),
         }
         .serialize(serializer)
     }
@@ -205,6 +220,7 @@ impl Default for PersistedState {
             volume: Volume::FULL.as_gain(),
             checkpoints: Arc::new(BTreeMap::new()),
             playlists: PlaylistSet::default(),
+            repeat_mode: RepeatMode::Off,
             next_seq: 1,
         }
     }
@@ -220,6 +236,16 @@ impl PersistedState {
 
     pub fn set_volume(&mut self, volume: Volume) {
         self.volume = volume.as_gain();
+    }
+
+    /// Winamp's repeat toggle (M13 §1.1), read by `Session`'s advance site
+    /// and mirrored into every view.
+    pub fn repeat(&self) -> RepeatMode {
+        self.repeat_mode
+    }
+
+    pub fn set_repeat(&mut self, mode: RepeatMode) {
+        self.repeat_mode = mode;
     }
 
     /// Read-only from outside `persistence`: the only path that can change the
@@ -294,6 +320,42 @@ impl PersistedState {
 
     pub(crate) fn clear_playlist(&mut self, id: PlaylistId) -> Result<(), PlaylistError> {
         self.playlists.clear(id)
+    }
+
+    pub(crate) fn sort_playlist(
+        &mut self,
+        id: PlaylistId,
+        key: SortKey,
+    ) -> Result<bool, PlaylistError> {
+        self.playlists.sort_by(id, key)
+    }
+
+    pub(crate) fn reverse_playlist(&mut self, id: PlaylistId) -> Result<bool, PlaylistError> {
+        self.playlists.reverse(id)
+    }
+
+    pub(crate) fn randomize_playlist(
+        &mut self,
+        id: PlaylistId,
+        seed: u64,
+    ) -> Result<bool, PlaylistError> {
+        self.playlists.randomize(id, seed)
+    }
+
+    pub(crate) fn deduplicate_playlist(
+        &mut self,
+        id: PlaylistId,
+        must_keep: &dyn Fn(QueueEntryId) -> bool,
+    ) -> Result<usize, PlaylistError> {
+        self.playlists.deduplicate(id, must_keep)
+    }
+
+    pub(crate) fn prune_playlist(
+        &mut self,
+        id: PlaylistId,
+        dead: &[QueueEntryId],
+    ) -> Result<usize, PlaylistError> {
+        self.playlists.prune(id, dead)
     }
 
     /// The one forward that acts on the envelope too: the set's effect on

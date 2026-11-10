@@ -21,12 +21,19 @@ pub struct TabLabel {
     pub playing: bool,
 }
 
-fn label(tab: &PlaylistTab) -> String {
+fn label(tab: &PlaylistTab, repeat: Option<&str>) -> String {
+    let badge = match repeat {
+        // M13 §1.1: the badge is global, so it rides the playing tab —
+        // where the playing mark already is.
+        Some(badge) if tab.playing => format!(" {badge}"),
+        _ => String::new(),
+    };
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         if tab.playing { PLAYING_MARK } else { "" },
         tab.name,
         if tab.shuffled { SHUFFLE_MARK } else { "" },
+        badge,
     )
 }
 
@@ -57,12 +64,17 @@ fn clip(text: &str, width: usize) -> String {
 
 /// The labels that fit in `width` columns, always including the viewed tab:
 /// as many tabs before it as fit with it, then as many after.
-pub fn strip(tabs: &[PlaylistTab], viewed: PlaylistId, width: usize) -> Vec<TabLabel> {
+pub fn strip(
+    tabs: &[PlaylistTab],
+    viewed: PlaylistId,
+    width: usize,
+    repeat: Option<&str>,
+) -> Vec<TabLabel> {
     if width == 0 || tabs.is_empty() {
         return Vec::new();
     }
     let at = tabs.iter().position(|tab| tab.id == viewed).unwrap_or(0);
-    let texts: Vec<String> = tabs.iter().map(label).collect();
+    let texts: Vec<String> = tabs.iter().map(|tab| label(tab, repeat)).collect();
     let cost = |index: usize| texts[index].width() + GAP.width();
 
     let mut used = texts[at].width().min(width);
@@ -87,14 +99,22 @@ pub fn strip(tabs: &[PlaylistTab], viewed: PlaylistId, width: usize) -> Vec<TabL
 }
 
 /// The Minimal tier's one-row form: the viewed label and `n/m`.
-pub fn compact(tabs: &[PlaylistTab], viewed: PlaylistId, width: usize) -> String {
+pub fn compact(
+    tabs: &[PlaylistTab],
+    viewed: PlaylistId,
+    width: usize,
+    repeat: Option<&str>,
+) -> String {
     let at = tabs.iter().position(|tab| tab.id == viewed).unwrap_or(0);
     let Some(tab) = tabs.get(at) else {
         return String::new();
     };
     let place = format!(" {}/{}", at + 1, tabs.len());
     let room = width.saturating_sub(place.width());
-    clip(&format!("{}{place}", clip(&label(tab), room)), width)
+    clip(
+        &format!("{}{place}", clip(&label(tab, repeat), room)),
+        width,
+    )
 }
 
 #[cfg(test)]
@@ -127,7 +147,7 @@ mod tests {
             tab(2, "Morning", false, true),
             tab(3, "Workout", true, true),
         ];
-        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(2), 80);
+        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(2), 80, None);
         assert_eq!(
             texts(&labels),
             ["Default", "Morning ·shfl", "▶Workout ·shfl"]
@@ -147,7 +167,7 @@ mod tests {
             .map(|i| tab(i, &format!("Playlist{i}"), false, false))
             .collect();
         for viewed in 1..=9 {
-            let labels = strip(&tabs, PlaylistId::from_raw_for_tests(viewed), 34);
+            let labels = strip(&tabs, PlaylistId::from_raw_for_tests(viewed), 34, None);
             assert!(
                 labels.iter().any(|label| label.viewed),
                 "viewed {viewed} is on screen"
@@ -164,7 +184,7 @@ mod tests {
     fn width_is_measured_in_columns_not_bytes_or_chars() {
         // Each CJK character is two columns and three bytes.
         let tabs = [tab(1, "音楽音楽", false, false), tab(2, "ab", false, false)];
-        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(1), 10);
+        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(1), 10, None);
         assert_eq!(
             texts(&labels),
             ["音楽音楽"],
@@ -175,7 +195,7 @@ mod tests {
     #[test]
     fn a_single_over_long_name_is_clipped_with_an_ellipsis() {
         let tabs = [tab(1, "An extraordinarily long playlist name", true, true)];
-        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(1), 12);
+        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(1), 12, None);
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].text.width(), 12);
         assert!(labels[0].text.ends_with('…'));
@@ -184,9 +204,9 @@ mod tests {
     #[test]
     fn zero_width_and_an_unknown_viewed_id_are_harmless() {
         let tabs = [tab(1, "Default", true, false)];
-        assert!(strip(&tabs, PlaylistId::from_raw_for_tests(1), 0).is_empty());
+        assert!(strip(&tabs, PlaylistId::from_raw_for_tests(1), 0, None).is_empty());
         assert_eq!(
-            texts(&strip(&tabs, PlaylistId::from_raw_for_tests(9), 40)),
+            texts(&strip(&tabs, PlaylistId::from_raw_for_tests(9), 40, None)),
             ["▶Default"]
         );
     }
@@ -198,9 +218,23 @@ mod tests {
             tab(2, "Morning", true, true),
         ];
         assert_eq!(
-            compact(&tabs, PlaylistId::from_raw_for_tests(2), 40),
+            compact(&tabs, PlaylistId::from_raw_for_tests(2), 40, None),
             "▶Morning ·shfl 2/2"
         );
-        assert!(compact(&tabs, PlaylistId::from_raw_for_tests(2), 8).width() <= 8);
+        assert!(compact(&tabs, PlaylistId::from_raw_for_tests(2), 8, None).width() <= 8);
+    }
+
+    #[test]
+    fn the_repeat_badge_rides_the_playing_tab() {
+        let tabs = [
+            tab(1, "Default", false, false),
+            tab(2, "Morning", true, true),
+        ];
+        let labels = strip(&tabs, PlaylistId::from_raw_for_tests(2), 80, Some("R:*"));
+        assert_eq!(texts(&labels), ["Default", "▶Morning ·shfl R:*"]);
+        assert_eq!(
+            compact(&tabs, PlaylistId::from_raw_for_tests(2), 40, Some("R:1")),
+            "▶Morning ·shfl R:1 2/2"
+        );
     }
 }

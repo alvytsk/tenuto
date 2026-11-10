@@ -14,6 +14,7 @@ use mpris_server::{
 };
 
 use crate::lifecycle::panic::run_contained;
+use crate::playlist::RepeatMode;
 
 use super::cover::{clear_covers, write_cover};
 use super::{Change, CoverUpdate, FailureLog, Published, Remote, Request, Status};
@@ -174,6 +175,7 @@ fn properties(published: &Published, change: Change) -> Vec<Property> {
         Change::PlaybackStatus => vec![Property::PlaybackStatus(playback_status(published))],
         Change::Volume => vec![Property::Volume(volume(published))],
         Change::Shuffle => vec![Property::Shuffle(shuffle(published))],
+        Change::LoopStatus => vec![Property::LoopStatus(loop_status(published))],
         Change::Seeked => Vec::new(),
     }
 }
@@ -189,6 +191,16 @@ fn can_seek(published: &Published) -> bool {
 
 fn shuffle(published: &Published) -> bool {
     published.snapshot().is_some_and(|s| s.shuffle)
+}
+
+/// M13 §1.1's mapping: off → `None`, one → `Track`, all → `Playlist`.
+fn loop_status(published: &Published) -> LoopStatus {
+    let mode = published.snapshot().map_or(RepeatMode::Off, |s| s.repeat);
+    match mode {
+        RepeatMode::Off => LoopStatus::None,
+        RepeatMode::One => LoopStatus::Track,
+        RepeatMode::All => LoopStatus::Playlist,
+    }
 }
 
 fn position(published: &Published) -> Time {
@@ -350,11 +362,16 @@ impl PlayerInterface for Imp {
     }
 
     async fn loop_status(&self) -> fdo::Result<LoopStatus> {
-        Ok(LoopStatus::None)
+        Ok(loop_status(&self.published()))
     }
 
-    async fn set_loop_status(&self, _loop_status: LoopStatus) -> zbus::Result<()> {
-        Ok(())
+    async fn set_loop_status(&self, loop_status: LoopStatus) -> zbus::Result<()> {
+        let mode = match loop_status {
+            LoopStatus::None => RepeatMode::Off,
+            LoopStatus::Track => RepeatMode::One,
+            LoopStatus::Playlist => RepeatMode::All,
+        };
+        Ok(self.send(Request::SetLoopStatus(mode))?)
     }
 
     async fn rate(&self) -> fdo::Result<PlaybackRate> {
@@ -460,6 +477,7 @@ mod tests {
             position: Duration::from_secs(position),
             cover: None,
             shuffle: false,
+            repeat: RepeatMode::Off,
             sought: false,
         }
     }

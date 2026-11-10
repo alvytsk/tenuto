@@ -34,8 +34,8 @@ use std::sync::Arc;
 use url::Url;
 
 use super::queue::{
-    Direction, DisplayUpdate, IdAllocator, MAX_PLAYLIST_ENTRIES, NewQueueEntry, Queue, QueueEntry,
-    QueueEntryId, QueueError, QueueSource, Removed,
+    Direction, DisplayDuration, DisplayUpdate, DurationSource, IdAllocator, MAX_PLAYLIST_ENTRIES,
+    NewQueueEntry, Queue, QueueEntry, QueueEntryId, QueueError, QueueSource, Removed,
 };
 use super::{
     DEFAULT_NAME, MAX_PLAYLISTS, Playlist, PlaylistError, PlaylistId, Shuffle, clean_name,
@@ -297,6 +297,188 @@ impl PlaylistSet {
         Ok(())
     }
 
+    /// Removes `remove` from `id`, returning how many went. M13 §1.5's
+    /// dedup and prune hand in the ids they decided on; each must belong to
+    /// this playlist, and one that does not is refused before anything
+    /// changes.
+    pub fn remove_selected(
+        &mut self,
+        id: PlaylistId,
+        remove: &[QueueEntryId],
+    ) -> Result<usize, PlaylistError> {
+        let playlist = self.playlist_mut(id).ok_or(PlaylistError::Unknown(id))?;
+        for entry in remove {
+            if playlist.queue.get(*entry).is_none() {
+                return Err(PlaylistError::Unknown(id));
+            }
+        }
+        let mut removed = 0;
+        for entry in remove {
+            if playlist.queue.remove(*entry).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Deduplicates `id` by media identity, keeping one occurrence per
+    /// media: the first, unless `must_keep` names a later one (the owned
+    /// entry, M13 §1.5). Returns how many went. Shuffle is cleared when
+    /// anything went: a stale seed would silently scramble what is left.
+    pub fn deduplicate(
+        &mut self,
+        id: PlaylistId,
+        must_keep: &dyn Fn(QueueEntryId) -> bool,
+    ) -> Result<usize, PlaylistError> {
+        let playlist = self.playlist(id).ok_or(PlaylistError::Unknown(id))?;
+        let mut chosen: Vec<(MediaId, QueueEntryId)> = Vec::new();
+        let mut remove: Vec<QueueEntryId> = Vec::new();
+        for entry in playlist.queue().entries() {
+            let entry_id = entry.id();
+            let media = entry.media().clone();
+            match chosen.iter_mut().find(|(kept, _)| *kept == media) {
+                Some((_, keeper)) => {
+                    if must_keep(entry_id) && !must_keep(*keeper) {
+                        remove.push(*keeper);
+                        *keeper = entry_id;
+                    } else {
+                        remove.push(entry_id);
+                    }
+                }
+                None => chosen.push((media, entry_id)),
+            }
+        }
+        if remove.is_empty() {
+            return Ok(0);
+        }
+        let removed = self.remove_selected(id, &remove)?;
+        self.clear_shuffle_of(id);
+        Ok(removed)
+    }
+
+    /// Removes the local entries in `dead` from `id` (M13 §1.5). Returns
+    /// how many went; a stale seed would scramble what is left, so shuffle
+    /// clears with any removal.
+    pub fn prune(&mut self, id: PlaylistId, dead: &[QueueEntryId]) -> Result<usize, PlaylistError> {
+        if dead.is_empty() {
+            return Ok(0);
+        }
+        let removed = self.remove_selected(id, dead)?;
+        self.clear_shuffle_of(id);
+        Ok(removed)
+    }
+
+    /// Sorts `id` by `key`, ascending, case-insensitive, stable. Entries
+    /// with no title or artist sort by their source text, so a sort never
+    /// depends on tags having been read. Shuffle is cleared when the order
+    /// changed (M13 §1.5): the list order becomes the playback order until
+    /// shuffle is turned on again.
+    pub fn sort_by(&mut self, id: PlaylistId, key: SortKey) -> Result<bool, PlaylistError> {
+        if key == SortKey::Duration {
+            let complete = self
+                .playlist(id)
+                .ok_or(PlaylistError::Unknown(id))?
+                .queue()
+                .entries()
+                .iter()
+                .all(|entry| {
+                    matches!(
+                        entry.display().duration,
+                        Some(DisplayDuration {
+                            source: DurationSource::Decoded(_),
+                            ..
+                        })
+                    )
+                });
+            if !complete {
+                return Err(PlaylistError::MissingDurations);
+            }
+        }
+        let playlist = self.playlist(id).ok_or(PlaylistError::Unknown(id))?;
+        let mut keyed: Vec<(QueueEntryId, String)> = playlist
+            .queue()
+            .entries()
+            .iter()
+            .map(|entry| (entry.id(), sort_value(entry, key)))
+            .collect();
+        keyed.sort_by(|a, b| a.1.cmp(&b.1));
+        let order = keyed.into_iter().map(|(id, _)| id).collect();
+        self.reorder(id, order)
+    }
+
+    /// Reverses `id`'s list order. Shuffle clears with any actual change.
+    pub fn reverse(&mut self, id: PlaylistId) -> Result<bool, PlaylistError> {
+        let playlist = self.playlist(id).ok_or(PlaylistError::Unknown(id))?;
+        let mut order: Vec<QueueEntryId> = playlist
+            .queue()
+            .entries()
+            .iter()
+            .map(|entry| entry.id())
+            .collect();
+        order.reverse();
+        self.reorder(id, order)
+    }
+
+    /// Shuffles `id`'s *list order* with Fisher–Yates over a splitmix64
+    /// stream from `seed` — deterministic per seed, and persisted as order,
+    /// unlike [`Shuffle`]. Shuffle itself clears: the new order *is* the
+    /// playback order.
+    pub fn randomize(&mut self, id: PlaylistId, seed: u64) -> Result<bool, PlaylistError> {
+        let playlist = self.playlist(id).ok_or(PlaylistError::Unknown(id))?;
+        let mut order: Vec<QueueEntryId> = playlist
+            .queue()
+            .entries()
+            .iter()
+            .map(|entry| entry.id())
+            .collect();
+        let before = order.clone();
+        let mut stream = seed;
+        let mut next = move || {
+            stream = splitmix64(stream);
+            stream
+        };
+        for i in (1..order.len()).rev() {
+            let j = (next() % (i as u64 + 1)) as usize;
+            order.swap(i, j);
+        }
+        if order == before {
+            return Ok(false);
+        }
+        self.reorder(id, order)
+    }
+
+    /// The reorder shared tail: validate, apply, and clear shuffle only
+    /// when the order truly changed. `Ok(false)` changed nothing.
+    fn reorder(&mut self, id: PlaylistId, order: Vec<QueueEntryId>) -> Result<bool, PlaylistError> {
+        let playlist = self.playlist(id).ok_or(PlaylistError::Unknown(id))?;
+        let unchanged = playlist
+            .queue()
+            .entries()
+            .iter()
+            .map(|entry| entry.id())
+            .collect::<Vec<_>>()
+            == order;
+        if unchanged {
+            return Ok(false);
+        }
+        let playlist = self.playlist_mut(id).ok_or(PlaylistError::Unknown(id))?;
+        // A reorder failure inside a playlist this call just validated means
+        // the playlist is gone or the permutation rule broke; the playlist-
+        // level error is the honest surface from here.
+        playlist
+            .queue
+            .reorder(order)
+            .map_err(|_| PlaylistError::Unknown(id))?;
+        playlist.shuffle = None;
+        Ok(true)
+    }
+
+    fn clear_shuffle_of(&mut self, id: PlaylistId) {
+        if let Some(playlist) = self.playlist_mut(id) {
+            playlist.shuffle = None;
+        }
+    }
+
     /// Removes `id` after the same check as [`check_delete`](Self::check_delete).
     /// Deleting the playing playlist moves `playing` to the successor and
     /// reports that playlist's cursor media (or `None`) as the new persisted
@@ -494,6 +676,36 @@ impl PlaylistSet {
             records: 0,
             total: 0,
         }
+    }
+}
+
+/// What the organize menu sorts by (M13 §1.5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortKey {
+    Title,
+    Artist,
+    Path,
+    Duration,
+}
+
+/// The sort key's string for one entry, lowercased for the comparison.
+/// Duration is rendered as fixed-width seconds so string order is numeric
+/// order.
+fn sort_value(entry: &QueueEntry, key: SortKey) -> String {
+    let source_text = match entry.source() {
+        QueueSource::LocalFile(path) => path.as_str().to_owned(),
+        QueueSource::RemoteUrl(url) => url.as_str().to_owned(),
+        QueueSource::Podcast { fallback } => fallback.to_string(),
+    };
+    let display = entry.display();
+    match key {
+        SortKey::Title => display.title.clone().unwrap_or(source_text).to_lowercase(),
+        SortKey::Artist => display.artist.clone().unwrap_or(source_text).to_lowercase(),
+        SortKey::Path => source_text.to_lowercase(),
+        SortKey::Duration => match display.duration {
+            Some(duration) => format!("{:018}", duration.value.as_secs()),
+            None => String::new(),
+        },
     }
 }
 

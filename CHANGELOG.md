@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Repeat modes (`R`): off, repeat one and repeat all, session-wide, shown
+  as `R:1`/`R:*` beside the playing playlist's tab and published to MPRIS
+  as `LoopStatus` in both directions. Repeat one replays a completed entry
+  from zero, so an episode restarts rather than resuming; repeat all wraps
+  to the first entry of the playback order without reshuffling the current
+  pass.
+- Jump to time (`Ctrl-J`): type `SS`, `MM:SS` or `HH:MM:SS` (one or two
+  digits per part, an optional fraction on the last) and Enter seeks
+  through the ordinary seek path, clamped at the landing.
+- The time label cycles with `t` or a click on the label: elapsed →
+  −remaining → total. −remaining and total need a decoded duration and
+  fall back to elapsed without one.
+- Jump to file (`f`): type to filter the viewed playlist case-
+  insensitively over artist and title, move within the matches, Enter
+  plays the selected match through the ordinary Enter-on-a-row path.
+- Organize menu (`S`) on the viewed playlist: sort by title, artist, path
+  or duration (duration refused unless every entry has a decoded one;
+  sorts are stable and case-insensitive), reverse, randomize (Fisher–Yates
+  persisted as order), remove duplicates by identity, and remove dead
+  local entries (checked on the browse worker; remote sources never
+  probed). Reorders clear shuffle on that playlist and the cursor follows
+  its entry; the playing entry is never removed; the two removals take a
+  `y` confirmation. Repeat, the clock mode and the organize operations
+  persist with additive state fields — `schema_version` stays 4.
+
 ### Changed
 
 - The 4,270-line playback engine module is split into focused modules

@@ -8,8 +8,11 @@ mod set;
 
 pub use set::{
     Deletion, Field, MediaEffect, PlaylistSet, RecordOutcome, RecordParts, RecoveredSet, Recovery,
-    Repair, ShuffleField, Stage,
+    Repair, ShuffleField, SortKey, Stage,
 };
+
+mod repeat;
+pub use repeat::RepeatMode;
 
 use self::queue::{Direction, Queue, QueueEntryId};
 
@@ -56,6 +59,8 @@ pub enum PlaylistError {
     InvalidName,
     #[error("playlist IDs are exhausted")]
     IdExhausted,
+    #[error("sort by duration needs a decoded duration on every entry")]
+    MissingDurations,
 }
 
 /// SplitMix64's output function over `x + golden gamma`. Written out

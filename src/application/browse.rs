@@ -32,7 +32,7 @@ use crate::library::{
 };
 use crate::media::id::MediaId;
 use crate::playlist::PlaylistId;
-use crate::queue::MAX_PLAYLIST_ENTRIES;
+use crate::queue::{MAX_PLAYLIST_ENTRIES, QueueEntryId};
 use crate::telemetry::redact_url;
 
 /// The extensions a listing classifies as audio, compared ASCII
@@ -234,6 +234,13 @@ pub enum BrowseRequest {
         roots: Vec<PathBuf>,
         dest: PlaylistId,
     },
+    /// The organize menu's remove-dead check (M13 §1.5): stat each local
+    /// candidate on this thread, so the main thread never touches the
+    /// filesystem. `dead` comes back as the ids whose path is gone.
+    CheckDead {
+        playlist: PlaylistId,
+        candidates: Vec<(QueueEntryId, PathBuf)>,
+    },
 }
 
 /// A request's answer, naming what it was for so a caller can tell a late
@@ -264,6 +271,11 @@ pub enum BrowseResult {
     },
     /// A folder add's outcome (M8 §8).
     TreeCollected(TreeCollected),
+    /// The organize menu's remove-dead check (M13 §1.5).
+    DeadEntries {
+        playlist: PlaylistId,
+        dead: Vec<QueueEntryId>,
+    },
 }
 
 /// One background thread answering [`BrowseRequest`]s in order. It exits
@@ -344,6 +356,13 @@ fn answer_with(request: BrowseRequest, message: &str) -> BrowseResult {
             unreadable: roots,
             scan_limit_reached: false,
         }),
+        BrowseRequest::CheckDead {
+            playlist,
+            candidates: _,
+        } => BrowseResult::DeadEntries {
+            playlist,
+            dead: Vec::new(),
+        },
     }
 }
 
@@ -396,6 +415,17 @@ fn answer(
         BrowseRequest::CollectTree { roots, dest } => {
             BrowseResult::TreeCollected(collect_tree(&roots, dest, MAX_PLAYLIST_ENTRIES))
         }
+        BrowseRequest::CheckDead {
+            playlist,
+            candidates,
+        } => {
+            let dead = candidates
+                .iter()
+                .filter(|(_, path)| std::fs::metadata(path).is_err())
+                .map(|(entry, _)| *entry)
+                .collect();
+            BrowseResult::DeadEntries { playlist, dead }
+        }
     }
 }
 
@@ -413,7 +443,8 @@ fn mutate(
         | BrowseRequest::Feeds
         | BrowseRequest::Episodes { .. }
         | BrowseRequest::Stations
-        | BrowseRequest::CollectTree { .. } => Err("not a mutation".to_owned()),
+        | BrowseRequest::CollectTree { .. }
+        | BrowseRequest::CheckDead { .. } => Err("not a mutation".to_owned()),
     }
 }
 
@@ -435,6 +466,12 @@ fn describe(request: &BrowseRequest) -> String {
         // is redacted here for the same reason `Subscribe` is (§7.2).
         BrowseRequest::Op(FeedOp::AddStation { url }) => {
             format!("AddStation({})", redact_url(url))
+        }
+        BrowseRequest::CheckDead {
+            playlist,
+            candidates,
+        } => {
+            format!("CheckDead({}, {})", playlist.get(), candidates.len())
         }
         BrowseRequest::Op(FeedOp::RemoveStation { slug }) => format!("RemoveStation({})", slug),
         BrowseRequest::Op(FeedOp::ReprobeStation { slug }) => {

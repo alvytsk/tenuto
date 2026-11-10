@@ -15,6 +15,7 @@ use crate::application::runtime::AppCommand;
 use crate::application::transport::PlaybackPhase;
 use crate::application::view::{PlayerView, filled};
 use crate::media::id::MediaId;
+use crate::playlist::RepeatMode;
 
 pub mod cover;
 
@@ -47,6 +48,9 @@ pub struct Snapshot {
     pub cover: Option<CoverImage>,
     /// The playing playlist is shuffled.
     pub shuffle: bool,
+    /// Winamp's repeat toggle (M13 §1.1), published as MPRIS `LoopStatus`:
+    /// off → `None`, one → `Track`, all → `Playlist`.
+    pub repeat: RepeatMode,
     /// The pass this snapshot came from executed a seek — a desktop
     /// request or the player's own keys, both through the one
     /// `transport` door — so its jump is real, reported even when the
@@ -94,6 +98,7 @@ pub fn snapshot(view: &PlayerView, media: Option<&MediaId>, podcast: Option<&str
             .map_or(Duration::ZERO, |n| n.position),
         cover: None,
         shuffle: view.tabs.iter().any(|t| t.playing && t.shuffled),
+        repeat: view.repeat,
         sought: false,
     }
 }
@@ -110,6 +115,7 @@ pub enum Request {
     Seek(i64),
     SetPosition(Duration),
     SetShuffle(bool),
+    SetLoopStatus(RepeatMode),
     SetVolume(f64),
 }
 
@@ -131,6 +137,9 @@ pub fn command(request: Request, view: &PlayerView) -> Option<AppCommand> {
             .iter()
             .find(|t| t.playing && t.shuffled != on)
             .map(|t| AppCommand::ToggleShuffle(t.id)),
+        Request::SetLoopStatus(mode) => {
+            (view.repeat != mode).then_some(AppCommand::SetRepeat(mode))
+        }
         Request::SetVolume(x) if x.is_nan() => None,
         Request::SetVolume(x) => {
             let delta = x.clamp(0.0, 1.0) - f64::from(view.volume.as_gain());
@@ -168,6 +177,7 @@ pub enum Change {
     PlaybackStatus,
     Volume,
     Shuffle,
+    LoopStatus,
     /// The position jumped: a seek, from MPRIS or the player itself.
     Seeked,
 }
@@ -215,6 +225,9 @@ impl Published {
         }
         if last.is_none_or(|l| l.shuffle != next.shuffle) {
             changes.push(Change::Shuffle);
+        }
+        if last.is_none_or(|l| l.repeat != next.repeat) {
+            changes.push(Change::LoopStatus);
         }
         // A seek the runtime drained is reported whatever the gap since
         // the last snapshot: a widget seek queued while the front end was
@@ -393,6 +406,7 @@ mod tests {
             now_playing: now,
             phase,
             volume: Volume::new(0.75),
+            repeat: RepeatMode::Off,
             status: None,
             persistence: PersistenceStatus::Saving,
             last_requested: None,
@@ -421,6 +435,7 @@ mod tests {
             position: Duration::ZERO,
             cover: None,
             shuffle: false,
+            repeat: RepeatMode::Off,
             sought: false,
         }
     }
@@ -743,6 +758,7 @@ mod tests {
             Change::PlaybackStatus,
             Change::Volume,
             Change::Shuffle,
+            Change::LoopStatus,
         ];
         assert_eq!(p.apply(snap(None, Status::Stopped, 1.0)), all);
     }

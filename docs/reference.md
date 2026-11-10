@@ -63,6 +63,7 @@ The layout adapts to the terminal size. At 80 columns by 28 rows and above the p
 | Up, Down, `j`, `k` | Move the selection. Playback does not change |
 | `J`, `K` | Move the selected entry down or up |
 | Left, Right | Seek backward or forward 10 seconds. A burst of presses becomes one seek |
+| Ctrl-J | Type a time to jump to (`SS`, `MM:SS` or `HH:MM:SS`); Enter seeks, Esc cancels. A value past the track is clamped at the landing |
 | Home | Restart the track from the beginning |
 | `-`, `_`, `+`, `=` | Volume down or up by 5% |
 | `s`, `p` | Stop, play |
@@ -76,6 +77,10 @@ The layout adapts to the terminal size. At 80 columns by 28 rows and above the p
 | `r` | Rename the viewed playlist |
 | `D` | Delete the viewed playlist after a `y` confirmation; refused outright if it is the only one |
 | `z` | Toggle shuffle on the viewed playlist |
+| `R` | Repeat, session-wide: off → repeat one → repeat all → off |
+| `t` | Cycle the time label: elapsed → −remaining → total. −remaining and total need a decoded duration and fall back to elapsed without one |
+| `f` | Jump to file: type to filter the viewed playlist, arrows move within the matches, Enter plays the selected match, Esc cancels |
+| `S` | Organize the viewed playlist: sort by title/artist/path/duration, reverse, randomize, remove duplicates, remove dead entries. Reorders clear shuffle on that playlist; the two removals take a `y` confirmation |
 | `?` | Show the key help |
 | `m` | Toggle mouse capture |
 | Ctrl-L | Redraw the screen and re-place the cover |
@@ -86,7 +91,7 @@ Ctrl-C quits and Ctrl-L redraws from anywhere, including while typing and inside
 
 Seeking before anything is loaded answers `Play a track before seeking`. While a track is loading it answers `Still loading`. After the last entry ended, Left and Right answer `Track ended; press play to replay`. An empty *playing* playlist answers `Queue is empty` on Space, `p`, Home and seeking — unless a track is already Playing, Paused or Reconnecting, which keep taking those commands even after their playlist is emptied out from under them; only a Stopped track falls back to the notice. Enter always follows the *viewed* playlist and answers `Queue is empty` only when that one has nothing to select, whatever state the playing playlist is in.
 
-With mouse capture on, a click selects a row of the viewed playlist and a second click on the selected row plays it. The wheel moves the selection over that playlist. A click on a tab of the strip views that playlist; the one-row strip of the smallest layout is keyboard-only. The transport buttons act like their keys, and the `SHFL` button after them toggles shuffle on the viewed playlist as `z` does, lit while it is on. A playlist or a browser listing longer than its pane shows a scrollbar thumb on its right border; it is display only. A click on the progress bar seeks, only for a loaded track whose duration the decoder confirmed. The mouse does nothing while an overlay is open.
+With mouse capture on, a click selects a row of the viewed playlist and a second click on the selected row plays it. The wheel moves the selection over that playlist. A click on a tab of the strip views that playlist; the one-row strip of the smallest layout is keyboard-only. The transport buttons act like their keys, and the `SHFL` button after them toggles shuffle on the viewed playlist as `z` does, lit while it is on. A click on the time label cycles it as `t` does, wherever the label has a row of its own (sharing the progress row, as the smallest layout does, a click there keeps seeking). A playlist or a browser listing longer than its pane shows a scrollbar thumb on its right border; it is display only. A click on the progress bar seeks, only for a loaded track whose duration the decoder confirmed. The mouse does nothing while an overlay is open.
 
 ### Playlists
 
@@ -99,6 +104,10 @@ Deleting the viewed playlist with `D` moves the view to the adjacent one — the
 On the tab strip, the playing playlist's name is prefixed with `▶`; the viewed tab is bold; a shuffled playlist's name is suffixed with `·shfl`. An existing queue from before this feature becomes a playlist named `Default`.
 
 `z` toggles shuffle on the viewed playlist. The list still displays in its own order; only playback order — next, previous and what plays next when a track ends — follows the shuffle. Turning it off resumes in list order from wherever playback is. The shuffled order survives a restart. Adding to a playlist while its shuffle is on reshuffles it with the current track first, so everything added lies ahead; tracks already played on this pass come round again. Removing entries leaves the order of the rest alone.
+
+`R` sets repeat for the whole session, shown as `R:1` (repeat one) or `R:*` (repeat all) beside the playing playlist's tab. Repeat one plays the ended entry again from zero — a completed entry replays from zero anyway, so a podcast episode restarts rather than resumes, and its checkpoint is kept. Repeat all wraps to the first entry of the playing playlist's playback order: with shuffle on, the current shuffled pass is kept and wrapped, never reshuffled at the seam. `[` and `]` still never wrap. The mode survives a restart, and on Linux it is published to MPRIS as `LoopStatus` (off → `None`, one → `Track`, all → `Playlist`), which a desktop can set in return.
+
+`S` opens the organize menu for the viewed playlist. Sorting is ascending, case-insensitive and stable; entries with no title or artist sort by their source text, so a sort never depends on tags having been read. Sort by duration is refused unless every entry carries a decoder-confirmed duration. Reverse and randomize rewrite the list order itself — randomize is Fisher–Yates over a fresh seed, persisted as order, not as a shuffle seed. Any reorder clears shuffle on that playlist, because a stale seed would silently scramble the new order; turning `z` on again shuffles the new order. A no-op (sorting what is already in that order) changes nothing and keeps shuffle. Removing duplicates collapses entries sharing one identity, keeping the first occurrence — or the playing one, so a playing track is never removed under playback. Remove dead checks each local path on the background worker and drops the ones whose file is gone; remote sources are never probed, and the playing entry is kept even if its file has vanished (it keeps playing from its open handle, and a later stop surfaces the ordinary load failure). The cursor follows its entry through every operation, and a playing track keeps playing untouched.
 
 ### The browser
 

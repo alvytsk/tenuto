@@ -294,8 +294,10 @@ impl BrowserState {
             // Never reaches here: `Browsing::poll` (src/tui/mod.rs) intercepts
             // this variant before it is offered to `apply`, and hands it to
             // the application instead, so it lands whatever the browser is
-            // doing by the time the walk finishes (M8 §8).
-            BrowseResult::TreeCollected(_) => return None,
+            // doing by the time the walk finishes (M8 §8). `DeadEntries`
+            // likewise: the runtime owns its own worker, and its answers are
+            // drained in `PlayerRuntime::pump`, never here.
+            BrowseResult::TreeCollected(_) | BrowseResult::DeadEntries { .. } => return None,
         }
         self.cursor = self.cursor.min(self.len().saturating_sub(1));
         follow_up
@@ -486,6 +488,10 @@ impl BrowserState {
             // would never be cleared for it. This arm exists only so the
             // match stays exhaustive over the wider `BrowseRequest` enum.
             BrowseRequest::CollectTree { .. } => "Adding…",
+            // The organize menu's dead check never goes through the
+            // browser's `submit` at all (the runtime's own worker answers
+            // it); this arm keeps the match exhaustive.
+            BrowseRequest::CheckDead { .. } => "Checking…",
             BrowseRequest::Directory(_)
             | BrowseRequest::Feeds
             | BrowseRequest::Episodes { .. }
