@@ -754,6 +754,23 @@ impl Session {
         self.submit(Urgency::Ordinary)
     }
 
+    /// Stores the selected theme's raw spelling (M14 §2.1). Already
+    /// validated upstream; this layer never parses the vocabulary. `None`
+    /// is a real value that clears the field, not an absence of a decision.
+    pub fn set_theme(&mut self, theme: Option<String>) -> Action {
+        self.state.edit().set_theme(theme);
+        self.submit(Urgency::Ordinary)
+    }
+
+    /// Stores the selected visualizer mode's raw spelling (M14 §1.3), the
+    /// same rule as [`set_theme`](Self::set_theme): the spelling arrives
+    /// already validated and `None` is a real value that clears the field —
+    /// cycling back to bars sends `None`.
+    pub fn set_visualizer_mode(&mut self, mode: Option<String>) -> Action {
+        self.state.edit().set_visualizer_mode(mode);
+        self.submit(Urgency::Ordinary)
+    }
+
     /// Applies `update` to every queue entry whose media is `media`,
     /// replacing only the fields `update` actually carries — a field left
     /// `None` leaves the entry's existing value alone. A carried field is
