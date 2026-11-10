@@ -67,6 +67,11 @@ pub const CAPTURE_INTERVAL: Duration = Duration::from_secs(5);
 /// the 512-entry checkpoint cap.
 pub const MAX_PENDING_LOADS: usize = 16;
 
+// The size difference is the design, not an accident: `Submit` exists to
+// carry the snapshot to the writer, and every non-submitting path returns
+// the data-free `None`. Boxing the state would add an allocation to every
+// submit while the clone at `Session::submit` already happens regardless.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Action {
     None,

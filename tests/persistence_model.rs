@@ -268,7 +268,8 @@ fn a_full_state_serializes_to_exactly_these_bytes() {
         r#"{"id":2,"media":"local:/music/b.flac","source":{"kind":"local","path":"/music/b.flac"},"#,
         r#""display":{"title":null,"artist":null,"album":null,"year":null,"#,
         r#""duration_ms":1000,"duration_source":"decoded"}}],"active_entry":1}],"#,
-        r#""playing":1,"next_entry_id":3,"next_playlist_id":2,"repeat_mode":null}"#,
+        r#""playing":1,"next_entry_id":3,"next_playlist_id":2,"repeat_mode":null,"#,
+        r#""theme":null,"visualizer_mode":null}"#,
     );
     let state: PersistedState = serde_json::from_str(STATE).unwrap();
     assert_eq!(state.volume(), Volume::new(0.5));
