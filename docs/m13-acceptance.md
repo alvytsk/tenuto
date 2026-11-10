@@ -1,47 +1,49 @@
-# M13 Engine split — acceptance
+# M13 acceptance: Winamp playlist basics
 
-Scope: the 2026-11-01 project review's Low (structural) finding, item 5 —
-`src/playback/engine.rs` (4,270 lines) split into focused modules with
-single-responsibility names (issue #68, plan
-`docs/superpowers/plans/2026-11-08-engine-split.md`). No behavior change;
-each batch landed green independently; the public API paths
-(`playback::engine::{EngineHandle, EventStream, TransportCore, DEADLINE,
-PUMP_NAP}`) never moved.
+Automated evidence (all green on this branch, run 2026-11-09):
 
-Branch `fix/70-low-sweep` (shared with the #70 sweep that preceded it).
-Batches, each a single commit, each gated by fmt + clippy `-D warnings` +
-the full suite (116 test binaries, 0 failures):
+- `tests/m13_repeat.rs` — 11 tests: the off/one/all advance table, wrap
+  under shuffle (order kept across the seam), single-entry repeat all,
+  repeat-one-of-a-completed-episode resolving to a start at zero (`D1`),
+  MPRIS `LoopStatus` mapping both ways with the no-op case, the additive
+  persistence roundtrip, an older file shape without the field, and an
+  unknown spelling defaulting to off.
+- `tests/m13_jump_time.rs` — 9 tests: the grammar table (one- and two-digit
+  parts, fractions, every rejection), the overlay flow (open, seek, reject
+  and correct, Esc, empty submit), Ctrl-J never firing inside another
+  overlay, and the release-event guard.
+- `tests/m13_time_display.rs` — 9 tests: the three rendered labels against
+  a decoded duration, the declared/absent fallbacks, the unloaded entry's
+  saved-history label in every mode, the estimate mark staying on elapsed,
+  the click-on-time cycle, and the progress bar still seeking.
+- `tests/m13_jump_to_file.rs` — 9 tests: matching over artist and title
+  case-insensitively, narrowing, Enter playing the match through Enter's
+  own path, no-match Enter doing nothing, Esc, arrows clamped to the
+  matches, the selection surviving a still-matching filter, and the
+  overlay's rendered rows and count.
+- `tests/m13_organize.rs` — 13 tests: sorts by title/artist/path with the
+  untagged source-text fallback, the duration refusal, the no-op sort
+  keeping shuffle while a changing sort clears it, reverse twice, randomize
+  determinism per seed and the single-entry no-op, the cursor following its
+  entry through a sort with the advance from the new position, dedup by
+  identity and the owned-entry exception, prune-dead through the real
+  browse worker against a fixture tree, the no-local-entries refusal, and
+  the menu's key flow with both confirmations.
+- Neighbors held green through development: `m5_tui_input`,
+  `m7_submission`, `m8_resume`, `m8_session_playlists`, `m8_roundtrip`,
+  `persistence_model` (whose byte-exact serialization pin gained the
+  additive `repeat_mode` field).
 
-| Batch | Commit | Move |
-|---|---|---|
-| 1 | 17da38a | `engine.rs` → `engine/{mod.rs, handle.rs, worker.rs}`: module root + consts + re-exports; the front-of-house handle; the decode worker and its command state machine |
-| 2 | 4b7dd0e | `TransportCore`/`TransportTap` → `engine/transport.rs` (wait.rs's import path unchanged via the mod.rs re-export) |
-| 3 | df11f50 | the reconnect loop (`enter_reconnecting`, `service_reconnect`, `reconnect_finite`) → `engine/reconnect.rs` |
-| 4 | ecc0321 | the glitch counters (`GlitchCounters`) and the reporting cluster (event emission, progress, facts, faults, capture/teardown, `severity`/`retire_faults`) → `engine/diagnostics.rs` |
+Manual checks for the terminal surfaces are pending, as in M5–M12: drive
+`TENUTO_AUDIO_OUTPUT=null cargo run --locked -- tui` through the §7
+acceptance script — repeat all wrapping a shuffled three-track playlist,
+repeat one of an episode restarting from zero with its checkpoint intact,
+`Ctrl-J 1:23:00` landing and checkpointing, `t` and the click cycling the
+label, `f` finding a track by fragment, and an organize pass over a
+playlist with a playing entry (no hiccup, cursor survives, shuffle badge
+clears).
 
-## Acceptance criteria
-
-- [x] Engine concerns live in separate modules with single-responsibility names —
-  `engine/{mod,handle,worker,transport,reconnect,diagnostics}.rs`.
-- [x] No behavior change: all gates green after every batch; the layering
-  test (`tests/m9_layering.rs`) is untouched and passes unchanged (the new
-  modules are children of `playback::engine` and import nothing new
-  outside the crate); `rustdoc` warnings gate clean on the final batch.
-- [x] Each batch lands green independently (no big-bang reopen).
-
-## Notes
-
-- Module-scope privacy stayed inside the engine tree: Worker fields and
-  helpers the sibling modules drive are `pub(super)`, never `pub`. The
-  public surface is byte-identical (`playback::engine::` re-exports in
-  `mod.rs`).
-- The reconnect loop's unit tests stay in `worker.rs`'s test module: they
-  drive the whole `Worker` state machine, not the loop in isolation. The
-  aggregated-warning test now reaches the counters through
-  `worker.glitches`.
-- Batch 4 is narrower than the plan table sketched in one respect: the
-  diagnostics module holds the glitch counters and the reporting/fault
-  cluster as an `impl Worker` block plus the `severity`/`retire_faults`
-  free fns; `sync_facts` moved with it. `pump_audio` and the command
-  state machine stay in `worker.rs`, which keeps the worker's run loop
-  readable rather than scattering it across six files.
+Known decisions recorded as implemented (in the spec): the jump-to-time
+grammar takes one or two digits per part (the spec's own example has a
+one-digit hour); dedup keeps the playing occurrence over an earlier one so
+playback is never released by an organize operation.
