@@ -10,7 +10,7 @@ The rules the player and the feed commands follow, stated precisely. The [README
 | `play <path-or-url>` | Play one file or URL with a status line and a few keys |
 | `play <slug> <index>` | Play a subscribed feed's episode by its 1-based index |
 | `play ... --probe-only` | Open the source, print what was found, and exit without a device or a terminal |
-| `tui [--mouse on\|off] [--artwork auto\|blocks\|off]` | Open the full-screen player on the saved playlists |
+| `tui [--mouse on\|off] [--artwork auto\|blocks\|off] [--theme gruvbox\|winamp\|nord\|solarized-dark] [--visualizer bars\|scope\|flow]` | Open the full-screen player on the saved playlists |
 | `subscribe <url> [--as <slug>]` | Fetch a feed once, store the subscription, cache its episodes |
 | `feeds` | List every subscription |
 | `episodes <slug> [-n N] [--reverse]` | List a feed's cached episodes with your progress |
@@ -41,7 +41,7 @@ A file with no such header lands on a rough estimate. The landing can be in a su
 ## The terminal player
 
 ```sh
-tenuto tui [--mouse on|off] [--artwork auto|blocks|off]
+tenuto tui [--mouse on|off] [--artwork auto|blocks|off] [--theme gruvbox|winamp|nord|solarized-dark] [--visualizer bars|scope|flow]
 ```
 
 `tui` restores every playlist, the playing one's active entry, the volume and every checkpoint. It never starts playing on its own. No track is loaded and nothing is fetched until you press a playback key. Local files' tags and the active local entry's cover are read in the background. The audio device is created on the first load, so the player opens on a machine with no output device.
@@ -51,8 +51,14 @@ Options:
 - `--mouse off` starts with mouse capture disabled and leaves the terminal's own selection and scrolling alone. `m` toggles it at any time. The default is `on`.
 - `--artwork auto` asks the terminal which image protocol it supports and falls back to colored half-blocks after 250 ms without an answer. `blocks` always uses half-blocks. `off` never loads artwork and shows only the placeholder, including in place of the built-in covers.
 - Under tmux, `auto` and `blocks` run `tmux set -p allow-passthrough on` for the current pane. `off` avoids that.
+- `--theme <name>` starts with a built-in palette: `gruvbox` (the default), `winamp`, `nord` or `solarized-dark`. A misspelled name is refused before the player opens, with the valid set named. The choice is saved and applied again at the next startup; there is no key that switches it while the player runs.
+- `--visualizer bars|scope|flow` starts with that visual panel mode for this run only. The saved mode is not touched; `v` cycles on from the flagged mode.
 
-The layout adapts to the terminal size. At 80 columns by 28 rows and above the player shows the cover with the track information, the spectrum and the time beside it, then progress and transport, above the viewed playlist. The spectrum takes the rows the information leaves, so it is taller when a track has only a title. Below 80 columns or 28 rows it is compact: a smaller cover beside the title, the artist, a spectrum of three or four rows and the time. Below 22 rows the compact player shrinks to a small cover and a one-row spectrum. Below 50 columns or 18 rows it is minimal, with no cover and no spectrum. Below 30 columns or 8 rows it asks for a larger window, while space and `q` keep working. Either dimension alone drops a tier.
+The layout adapts to the terminal size. At 80 columns by 28 rows and above the player shows the cover with the track information, the visual panel and the time beside it, then progress and transport, above the viewed playlist. The visual panel takes the rows the information leaves, so it is taller when a track has only a title. Below 80 columns or 28 rows it is compact: a smaller cover beside the title, the artist, a panel of three or four rows and the time. Below 22 rows the compact player shrinks to a small cover and a one-row panel. Below 50 columns or 18 rows it is minimal, with no cover and no panel. Below 30 columns or 8 rows it asks for a larger window, while space and `q` keep working. Either dimension alone drops a tier.
+
+The visual panel draws one of three modes, chosen with `v` and remembered across restarts. `bars` is the spectrum as it has always drawn: equal bars with peak caps over them. `scope` draws the waveform itself, one to three rows of block characters about a midline — the envelope of the block the spectrum worker has just analyzed, published only while a mode wants it. `flow` stacks colored blocks from the bottom of the panel, one energy history per column; its colors run green → amber → cream as a column heats, the history decays when frames stop, and a mode switch or a panel-width change starts it over. In a one-row panel, flow has no room to mean anything and draws as bars, and `v` cycles bars → scope only. Silence looks silent in every mode: a flat midline for the scope, a flat row for the bars, nothing for flow — no idle animation.
+
+**Themes.** The palette is a built-in choice, made with `--theme`: `gruvbox` — the default, and the palette the player has always had — or `winamp`, `nord` and `solarized-dark`. gruvbox paints no background of its own, so the terminal's own background shows through exactly as before. The three dark themes paint a full-screen background under their palettes: winamp `#0a0a0a` near-black, nord `#2e3440`, solarized-dark `#002b36`.
 
 ### Keys
 
@@ -79,6 +85,7 @@ The layout adapts to the terminal size. At 80 columns by 28 rows and above the p
 | `z` | Toggle shuffle on the viewed playlist |
 | `R` | Repeat, session-wide: off → repeat one → repeat all → off |
 | `t` | Cycle the time label: elapsed → −remaining → total. −remaining and total need a decoded duration and fall back to elapsed without one |
+| `v` | Cycle the visual panel: bars → scope → flow; a one-row panel cycles bars → scope |
 | `f` | Jump to file: type to filter the viewed playlist, arrows move within the matches, Enter plays the selected match, Esc cancels |
 | `S` | Organize the viewed playlist: sort by title/artist/path/duration, reverse, randomize, remove duplicates, remove dead entries. Reorders clear shuffle on that playlist; the two removals take a `y` confirmation |
 | `?` | Show the key help |

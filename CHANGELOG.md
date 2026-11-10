@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Visualizer modes (`v`): the spectrum panel cycles bars → scope → flow,
+  persisted across restarts; `--visualizer` overrides the saved mode for one
+  run. Scope draws a waveform the spectrum worker now publishes alongside its
+  bands; flow keeps the panel's own per-column energy history and falls back
+  to bars in a one-row panel.
+- Built-in themes (`--theme`): gruvbox (the default, unchanged), winamp,
+  nord and solarized-dark. The three dark themes paint their own background;
+  the choice persists across restarts.
 - Repeat modes (`R`): off, repeat one and repeat all, session-wide, shown
   as `R:1`/`R:*` beside the playing playlist's tab and published to MPRIS
   as `LoopStatus` in both directions. Repeat one replays a completed entry
