@@ -16,10 +16,11 @@
 //! and `v` cycles bars → scope → flow → bars. The scope draws the frame's
 //! decimated waveform as a connected trace about a midline ([`draw_scope`]);
 //! like the levels, the drawn waveform lives in [`SpectrumDisplay`] between
-//! draws and decays when no fresh frame carries one. Flow keeps a
-//! per-column energy ring ([`FlowHistory`]): every fresh frame resamples
-//! into it, frames that stop cool it toward silence, and [`draw_flow`]
-//! stacks each column bottom-up, colored green → amber → cream by energy.
+//! draws and decays when no fresh frame carries one. Flow keeps a scrolling
+//! waterfall ([`FlowHistory`]): every fresh frame becomes the newest column
+//! (the field's colors frozen as drawn), frames that stop cool the field
+//! toward silence, and [`draw_flow`] paints columns of color right to left,
+//! bass at the bottom, green → amber → cream by energy.
 //! Storage folds the default to absent — `Bars` never serializes — but the
 //! spelling vocabulary here is the CLI's `--visualizer` too, where `bars`
 //! is a legal value; parsing is total over the vocabulary, and only
@@ -45,7 +46,7 @@ pub enum VisualizerMode {
     Bars,
     /// An oscilloscope of the waveform.
     Scope,
-    /// An energy-history color field over the bars data.
+    /// A scrolling color field over the bars data.
     Flow,
 }
 
@@ -140,10 +141,6 @@ impl<'a> DrawSource<'a> {
     }
 }
 
-/// How many entries of one column's energy history survive: the ring depth
-/// `draw_flow` resamples into the row's height.
-pub const MAX_FLOW_DEPTH: usize = 16;
-
 /// The levels resampled to `width` values, the bars value rule in
 /// [`draw_spectrum`]: a value is its nearest band, or between two when the
 /// columns outnumber the bands, so the row is full at every width. A
@@ -176,49 +173,55 @@ fn resample_levels(values: Option<&[f32]>, width: usize) -> Vec<f32> {
         .collect()
 }
 
-/// The flow's memory: one energy ring per column, [`MAX_FLOW_DEPTH`] entries
-/// deep, each a frame's resampled level for that column, newest last. A
-/// width change rebuilds from scratch — the columns of an old width mean
-/// nothing to a new one — and frames that stop cool the whole ring toward
-/// silence by [`DECAY_PER_DRAW`].
+/// The flow's memory: the waterfall's columns — one stored frame per
+/// column, that frame's levels resampled to the panel's height, oldest
+/// column first, newest last. Stored columns anchor at the right edge, so
+/// while fewer than `width` exist the field scrolls in from the right over
+/// ~width frames. A width or height change rebuilds from scratch — the
+/// columns of an old shape mean nothing to a new one — and frames that
+/// stop cool the whole field toward silence by [`DECAY_PER_DRAW`].
 #[derive(Debug, Default)]
 pub struct FlowHistory {
     /// The width the columns were last pushed at.
     width: u16,
-    /// One ring per column, oldest first, so the newest entry is last.
+    /// The height each column was last pushed at.
+    height: u16,
+    /// One frame per column, oldest first, newest last; empty while the
+    /// field warms up.
     columns: Vec<Vec<f32>>,
 }
 
 impl FlowHistory {
-    /// Pushes one frame: `levels` resampled to `width` columns by the bars
-    /// value rule (`resample_levels`). A `width` different from the last
-    /// push's rebuilds the columns empty first. A `width` of 0 is no panel:
-    /// it pushes nothing and leaves the columns it had. `None` or empty
-    /// levels push nothing too — time moves only when a frame (or
-    /// [`Self::decay`]) says so.
-    pub fn push(&mut self, width: u16, levels: Option<&[f32]>) {
-        let count = usize::from(width);
-        if count == 0 {
+    /// Pushes one frame: `levels` resampled to `height` rows by the bars
+    /// value rule (`resample_levels`), appended as the newest (rightmost)
+    /// column, dropping the oldest once `width` columns are stored. `None`
+    /// or empty levels push a column of zeros, so the field still scrolls
+    /// through silence. A `width` or `height` different from the last
+    /// push's rebuilds the field empty first. A `width` or `height` of 0 is
+    /// no panel: nothing is pushed.
+    pub fn push(&mut self, width: u16, height: u16, levels: Option<&[f32]>) {
+        if width == 0 || height == 0 {
             return;
         }
-        if self.width != width {
+        if self.width != width || self.height != height {
             self.width = width;
-            self.columns = vec![Vec::new(); count];
+            self.height = height;
+            self.columns.clear();
         }
-        let Some(levels) = levels.filter(|levels| !levels.is_empty()) else {
-            return;
+        let rows = resample_levels(levels, usize::from(height));
+        let rows = if rows.is_empty() {
+            vec![0.0; usize::from(height)]
+        } else {
+            rows
         };
-        let row = resample_levels(Some(levels), count);
-        for (column, value) in self.columns.iter_mut().zip(row) {
-            column.push(value);
-            if column.len() > MAX_FLOW_DEPTH {
-                column.remove(0);
-            }
+        if self.columns.len() == usize::from(width) {
+            self.columns.remove(0);
         }
+        self.columns.push(rows);
     }
 
-    /// Cools every entry by [`DECAY_PER_DRAW`]: frames stop, the lava
-    /// cools.
+    /// Cools every stored value by [`DECAY_PER_DRAW`]: frames stop, the
+    /// field cools.
     pub fn decay(&mut self) {
         for column in &mut self.columns {
             for value in column {
@@ -227,16 +230,21 @@ impl FlowHistory {
         }
     }
 
-    /// The column's history, oldest first and the newest frame last; empty
-    /// past the width the history was pushed at.
+    /// The display column's stored frame: `height` values, index 0 the
+    /// bottom row (bass). Column index 0 is the leftmost (oldest); while
+    /// fewer than `width` columns are stored they sit at the right edge and
+    /// a column left of them is empty.
     pub fn column(&self, x: usize) -> &[f32] {
-        self.columns.get(x).map_or(&[][..], Vec::as_slice)
+        let skip = usize::from(self.width).saturating_sub(self.columns.len());
+        x.checked_sub(skip)
+            .and_then(|index| self.columns.get(index))
+            .map_or(&[][..], Vec::as_slice)
     }
 
-    /// Whether no column carries an entry: fresh out of the box, just
-    /// rebuilt at a new width, or wiped by a mode switch.
+    /// Whether no frame is stored: fresh out of the box, just rebuilt at a
+    /// new width or height, or wiped by a mode switch.
     pub fn is_empty(&self) -> bool {
-        self.columns.iter().all(Vec::is_empty)
+        self.columns.is_empty()
     }
 }
 
@@ -249,8 +257,8 @@ pub struct SpectrumDisplay {
     /// signed points about the midline, decayed like the levels when no
     /// fresh frame carries one.
     waveform: Option<Vec<f32>>,
-    /// The flow's per-column energy history, kept across draws so each
-    /// fresh frame can push into it and stopped frames can cool it.
+    /// The flow's scrolling field, kept across draws so each fresh frame
+    /// can push into it and stopped frames can cool it.
     flow: FlowHistory,
     /// The mode of the previous update: a different one resets `flow`.
     last_mode: Option<VisualizerMode>,
@@ -261,20 +269,21 @@ pub struct SpectrumDisplay {
 
 impl SpectrumDisplay {
     /// Takes fresh levels — and, in flow mode, pushes them into the
-    /// per-column history; in scope mode, the fresh waveform — when
-    /// `source` allows them at `now`; otherwise decays what was drawn last
-    /// by [`DECAY_PER_DRAW`]. A `mode` different from the previous update's
-    /// resets the flow history first: a mode switch starts fresh (spec
-    /// §1.2). The history lives at `width`, the spectrum row's own column
-    /// count (0 is no row, and then nothing pushes), so every panel column
-    /// owns a ring of its own and a resize rebuilds; the flow renderer
-    /// reads the rings column-for-column.
+    /// scrolling field; in scope mode, the fresh waveform — when `source`
+    /// allows them at `now`; otherwise decays what was drawn last by
+    /// [`DECAY_PER_DRAW`]. A `mode` different from the previous update's
+    /// resets the flow field first: a mode switch starts fresh (spec
+    /// §1.2). The field lives at `width` columns of `height` rows — the
+    /// spectrum region's own size (0 is no row, and then nothing pushes) —
+    /// so every panel column owns a frame and a resize rebuilds; the flow
+    /// renderer reads the columns column-for-column.
     pub fn update(
         &mut self,
         source: &DrawSource<'_>,
         now: Instant,
         mode: VisualizerMode,
         width: u16,
+        height: u16,
     ) {
         if self.last_mode != Some(mode) {
             self.flow = FlowHistory::default();
@@ -289,7 +298,7 @@ impl SpectrumDisplay {
                         .map(|level| if level.is_finite() { *level } else { 0.0 }),
                 );
                 if mode == VisualizerMode::Flow {
-                    self.flow.push(width, Some(&self.levels));
+                    self.flow.push(width, height, Some(&self.levels));
                 }
             }
             None => {
@@ -357,7 +366,7 @@ impl SpectrumDisplay {
         (!self.peaks.is_empty()).then_some(self.peaks.as_slice())
     }
 
-    /// The flow's per-column energy history: what [`draw_flow`] stacks.
+    /// The flow's scrolling field: what [`draw_flow`] paints.
     pub fn flow(&self) -> &FlowHistory {
         &self.flow
     }
@@ -371,8 +380,7 @@ impl SpectrumDisplay {
     }
 }
 
-/// The scope's one glyph: a full block, stacked from the peak's reach above
-/// the midline down to the minimum's below it.
+/// The scope's one glyph: a full block, one per cell of the trace.
 const SCOPE_BLOCK: &str = "█";
 
 /// The waveform trace about the midline: one column per `area.width`,
@@ -436,12 +444,12 @@ pub fn draw_scope(buffer: &mut Buffer, area: Rect, waveform: Option<&[f32]>, the
     }
 }
 
-/// The flow's one glyph: a full block, one per cell of the stacked column.
+/// The flow's one glyph: a full block, one per cell of a stored frame.
 const FLOW_BLOCK: &str = "█";
 
 /// The flow's gradient: a value below one half blends `theme.green` into
 /// `theme.amber` and the rest blends `theme.amber` into `theme.cream`, each
-/// channel lerped in sRGB bytes, so the lava runs green through amber to
+/// channel lerped in sRGB bytes, so the field runs green through amber to
 /// cream as it heats.
 fn flow_color(value: f32, theme: &Theme) -> Color {
     let (from, to, t) = if value < 0.5 {
@@ -466,48 +474,25 @@ fn lerp_color(from: Color, to: Color, t: f32) -> Color {
     }
 }
 
-/// The flow: each column of `area` is one [`FlowHistory`] column stacked
-/// bottom-up — the oldest frame at the bottom row, the newest at the top —
-/// resampled to `area.height` rows by nearest entry and colored by value
-/// through `flow_color`. The history is pushed at this row's own width
-/// (see [`SpectrumDisplay::update`]), so each column reads its own ring; a
-/// column past it draws nothing. A zero-value cell draws nothing, so
-/// silence stays silent; a history without any entries falls back to the
-/// live `levels`, so the first fresh frame shows at once.
-pub fn draw_flow(
-    buffer: &mut Buffer,
-    area: Rect,
-    history: &FlowHistory,
-    levels: Option<&[f32]>,
-    theme: &Theme,
-) {
+/// The flow: a scrolling waterfall. Columns are time — each [`FlowHistory`]
+/// column is one stored frame, the newest at the right edge, scrolling
+/// left as frames arrive — and rows are frequency, the bass band's value in
+/// the bottom row. Every painted cell is frozen as its column was drawn: a
+/// full block colored by value through `flow_color`, green → amber →
+/// cream. A column left of the warm-up (the field scrolls in from the
+/// right over ~width frames) draws nothing, and a zero-value cell draws
+/// nothing, so silence stays silent.
+pub fn draw_flow(buffer: &mut Buffer, area: Rect, history: &FlowHistory, theme: &Theme) {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
     if width == 0 || height == 0 {
         return;
     }
-    // No history yet: the live frame is every column's whole stack.
-    let live = history.is_empty().then(|| resample_levels(levels, width));
     for x in area.x..area.right() {
         let column = usize::from(x - area.x);
-        let values: &[f32] = match live.as_deref() {
-            Some(live) => live,
-            None => history.column(column),
-        };
-        if values.is_empty() {
-            continue;
-        }
-        // The row's value: its nearest entry, bottom row oldest. One entry
-        // (or one row) is that entry everywhere.
-        let at = |from_bottom: usize| {
-            if values.len() == 1 || height <= 1 {
-                values[0]
-            } else {
-                values[from_bottom * (values.len() - 1) / (height - 1)]
-            }
-        };
+        let values = history.column(column);
         for (from_bottom, y) in (area.top()..area.bottom()).rev().enumerate() {
-            let value = at(from_bottom);
+            let value = values.get(from_bottom).copied().unwrap_or(0.0);
             if value <= 0.0 {
                 continue;
             }

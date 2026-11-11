@@ -460,9 +460,9 @@ fn run_loop(
 /// Runs analysis only while this frame has a spectrum row and playback is
 /// `Playing`, then settles what the row will draw: the latest frame's when it
 /// is fresh and belongs to the adopted playback, otherwise the previous
-/// levels (and scope waveform, and flow history) decayed. The row's own
-/// width threads into the display, so the flow history lives at panel
-/// columns (none, when the row is gone), and its height seeds
+/// levels (and scope waveform, and flow field) decayed. The row's own width
+/// and height thread into the display, so the flow field lives at panel
+/// columns of panel rows (none, when the row is gone), and its height seeds
 /// `ui.spectrum_rows`, which `v`'s minimal-tier skip reads. Scope is the
 /// only mode that reads the waveform, so only it asks the worker for one.
 fn update_spectrum(
@@ -496,6 +496,7 @@ fn update_spectrum(
         Instant::now(),
         ui.visualizer,
         row.map_or(0, |region| region.width),
+        row.map_or(0, |region| region.height),
     );
     Ok(())
 }

@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Visualizer modes (`v`): the spectrum panel cycles bars → scope → flow,
   persisted across restarts; `--visualizer` overrides the saved mode for one
   run. Scope draws a waveform the spectrum worker now publishes alongside its
-  bands; flow keeps the panel's own per-column energy history and falls back
-  to bars in a one-row panel.
+  bands; flow scrolls a color field right to left — newest at the right
+  edge, low frequencies at the bottom — and falls back to bars in a one-row
+  panel.
 - Built-in themes (`--theme`): gruvbox (the default, unchanged), winamp,
   nord and solarized-dark. The three dark themes paint their own background;
   the choice persists across restarts.

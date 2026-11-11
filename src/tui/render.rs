@@ -35,7 +35,7 @@ use crate::tui::tabs;
 use crate::tui::theme::Theme;
 
 /// What the frame shows beyond the view: prepared artwork, spectrum levels,
-/// the scope's waveform, the flow's history and the open browser.
+/// the scope's waveform, the flow's field and the open browser.
 #[derive(Default)]
 pub struct Visuals<'a> {
     pub cover: CoverView<'a>,
@@ -43,10 +43,9 @@ pub struct Visuals<'a> {
     pub spectrum: Option<&'a [f32]>,
     /// Each band's falling peak, 0.0 to 1.0; drawn as a cap above its bar.
     pub peaks: Option<&'a [f32]>,
-    /// The scope's drawn `(min, peak)` waveform, kept across draws so it can
-    /// decay.
+    /// The scope's drawn waveform trace, kept across draws so it can decay.
     pub waveform: Option<&'a [f32]>,
-    /// The flow's per-column energy history, kept across draws so each frame
+    /// The flow's scrolling field, kept across draws so each fresh frame
     /// pushes into it.
     pub flow: Option<&'a FlowHistory>,
     /// Drawn while `UiState::overlay` is `Overlay::Browser`.
@@ -591,7 +590,7 @@ fn draw_info(buffer: &mut Buffer, regions: &Regions, view: &PlayerView, theme: &
 
 /// The spectrum row's visual: `mode` picks the renderer, but the minimal
 /// tier's single row is bars' alone (spec §1.2) — a row cannot stack a
-/// scope's envelope or a flow's history, and the flat eighth-row bar is what
+/// scope's trace or a flow's field, and the flat eighth-row bar is what
 /// the tier has always shown.
 #[allow(clippy::too_many_arguments)] // mirrors the brief's dispatch signature exactly.
 fn draw_spectrum(
@@ -613,10 +612,9 @@ fn draw_spectrum(
         VisualizerMode::Scope => draw_scope(buffer, area, waveform, theme),
         VisualizerMode::Flow => {
             // A history the caller has not handed over is the same as one
-            // with no entries yet: the live levels carry the frame.
+            // with no entries yet: the field warms up from blank.
             let empty = FlowHistory::default();
-            let history = flow.unwrap_or(&empty);
-            draw_flow(buffer, area, history, levels, theme);
+            draw_flow(buffer, area, flow.unwrap_or(&empty), theme);
         }
     }
 }
@@ -1330,7 +1328,7 @@ mod tests {
         let peaks = [1.0_f32; 2];
         let waveform = [0.5_f32; 4];
         let mut history = FlowHistory::default();
-        history.push(4, Some(&[1.0_f32; 4]));
+        history.push(4, 1, Some(&[1.0_f32; 4]));
         for mode in [
             VisualizerMode::Bars,
             VisualizerMode::Scope,

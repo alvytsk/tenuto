@@ -431,6 +431,7 @@ mod scope_display {
             t0,
             VisualizerMode::Scope,
             0,
+            0,
         );
         assert_eq!(display.waveform(), Some(&points[..]));
     }
@@ -448,12 +449,14 @@ mod scope_display {
             t0,
             VisualizerMode::Scope,
             0,
+            0,
         );
         let later = t0 + Duration::from_millis(150);
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&stale)),
             later,
             VisualizerMode::Scope,
+            0,
             0,
         );
         assert!(decayed(&display, &[-1.0, 0.5]), "{:?}", display.waveform());
@@ -471,6 +474,7 @@ mod scope_display {
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             t0,
             VisualizerMode::Bars,
+            0,
             0,
         );
         assert_eq!(display.waveform(), None);
@@ -694,82 +698,132 @@ mod scope_renderer {
 // ------------------------------------------- the flow's per-column history
 
 mod flow_history {
-    use tenuto::tui::spectrum::{DECAY_PER_DRAW, FlowHistory, MAX_FLOW_DEPTH};
+    use tenuto::tui::spectrum::{DECAY_PER_DRAW, FlowHistory};
 
-    /// §1.2: a width change rebuilds the history from scratch — the old
-    /// columns are dropped, so nothing of the four-column past carries into
-    /// the five-column present.
+    /// §1.2: a width or height change rebuilds the field from scratch — the
+    /// columns of an old shape mean nothing to a new one, so nothing of the
+    /// four-column past carries into the five-column present.
     #[test]
-    fn a_width_change_rebuilds_from_scratch() {
+    fn a_width_or_height_change_rebuilds_from_scratch() {
         let mut history = FlowHistory::default();
         let first = [1.0_f32, 0.8, 0.6, 0.4];
-        history.push(4, Some(&first));
-        history.push(4, Some(&first));
-        assert_eq!(history.column(0).len(), 2, "two pushes, newest last");
+        history.push(4, 3, Some(&first));
+        history.push(4, 3, Some(&first));
+        // Four bands resampled to three rows by nearest band: rows 0..2
+        // read bands 0, 1, 2.
+        assert_eq!(
+            history.column(3),
+            [1.0, 0.8, 0.6],
+            "two pushes, newest at the right edge"
+        );
 
         let second = [0.9_f32, 0.7, 0.5, 0.3, 0.1];
-        history.push(5, Some(&second));
+        history.push(5, 3, Some(&second));
         assert!(!history.is_empty());
-        assert_eq!(history.column(0), [0.9], "one fresh entry, no carry-over");
-        assert_eq!(history.column(4), [0.1], "the new width's last column");
+        assert_eq!(
+            history.column(4),
+            // Five bands to three rows by nearest band: rows read bands 0,
+            // 1, 3.
+            [0.9, 0.7, 0.3],
+            "one fresh column at the right edge, no carry-over"
+        );
+        assert!(
+            history.column(0).is_empty(),
+            "the field warms up from the left"
+        );
         assert!(
             history.column(5).is_empty(),
             "the width owns the column count"
         );
+
+        history.push(5, 2, Some(&[0.2_f32, 0.4]));
+        assert!(
+            history.column(0).is_empty(),
+            "a height change rebuilds too: the field warms up again"
+        );
+        assert_eq!(
+            history.column(4),
+            [0.2, 0.4],
+            "the new height's rows, at the right edge"
+        );
     }
 
-    /// Frames stop, the lava cools: every entry shrinks by
+    /// The field never grows past the panel width: at capacity each push
+    /// drops the oldest column, so `column(0)` is the oldest survivor and
+    /// `column(width - 1)` the newest.
+    #[test]
+    fn the_field_is_capped_at_the_width_and_scrolls_left() {
+        let mut history = FlowHistory::default();
+        // One band per push: the value marks the frame's order.
+        for entry in 1..=5_u16 {
+            history.push(2, 1, Some(&[f32::from(entry) / 6.0]));
+        }
+        assert_eq!(history.column(0), [4.0 / 6.0], "the oldest survivor");
+        assert_eq!(history.column(1), [5.0 / 6.0], "the newest, rightmost");
+        assert!(
+            history.column(2).is_empty(),
+            "the width owns the column count"
+        );
+    }
+
+    /// Before the width is reached the newest column sits at the right edge
+    /// and the field scrolls in from there — `column(x)` for increasing x
+    /// reads strictly newer.
+    #[test]
+    fn warm_up_anchors_the_newest_column_at_the_right_edge() {
+        let mut history = FlowHistory::default();
+        for entry in [1.0_f32, 0.9, 0.8] {
+            history.push(20, 2, Some(&[entry; 2]));
+        }
+        assert_eq!(history.column(19), [0.8, 0.8], "the newest, rightmost");
+        assert_eq!(history.column(18), [0.9, 0.9], "one older");
+        assert_eq!(history.column(17), [1.0, 1.0], "the oldest pushed");
+        assert!(
+            history.column(0).is_empty(),
+            "empty-shifted: nothing at the left yet"
+        );
+    }
+
+    /// Frames stop, the field cools: every stored value shrinks by
     /// [`DECAY_PER_DRAW`], not by a half.
     #[test]
     fn decay_multiplies_every_entry_by_the_draw_factor() {
         let mut history = FlowHistory::default();
-        history.push(2, Some(&[1.0_f32; 2]));
+        history.push(2, 2, Some(&[1.0_f32, 0.4]));
         history.decay();
-        let once = history.column(0)[0];
         assert!(
-            (once - 0.85).abs() < 1e-6 && (once - DECAY_PER_DRAW).abs() < 1e-6,
-            "× 0.85, not a half: {once}"
+            history
+                .column(1)
+                .iter()
+                .zip([1.0_f32, 0.4])
+                .all(|(value, from)| (*value - from * 0.85).abs() < 1e-6
+                    && (*value - DECAY_PER_DRAW * from).abs() < 1e-6),
+            "× 0.85, not a half: {:?}",
+            history.column(1)
         );
         history.decay();
         assert!(
-            (history.column(0)[0] - 0.85 * 0.85).abs() < 1e-6,
+            (history.column(1)[0] - 0.85 * 0.85).abs() < 1e-6,
             "cools again: {:?}",
-            history.column(0)
+            history.column(1)
         );
     }
 
-    /// The ring remembers [`MAX_FLOW_DEPTH`] entries per column, newest last.
+    /// A push without levels still appends a column — of zeros — so the
+    /// field keeps scrolling through silence.
     #[test]
-    fn the_ring_is_capped_and_newest_last() {
+    fn a_push_without_levels_pushes_a_column_of_zeros() {
         let mut history = FlowHistory::default();
-        let last = (MAX_FLOW_DEPTH + 3) as f32;
-        for entry in 1..=(MAX_FLOW_DEPTH + 3) as u16 {
-            // A level per frame, in the unit interval the value rule clamps
-            // to: the ramp marks the entries' order.
-            history.push(1, Some(&[f32::from(entry) / (last + 1.0)]));
-        }
-        assert_eq!(history.column(0).len(), MAX_FLOW_DEPTH, "the cap holds");
-        let first = history.column(0)[0];
-        assert!(
-            (first - 4.0 / (last + 1.0)).abs() < 1e-6,
-            "the oldest survivors: {first}"
+        history.push(3, 2, Some(&[0.5_f32, 0.5]));
+        history.push(3, 2, None);
+        history.push(3, 2, Some(&[]));
+        assert!(!history.is_empty(), "the field still moved");
+        assert_eq!(history.column(0), [0.5, 0.5], "the first frame persists");
+        assert_eq!(
+            history.column(2),
+            [0.0, 0.0],
+            "absent levels are a silent frame"
         );
-        let newest = history.column(0)[MAX_FLOW_DEPTH - 1];
-        assert!(
-            (newest - last / (last + 1.0)).abs() < 1e-6,
-            "newest last: {newest}"
-        );
-    }
-
-    /// A push without levels advances nothing: time moves only when a frame
-    /// (or `decay`) says so.
-    #[test]
-    fn a_push_without_levels_pushes_nothing() {
-        let mut history = FlowHistory::default();
-        history.push(3, Some(&[0.5_f32; 3]));
-        history.push(3, None);
-        history.push(3, Some(&[]));
-        assert_eq!(history.column(0), [0.5], "absent levels are not a frame");
     }
 }
 
@@ -819,7 +873,7 @@ mod flow_display {
         }
     }
 
-    /// §1.2: fresh Flow frames push, newest last.
+    /// §1.2: fresh Flow frames push, newest at the right edge.
     #[test]
     fn fresh_flow_frames_push_newest_last() {
         let t0 = Instant::now();
@@ -829,18 +883,21 @@ mod flow_display {
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
             t0,
             VisualizerMode::Flow,
+            2,
             1,
         );
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.9))),
             t0,
             VisualizerMode::Flow,
+            2,
             1,
         );
-        assert_eq!(display.flow().column(0), [0.5, 0.9], "newest last");
+        assert_eq!(display.flow().column(0), [0.5], "the older frame, left");
+        assert_eq!(display.flow().column(1), [0.9], "the newest, right");
     }
 
-    /// §1.2: a mode switch starts a fresh history — the lava of a different
+    /// §1.2: a mode switch starts a fresh field — the lava of a different
     /// visual is not this one's, and the reset happens at the switch itself.
     #[test]
     fn a_mode_switch_resets_the_history() {
@@ -852,30 +909,34 @@ mod flow_display {
             t0,
             VisualizerMode::Flow,
             1,
+            1,
         );
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.9))),
             t0,
             VisualizerMode::Flow,
             1,
+            1,
         );
-        assert_eq!(display.flow().column(0), [0.5, 0.9]);
+        assert_eq!(display.flow().column(0), [0.9]);
 
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.5))),
             t0,
             VisualizerMode::Bars,
             1,
+            1,
         );
         assert!(
             display.flow().is_empty(),
-            "the switch to bars wipes the history"
+            "the switch to bars wipes the field"
         );
 
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&frame(t0, 0.2))),
             t0,
             VisualizerMode::Flow,
+            1,
             1,
         );
         assert_eq!(
@@ -885,8 +946,8 @@ mod flow_display {
         );
     }
 
-    /// §1.2: a stale frame cools the history instead of pushing into it —
-    /// the same rule the drawn levels follow.
+    /// §1.2: a stale frame cools the field instead of pushing into it — the
+    /// same rule the drawn levels follow.
     #[test]
     fn stale_frames_cool_the_history_instead_of_pushing() {
         let t0 = Instant::now();
@@ -898,12 +959,14 @@ mod flow_display {
             t0,
             VisualizerMode::Flow,
             1,
+            1,
         );
         let later = t0 + Duration::from_millis(150);
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
             later,
             VisualizerMode::Flow,
+            1,
             1,
         );
         assert_eq!(
@@ -917,6 +980,30 @@ mod flow_display {
             "it cools instead: {cooled}"
         );
     }
+
+    /// A zero width or height is no panel: nothing pushes.
+    #[test]
+    fn a_zero_width_or_height_pushes_nothing() {
+        let t0 = Instant::now();
+        let np = now_playing();
+        let fresh = frame(t0, 0.5);
+        let mut display = SpectrumDisplay::default();
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&fresh)),
+            t0,
+            VisualizerMode::Flow,
+            0,
+            2,
+        );
+        display.update(
+            &source(PlaybackPhase::Playing, &np, Some(&fresh)),
+            t0,
+            VisualizerMode::Flow,
+            2,
+            0,
+        );
+        assert!(display.flow().is_empty(), "no panel, no field");
+    }
 }
 
 // ------------------------------------------- the flow's renderer
@@ -926,7 +1013,7 @@ mod flow_renderer {
     use ratatui::layout::Rect;
     use ratatui::style::Color;
 
-    use tenuto::tui::spectrum::{FlowHistory, MAX_FLOW_DEPTH, draw_flow};
+    use tenuto::tui::spectrum::{FlowHistory, draw_flow};
     use tenuto::tui::theme::Theme;
 
     /// The test's own sRGB-byte lerp, for the gradient's midpoints; the
@@ -941,109 +1028,86 @@ mod flow_renderer {
         }
     }
 
-    /// A rising ramp stacks the column green-side down and cream-side up:
-    /// the oldest, coolest entry sits at the bottom row and the newest at
-    /// the top, so the gradient runs green → amber → cream upward. The two
-    /// anchor rows land exactly on `flow_color`'s endpoints.
+    /// One frame's frozen column: three bands pushed at height three draw
+    /// bottom-up — the bass band's value at the bottom row, each row's
+    /// color from its own value through `flow_color`. The two anchor rows
+    /// land exactly on the gradient's endpoints.
     #[test]
-    fn a_rising_ramp_stacks_green_at_the_bottom_and_cream_at_the_top() {
-        let theme = Theme::default();
-        let area = Rect::new(0, 0, 2, 4);
-        let mut history = FlowHistory::default();
-        for level in [0.25_f32, 0.5, 0.75, 1.0] {
-            history.push(2, Some(&[level; 2]));
-        }
-        let mut buffer = Buffer::empty(area);
-        draw_flow(&mut buffer, area, &history, None, &theme);
-        for x in 0..2 {
-            assert_eq!(buffer[(x, 3)].fg, lerp(theme.green, theme.amber, 0.5));
-            assert_eq!(buffer[(x, 2)].fg, theme.amber, "the gradient's midpoint");
-            assert_eq!(buffer[(x, 1)].fg, lerp(theme.amber, theme.cream, 0.5));
-            assert_eq!(buffer[(x, 0)].fg, theme.cream, "the top endpoint");
-            assert_eq!(buffer[(x, 0)].symbol(), "█");
-        }
-    }
-
-    /// A full ring resampled into three rows lands by nearest entry: the
-    /// bottom row takes the oldest entry, the top row the newest, and the
-    /// middle row the halfway entry — index 7 of a 16-deep ring, whose
-    /// value `8/16` sits exactly on `flow_color`'s amber midpoint, which
-    /// pins the arithmetic and not merely "some middle value".
-    #[test]
-    fn sixteen_entries_resample_into_three_rows_by_nearest_entry() {
+    fn a_column_draws_bass_at_the_bottom_frozen_by_value() {
         let theme = Theme::default();
         let area = Rect::new(0, 0, 1, 3);
         let mut history = FlowHistory::default();
-        let last = MAX_FLOW_DEPTH as f32;
-        for entry in 1..=MAX_FLOW_DEPTH as u16 {
-            // A level per frame, in the unit interval the value rule clamps
-            // to: the ramp marks the entries' order.
-            history.push(1, Some(&[f32::from(entry) / last]));
-        }
+        history.push(1, 3, Some(&[0.25_f32, 0.5, 0.75]));
         let mut buffer = Buffer::empty(area);
-        draw_flow(&mut buffer, area, &history, None, &theme);
-
+        draw_flow(&mut buffer, area, &history, &theme);
         assert_eq!(
             buffer[(0, 2)].fg,
-            lerp(theme.green, theme.amber, 0.125),
-            "the oldest entry, 1/16, at the bottom"
+            lerp(theme.green, theme.amber, 0.5),
+            "bass, bottom"
         );
-        assert_eq!(
-            buffer[(0, 1)].fg,
-            theme.amber,
-            "the halfway entry, 8/16, in the middle"
-        );
-        assert_eq!(
-            buffer[(0, 0)].fg,
-            theme.cream,
-            "the newest entry, 1.0, on top"
-        );
+        assert_eq!(buffer[(0, 1)].fg, theme.amber, "the gradient's midpoint");
+        assert_eq!(buffer[(0, 0)].fg, lerp(theme.amber, theme.cream, 0.5));
         for y in 0..3 {
             assert_eq!(buffer[(0, y)].symbol(), "█", "row {y}");
         }
     }
 
-    /// §1.2: silence stays silent — an all-zero history draws nothing, and
-    /// an empty history with silent levels neither.
+    /// The waterfall at panel size: two distinct pushes at 60×6 freeze the
+    /// older column's colors and scroll the newest to the right edge —
+    /// rightmost and leftmost differ, and the columns left of the warm-up
+    /// draw nothing.
+    #[test]
+    fn two_distinct_pushes_scroll_the_newest_to_the_right_edge() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 60, 6);
+        let mut history = FlowHistory::default();
+        history.push(60, 6, Some(&[1.0_f32; 24]));
+        history.push(60, 6, Some(&[0.5_f32; 24]));
+        let mut buffer = Buffer::empty(area);
+        draw_flow(&mut buffer, area, &history, &theme);
+
+        // The newest column, rightmost: the latest levels, amber.
+        for y in 0..6 {
+            assert_eq!(buffer[(59, y)].symbol(), "█", "rightmost, row {y}");
+            assert_eq!(buffer[(59, y)].fg, theme.amber, "0.5 is amber");
+        }
+        // The older column persists its frozen colors: 1.0 is cream.
+        for y in 0..6 {
+            assert_eq!(buffer[(58, y)].symbol(), "█", "older, row {y}");
+            assert_eq!(buffer[(58, y)].fg, theme.cream, "1.0 is cream");
+        }
+        assert_ne!(
+            buffer[(58, 0)].fg,
+            buffer[(59, 0)].fg,
+            "the two columns differ"
+        );
+        // The warm-up: columns left of the field draw nothing.
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert_eq!(buffer[(57, 0)].symbol(), " ");
+    }
+
+    /// §1.2: silence stays silent — an all-zero field draws nothing.
     #[test]
     fn an_all_zero_history_draws_nothing() {
         let theme = Theme::default();
         let area = Rect::new(0, 0, 3, 4);
         let mut history = FlowHistory::default();
-        history.push(3, Some(&[0.0_f32; 3]));
-        history.push(3, Some(&[0.0_f32; 3]));
+        history.push(3, 4, Some(&[0.0_f32; 3]));
+        history.push(3, 4, Some(&[0.0_f32; 3]));
         let mut buffer = Buffer::empty(area);
-        draw_flow(&mut buffer, area, &history, Some(&[0.0_f32; 3]), &theme);
-        assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
-
-        let mut buffer = Buffer::empty(area);
-        draw_flow(&mut buffer, area, &history, None, &theme);
+        draw_flow(&mut buffer, area, &history, &theme);
         assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
     }
 
-    /// Without a history the live frame is the whole column: the first
-    /// fresh frame shows immediately, the scope's absent-fallback shape.
+    /// The honest warm-up: an empty history draws nothing — the field
+    /// scrolls in from the right over ~width frames, no live-levels
+    /// fallback.
     #[test]
-    fn an_empty_history_falls_back_to_the_live_levels() {
+    fn an_empty_history_draws_nothing() {
         let theme = Theme::default();
         let area = Rect::new(0, 0, 3, 2);
         let mut buffer = Buffer::empty(area);
-        draw_flow(
-            &mut buffer,
-            area,
-            &FlowHistory::default(),
-            Some(&[0.5_f32; 3]),
-            &theme,
-        );
-        for x in 0..3 {
-            for y in 0..2 {
-                assert_eq!(buffer[(x, y)].symbol(), "█", "column {x}, row {y}");
-                assert_eq!(buffer[(x, y)].fg, theme.amber);
-            }
-        }
-
-        let mut buffer = Buffer::empty(area);
-        draw_flow(&mut buffer, area, &FlowHistory::default(), None, &theme);
+        draw_flow(&mut buffer, area, &FlowHistory::default(), &theme);
         assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
     }
 }
@@ -1161,12 +1225,12 @@ mod restored_mode_render {
         terminal.backend().buffer().clone()
     }
 
-    /// A rising ramp history, pushed at the panel's own width so every
-    /// column owns a ring.
-    fn ramp(width: u16) -> FlowHistory {
+    /// A rising ramp field, pushed at the panel's own width and height, so
+    /// every column is one frame's uniform value.
+    fn ramp(width: u16, height: u16) -> FlowHistory {
         let mut history = FlowHistory::default();
         for level in [0.25_f32, 0.5, 0.75, 1.0] {
-            history.push(width, Some(&vec![level; usize::from(width)]));
+            history.push(width, height, Some(&vec![level; usize::from(width)]));
         }
         history
     }
@@ -1184,44 +1248,50 @@ mod restored_mode_render {
     }
 
     /// A persisted `flow` mode, restored at startup through
-    /// `with_appearance`, renders the lava through `draw`: 100×30 is the
-    /// normal tier with three information lines, so the panel is
-    /// Rect::new(25, 6, 71, 6), the newest frame's value on the top row in
-    /// cream and the oldest at the bottom at the green→amber midpoint.
-    /// Under the pre-M14 hard-coded bars the top row would be an amber bar
+    /// `with_appearance`, renders the waterfall through `draw`: 100×30 is
+    /// the normal tier with three information lines, so the panel is
+    /// Rect::new(25, 6, 71, 6). The four pushed columns sit at the right
+    /// edge: the newest (1.0, cream) rightmost, the oldest (0.25) three
+    /// columns in, and the panel's left is the honest warm-up blank. Under
+    /// the pre-M14 hard-coded bars the top row would be an amber bar
     /// instead, so the cream pins the mode to the UI's.
     #[test]
     fn a_restored_flow_mode_renders_flow_through_draw() {
         let theme = Theme::default();
         let visuals = Visuals {
-            flow: Some(&ramp(71)),
+            flow: Some(&ramp(71, 6)),
             ..Visuals::default()
         };
         let ui = UiState::new(true).with_appearance(theme, VisualizerMode::Flow);
         let buffer = draw_at(&ui, &visuals, 100, 30);
-        assert_eq!(buffer[(25, 6)].symbol(), "█", "the panel's top row draws");
+        assert_eq!(buffer[(95, 6)].symbol(), "█", "the newest column draws");
         assert_eq!(
-            buffer[(25, 6)].fg,
+            buffer[(95, 6)].fg,
             theme.cream,
-            "the newest entry, 1.0, on top"
+            "the newest frame, 1.0, rightmost"
         );
         assert_eq!(
-            buffer[(25, 11)].fg,
+            buffer[(92, 11)].fg,
             lerp(theme.green, theme.amber, 0.5),
-            "the oldest entry, 0.25, at the bottom"
+            "the oldest frame, 0.25, three columns in, bottom row"
+        );
+        assert_eq!(
+            buffer[(25, 6)].symbol(),
+            " ",
+            "the warm-up leaves the panel's left blank"
         );
     }
 
     /// The same restored mode at a one-row panel (100×20, the short tier's
     /// Rect::new(12, 3, 85, 1)): every mode renders the bars row there
-    /// (spec §1.2) — a loud bar in amber, which neither the flow gradient
+    /// (spec §1.2) — a loud bar in amber, which neither the flow field
     /// nor the scope's midline would paint.
     #[test]
     fn a_restored_flow_mode_at_one_row_renders_bars() {
         let theme = Theme::default();
         let visuals = Visuals {
             spectrum: Some(&[1.0_f32; 85]),
-            flow: Some(&ramp(85)),
+            flow: Some(&ramp(85, 1)),
             ..Visuals::default()
         };
         let ui = UiState::new(true).with_appearance(theme, VisualizerMode::Flow);
@@ -1230,7 +1300,7 @@ mod restored_mode_render {
         assert_eq!(
             buffer[(12, 3)].fg,
             theme.amber,
-            "the bars row, not the flow gradient"
+            "the bars row, not the flow field"
         );
     }
 }
