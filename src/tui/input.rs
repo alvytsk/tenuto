@@ -21,6 +21,7 @@ use crate::queue::{Direction, DisplayDuration, DurationSource, QueueEntryId};
 use crate::tui::jump;
 use crate::tui::render::{HitMap, TransportButton};
 use crate::tui::state::{InputPurpose, OrganizeOp, Overlay, UiState};
+use crate::tui::theme::THEME_ORDER;
 
 const VOLUME_STEP: f32 = 0.05;
 const SEEK_STEP: i64 = 10;
@@ -62,6 +63,7 @@ pub fn handle_key(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Eff
         Overlay::Help => help_overlay(key, ui),
         Overlay::JumpToFile => jump_file_overlay(key, ui, view),
         Overlay::SortMenu(id) => sort_menu_overlay(key, ui, id),
+        Overlay::Settings => settings_overlay(key, ui),
         Overlay::ConfirmOrganize(id, op) => confirm_overlay(key, ui, organize_command(id, op)),
         // Every other key belongs to the browser: `tui::run` forwards it to
         // `BrowserState::handle_key` (see `routes_to_browser`), whose own
@@ -420,6 +422,52 @@ fn organize_command(id: PlaylistId, op: OrganizeOp) -> AppCommand {
     }
 }
 
+/// The settings overlay (M14 §2): arrows move the cursor, and every move
+/// to a different theme re-themes the session at once — the live preview —
+/// dispatching the persisted spelling so the choice survives a quit
+/// straight from settings. `Esc`/`o` close. No Enter: selection is
+/// continuous.
+fn settings_overlay(key: KeyEvent, ui: &mut UiState) -> Vec<Effect> {
+    let last = THEME_ORDER.len() - 1;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('o') => {
+            ui.overlay = Overlay::None;
+            Vec::new()
+        }
+        KeyCode::Up | KeyCode::Char('k') => select_theme(ui, ui.settings_cursor.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => select_theme(ui, (ui.settings_cursor + 1).min(last)),
+        _ => Vec::new(),
+    }
+}
+
+/// Moves the settings cursor to `next`; when it names a theme other than
+/// the session's current one, that theme becomes the palette at once and
+/// its spelling dispatches for persistence. The saturated edges land on
+/// the theme already current, so they dispatch nothing.
+fn select_theme(ui: &mut UiState, next: usize) -> Vec<Effect> {
+    ui.settings_cursor = next;
+    let id = THEME_ORDER[next];
+    if id == ui.theme_id {
+        return Vec::new();
+    }
+    ui.theme_id = id;
+    ui.theme = id.theme();
+    vec![Effect::App(AppCommand::SetTheme(
+        id.as_stored().map(str::to_owned),
+    ))]
+}
+
+/// Opens the settings overlay with the cursor on the session's current
+/// theme.
+fn open_settings(ui: &mut UiState) -> Vec<Effect> {
+    ui.settings_cursor = THEME_ORDER
+        .iter()
+        .position(|id| *id == ui.theme_id)
+        .unwrap_or(0);
+    ui.overlay = Overlay::Settings;
+    Vec::new()
+}
+
 fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect> {
     // Ctrl-J (M13 §1.2) is the third chord with an effect, and like Ctrl-C
     // and Ctrl-L it is intercepted before the CONTROL check below, which
@@ -482,6 +530,7 @@ fn no_overlay(key: KeyEvent, ui: &mut UiState, view: &PlayerView) -> Vec<Effect>
             ui.sort_cursor = 0;
             Vec::new()
         }
+        KeyCode::Char('o') => open_settings(ui),
         KeyCode::Char('t') => {
             ui.clock_mode = ui.clock_mode.next();
             Vec::new()

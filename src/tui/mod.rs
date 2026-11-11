@@ -237,10 +237,9 @@ fn start_and_loop(
         runtime.handle(AppCommand::SetTheme(Some(theme.clone())));
     }
     let state = runtime.session().state();
-    let theme = ThemeId::from_stored(state.theme().unwrap_or(""))
-        .unwrap_or_default()
-        .theme();
-    let ui = UiState::new(options.mouse == MouseMode::On).with_appearance(theme);
+    let theme_id = ThemeId::from_stored(state.theme().unwrap_or("")).unwrap_or_default();
+    let ui =
+        UiState::new(options.mouse == MouseMode::On).with_appearance(theme_id.theme(), theme_id);
     run_loop(runtime, terminal, ui, artwork, cleanup, signals)
 }
 

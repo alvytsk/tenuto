@@ -105,6 +105,16 @@ pub const THEMES: [(ThemeId, Theme); 4] = [
     ),
 ];
 
+/// The settings overlay's item order (M14 §2): the same rows [`THEMES`]
+/// lists, and the table the settings cursor indexes — cursor row `n` names
+/// [`THEME_ORDER[n]`](THEME_ORDER).
+pub const THEME_ORDER: [ThemeId; 4] = [
+    ThemeId::Gruvbox,
+    ThemeId::Winamp,
+    ThemeId::Nord,
+    ThemeId::SolarizedDark,
+];
+
 impl ThemeId {
     /// Parses the exact spelling written to storage; `None` for anything else
     /// (case-sensitive: `"Nord"` is not a spelling).
@@ -143,7 +153,7 @@ impl ThemeId {
 
 #[cfg(test)]
 mod tests {
-    use super::{THEMES, ThemeId};
+    use super::{THEME_ORDER, THEMES, ThemeId};
 
     #[test]
     fn the_table_covers_every_theme_exactly_once() {
@@ -202,6 +212,15 @@ mod tests {
         assert_eq!(theme.green, ratatui::style::Color::Rgb(0xb8, 0xbb, 0x26));
         assert_eq!(theme.amber, ratatui::style::Color::Rgb(0xfa, 0xbd, 0x2f));
         assert_eq!(theme.cyan, ratatui::style::Color::Rgb(0x8e, 0xc0, 0x7c));
+    }
+
+    /// The settings cursor's order is the table's order, so the overlay's
+    /// rows can never drift from the palettes they switch to.
+    #[test]
+    fn the_settings_order_is_the_table_order() {
+        for (entry, (id, _)) in THEME_ORDER.into_iter().zip(THEMES) {
+            assert_eq!(entry, id);
+        }
     }
 
     #[test]

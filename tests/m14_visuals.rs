@@ -82,8 +82,9 @@ fn with_appearance_sets_the_startup_theme() {
     let ui = UiState::new(true);
     assert_eq!(ui.theme, Theme::default());
 
-    let ui = UiState::new(true).with_appearance(ThemeId::Winamp.theme());
+    let ui = UiState::new(true).with_appearance(ThemeId::Winamp.theme(), ThemeId::Winamp);
     assert_eq!(ui.theme, ThemeId::Winamp.theme());
+    assert_eq!(ui.theme_id, ThemeId::Winamp, "the id stays in sync");
 }
 
 /// Spec §2.1/§7: an explicit `--theme` writes through — the startup
@@ -135,7 +136,7 @@ mod panel_render {
     use tenuto::application::transport::PlaybackPhase;
     use tenuto::tui::render::{Visuals, draw};
     use tenuto::tui::state::UiState;
-    use tenuto::tui::theme::Theme;
+    use tenuto::tui::theme::{Theme, ThemeId};
 
     use crate::views::{self, decoded, ids, playing};
 
@@ -163,7 +164,7 @@ mod panel_render {
             spectrum: Some(&[1.0_f32; 85]),
             ..Visuals::default()
         };
-        let ui = UiState::new(true).with_appearance(theme);
+        let ui = UiState::new(true).with_appearance(theme, ThemeId::default());
         let buffer = draw_at(&ui, &visuals, 100, 20);
         assert_eq!(buffer[(12, 3)].symbol(), "█");
         assert_eq!(

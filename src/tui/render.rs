@@ -31,7 +31,7 @@ use crate::tui::layout::{
 };
 use crate::tui::state::{ClockMode, InputPurpose, Overlay, UiState};
 use crate::tui::tabs;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{THEME_ORDER, Theme};
 
 /// What the frame shows beyond the view: prepared artwork, spectrum levels
 /// and the open browser.
@@ -107,7 +107,7 @@ const CONFIRM_CLEAR_TEXT: &str = "Clear the queue? Listening history is kept. y 
 /// (19 lines, 21 rows with the border) by pairing related keys: a classic
 /// 80x24 terminal loses two rows to a multiplexer's status line, and the
 /// last lines here are the ones a listener most needs.
-const HELP_LINES: [&str; 24] = [
+const HELP_LINES: [&str; 25] = [
     "Space           Pause/resume; unloaded resumes the entry, ended replays it",
     "Enter           Play selected queue entry",
     "Up/Down or j/k  Move selection; J/K move the selected entry",
@@ -130,6 +130,7 @@ const HELP_LINES: [&str; 24] = [
     "f               Jump to file: type to filter, Enter plays",
     "S               Organize this playlist: sort, reverse, randomize, prune",
     "m / Ctrl-L      Toggle mouse capture / redraw the whole view",
+    "o / Esc         Open settings / close the overlay",
     "? / Esc         Show help / close the overlay or cancel input",
     "q / Ctrl-C      Graceful quit",
 ];
@@ -249,6 +250,7 @@ fn draw_overlay(
         }
         Overlay::ConfirmOrganize(_, op) => draw_confirm_overlay(buffer, area, op.question(), theme),
         Overlay::SortMenu(id) => draw_sort_menu_overlay(buffer, area, id, ui.sort_cursor, theme),
+        Overlay::Settings => draw_settings_overlay(buffer, area, ui.settings_cursor, theme),
         Overlay::Input(purpose) => {
             draw_input_overlay(buffer, area, purpose, &ui.input, ui.input_error, theme)
         }
@@ -429,6 +431,51 @@ fn draw_sort_menu_overlay(
         Line::styled(format!("{marker} {item}"), style).render(line_rect, buffer);
     }
     let _ = id;
+}
+
+/// The settings overlay (M14 §2): the four built-in themes in
+/// [`THEME_ORDER`] order with the cursor marked, and the app version on a
+/// muted footer line. The cursor's move has already re-themed the frame,
+/// so the box repaints the theme's own background over the cleared cells —
+/// the dark themes' fill stays unbroken behind the float.
+fn draw_settings_overlay(buffer: &mut Buffer, area: Rect, cursor: usize, theme: &Theme) {
+    let height = u16::try_from(THEME_ORDER.len() + 3).unwrap_or(u16::MAX);
+    let box_area = centered_box(area, area.width.min(40), height);
+    Clear.render(box_area, buffer);
+    if let Some(bg) = theme.bg {
+        buffer.set_style(box_area, Style::new().bg(bg));
+    }
+    Block::bordered()
+        .title(" settings ")
+        .border_style(Style::new().fg(theme.green))
+        .render(box_area, buffer);
+    let inner = inset(box_area);
+    for (line, id) in THEME_ORDER.iter().enumerate() {
+        let line_rect = Rect {
+            y: inner.y.saturating_add(line as u16),
+            height: 1,
+            ..inner
+        };
+        let selected = line == cursor;
+        let marker = if selected { "▶" } else { " " };
+        let style = if selected {
+            Style::new().fg(theme.ink).bg(theme.green)
+        } else {
+            Style::new().fg(theme.text)
+        };
+        let spelling = id.as_stored().unwrap_or("");
+        Line::styled(format!("{marker} {spelling}"), style).render(line_rect, buffer);
+    }
+    let footer = Rect {
+        y: inner.y.saturating_add(THEME_ORDER.len() as u16),
+        height: 1,
+        ..inner
+    };
+    Line::styled(
+        format!("tenuto {}", env!("CARGO_PKG_VERSION")),
+        Style::new().fg(theme.muted),
+    )
+    .render(footer, buffer);
 }
 
 fn bordered(theme: &Theme) -> Block<'static> {
