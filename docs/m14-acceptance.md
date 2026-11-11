@@ -13,9 +13,9 @@ waterfall and the bare-CLI flags):
 - `cargo fmt --check` — exit 0.
 - `cargo clippy --locked --all-targets --all-features -- -D warnings` —
   exit 0, no warnings.
-- `cargo test --locked --no-fail-fast` — exit 0: 1,742 passed, 0 failed,
+- `cargo test --locked --no-fail-fast` — exit 0: 1,739 passed, 0 failed,
   5 ignored (the `#[ignore]`d device smoke and the manual-measurement
-  snapshots) across 124 test binaries, doc-tests included. One full run
+  snapshots) across 123 test binaries, doc-tests included. One full run
   saw `http_cancellation` fail under parallel load; the test passes in
   isolation and the whole suite passed on the rerun — the
   known load-flake class the repo's build notes describe, in a suite no
