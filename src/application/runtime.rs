@@ -210,6 +210,9 @@ pub enum AppCommand {
     CycleRepeat,
     /// An absolute repeat mode, from MPRIS's `LoopStatus`.
     SetRepeat(RepeatMode),
+    /// The selected theme's raw spelling (M14 §2.1), already validated by
+    /// the caller. `None` clears the stored theme.
+    SetTheme(Option<String>),
     /// The organize menu's reorders and dedup (M13 §1.5). They act on the
     /// playlist captured when the menu opened.
     SortPlaylist(PlaylistId, SortKey),
@@ -800,6 +803,10 @@ impl PlayerRuntime {
             }
             AppCommand::SetRepeat(mode) => {
                 let action = self.session.set_repeat(mode);
+                self.submit(action);
+            }
+            AppCommand::SetTheme(theme) => {
+                let action = self.session.set_theme(theme);
                 self.submit(action);
             }
             AppCommand::SortPlaylist(id, key) => match self.session.sort_playlist(id, key) {

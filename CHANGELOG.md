@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Built-in themes (`--theme`, accepted on both the bare `tenuto` and
+  `tenuto tui`): gruvbox (the default, painting no background of its own,
+  exactly as before), winamp, nord and solarized-dark. The three dark
+  themes paint their own full-screen background; the choice is saved as
+  the new default and applied again at the next startup.
+- The settings overlay (`o`): the four themes as a cursor list, with the
+  cursor starting on the current theme and a muted line below naming the
+  app version. Up/Down (or `j`/`k`) move the cursor, and every move
+  recolors the whole interface at once — the live preview — and saves the
+  choice through the same write-through `--theme` uses, so quitting
+  straight from settings keeps it. `Esc` or `o` closes.
 - Repeat modes (`R`): off, repeat one and repeat all, session-wide, shown
   as `R:1`/`R:*` beside the playing playlist's tab and published to MPRIS
   as `LoopStatus` in both directions. Repeat one replays a completed entry

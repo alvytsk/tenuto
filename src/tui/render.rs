@@ -31,7 +31,7 @@ use crate::tui::layout::{
 };
 use crate::tui::state::{ClockMode, InputPurpose, Overlay, UiState};
 use crate::tui::tabs;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{THEME_ORDER, Theme};
 
 /// What the frame shows beyond the view: prepared artwork, spectrum levels
 /// and the open browser.
@@ -107,7 +107,7 @@ const CONFIRM_CLEAR_TEXT: &str = "Clear the queue? Listening history is kept. y 
 /// (19 lines, 21 rows with the border) by pairing related keys: a classic
 /// 80x24 terminal loses two rows to a multiplexer's status line, and the
 /// last lines here are the ones a listener most needs.
-const HELP_LINES: [&str; 24] = [
+const HELP_LINES: [&str; 25] = [
     "Space           Pause/resume; unloaded resumes the entry, ended replays it",
     "Enter           Play selected queue entry",
     "Up/Down or j/k  Move selection; J/K move the selected entry",
@@ -130,6 +130,7 @@ const HELP_LINES: [&str; 24] = [
     "f               Jump to file: type to filter, Enter plays",
     "S               Organize this playlist: sort, reverse, randomize, prune",
     "m / Ctrl-L      Toggle mouse capture / redraw the whole view",
+    "o / Esc         Open settings / close the overlay",
     "? / Esc         Show help / close the overlay or cancel input",
     "q / Ctrl-C      Graceful quit",
 ];
@@ -172,9 +173,17 @@ pub fn draw(
     let area = frame.area();
     let tier = tier_for(area.width, area.height);
     let regions = regions(area, tier, info_line_count(view));
-    let theme = Theme::default();
+    let theme = ui.theme;
     let buffer = frame.buffer_mut();
-    buffer.set_style(area, Style::new().fg(theme.text));
+    // The frame's first render step (M14 §2.2): the theme's text colour
+    // everywhere, plus its background when the theme paints one, before
+    // the layout is carved. `set_style` patches, so widgets that set
+    // explicit styles draw over it unchanged.
+    let mut base = Style::new().fg(theme.text);
+    if let Some(bg) = theme.bg {
+        base = base.bg(bg);
+    }
+    buffer.set_style(area, base);
 
     if tier == Tier::Resize {
         draw_resize(buffer, &regions, &theme);
@@ -241,6 +250,7 @@ fn draw_overlay(
         }
         Overlay::ConfirmOrganize(_, op) => draw_confirm_overlay(buffer, area, op.question(), theme),
         Overlay::SortMenu(id) => draw_sort_menu_overlay(buffer, area, id, ui.sort_cursor, theme),
+        Overlay::Settings => draw_settings_overlay(buffer, area, ui.settings_cursor, theme),
         Overlay::Input(purpose) => {
             draw_input_overlay(buffer, area, purpose, &ui.input, ui.input_error, theme)
         }
@@ -423,6 +433,51 @@ fn draw_sort_menu_overlay(
     let _ = id;
 }
 
+/// The settings overlay (M14 §2): the four built-in themes in
+/// [`THEME_ORDER`] order with the cursor marked, and the app version on a
+/// muted footer line. The cursor's move has already re-themed the frame,
+/// so the box repaints the theme's own background over the cleared cells —
+/// the dark themes' fill stays unbroken behind the float.
+fn draw_settings_overlay(buffer: &mut Buffer, area: Rect, cursor: usize, theme: &Theme) {
+    let height = u16::try_from(THEME_ORDER.len() + 3).unwrap_or(u16::MAX);
+    let box_area = centered_box(area, area.width.min(40), height);
+    Clear.render(box_area, buffer);
+    if let Some(bg) = theme.bg {
+        buffer.set_style(box_area, Style::new().bg(bg));
+    }
+    Block::bordered()
+        .title(" settings ")
+        .border_style(Style::new().fg(theme.green))
+        .render(box_area, buffer);
+    let inner = inset(box_area);
+    for (line, id) in THEME_ORDER.iter().enumerate() {
+        let line_rect = Rect {
+            y: inner.y.saturating_add(line as u16),
+            height: 1,
+            ..inner
+        };
+        let selected = line == cursor;
+        let marker = if selected { "▶" } else { " " };
+        let style = if selected {
+            Style::new().fg(theme.ink).bg(theme.green)
+        } else {
+            Style::new().fg(theme.text)
+        };
+        let spelling = id.as_stored().unwrap_or("");
+        Line::styled(format!("{marker} {spelling}"), style).render(line_rect, buffer);
+    }
+    let footer = Rect {
+        y: inner.y.saturating_add(THEME_ORDER.len() as u16),
+        height: 1,
+        ..inner
+    };
+    Line::styled(
+        format!("tenuto {}", env!("CARGO_PKG_VERSION")),
+        Style::new().fg(theme.muted),
+    )
+    .render(footer, buffer);
+}
+
 fn bordered(theme: &Theme) -> Block<'static> {
     Block::bordered().border_style(Style::new().fg(theme.line))
 }
@@ -565,17 +620,17 @@ fn draw_info(buffer: &mut Buffer, regions: &Regions, view: &PlayerView, theme: &
     }
 }
 
-/// Flat bars without analysis; otherwise each bar's level in eighths of a
-/// row, never below the floor glyph, with an amber cap on a loud bar. Bars
-/// are equally wide with a one-column gap between them, as wide as one bar
-/// per band allows, and as many as then fit: fewer than the bands sample the
-/// nearest band, more than the bands interpolate between neighbours, so the
-/// row is full at every width. They end at the right edge, in line with the
-/// progress bar; less than a bar's worth of columns is left empty on the
-/// left. When every bar is at least two columns wide and the area tall
-/// enough to spare a row, the bottom row numbers the bars instead. A peak
-/// is a cream cap in the row it has fallen to, while that row is above the
-/// bar.
+/// The spectrum row: flat bars without analysis; otherwise each bar's level
+/// in eighths of a row, never below the floor glyph, with an amber cap on a
+/// loud bar. Bars are equally wide with a one-column gap between them, as
+/// wide as one bar per band allows, and as many as then fit: fewer than the
+/// bands sample the nearest band, more than the bands interpolate between
+/// neighbours, so the row is full at every width. They end at the right
+/// edge, in line with the progress bar; less than a bar's worth of columns
+/// is left empty on the left. When every bar is at least two columns wide
+/// and the area tall enough to spare a row, the bottom row numbers the bars
+/// instead. A peak is a cream cap in the row it has fallen to, while that
+/// row is above the bar.
 fn draw_spectrum(
     buffer: &mut Buffer,
     area: Rect,
@@ -1249,5 +1304,23 @@ mod tests {
         assert_eq!(buffer[(0, 1)].fg, theme.cream);
         // A peak resting on its bar's top cell is the bar itself.
         assert_eq!(column(2), [" ", " ", " ", "█"]);
+    }
+
+    /// The minimal tier's single row is the bars row, as it has always been:
+    /// spare on the left, the gap column blank, loud bars amber — the row
+    /// renders at every height.
+    #[test]
+    fn one_row_renders_bars() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 4, 1);
+        let levels = [1.0_f32; 2];
+        let peaks = [1.0_f32; 2];
+        let mut buffer = Buffer::empty(area);
+        draw_spectrum(&mut buffer, area, Some(&levels), Some(&peaks), &theme);
+        assert_eq!(buffer[(0, 0)].symbol(), " ", "the spare column");
+        assert_eq!(buffer[(1, 0)].symbol(), "█");
+        assert_eq!(buffer[(1, 0)].fg, theme.amber, "a loud bar keeps its amber");
+        assert_eq!(buffer[(2, 0)].symbol(), " ", "the gap column");
+        assert_eq!(buffer[(3, 0)].symbol(), "█");
     }
 }

@@ -1,10 +1,12 @@
 //! What the terminal front end remembers between frames that the player
 //! itself does not: the selected queue row, the open overlay, whether mouse
-//! capture is on, the text being typed and how far the queue is scrolled.
+//! capture is on, the text being typed, how far the queue is scrolled, and
+//! the session's appearance — its theme.
 
 use crate::application::view::PlayerView;
 use crate::playlist::PlaylistId;
 use crate::queue::QueueEntryId;
+use crate::tui::theme::{Theme, ThemeId};
 
 /// What the input overlay is collecting, and for which playlist (§10): the
 /// target is captured when the overlay opens, so a view that moves on before
@@ -66,6 +68,7 @@ pub enum Overlay {
     Input(InputPurpose),
     JumpToFile,
     SortMenu(PlaylistId),
+    Settings,
     Browser,
 }
 
@@ -88,9 +91,21 @@ pub struct UiState {
     /// The organize menu's cursor (M13 §1.5), valid while
     /// [`Overlay::SortMenu`] is open.
     pub sort_cursor: usize,
+    /// The settings overlay's cursor (M14 §2), valid while
+    /// [`Overlay::Settings`] is open: it indexes
+    /// [`THEME_ORDER`](crate::tui::theme::THEME_ORDER).
+    pub settings_cursor: usize,
     /// The first queue row the listing tries to show; drawing still scrolls
     /// as far as it must to keep the selection visible.
     pub queue_offset: usize,
+    /// The palette this session shows (M14 §2.1): startup resolves it, and
+    /// the settings overlay switches it live.
+    pub theme: Theme,
+    /// The id of `theme`, kept in sync with it: startup resolves both
+    /// together and the settings overlay's moves set both — `theme_id` is
+    /// the identity the settings cursor compares against, `theme` stays the
+    /// render-facing palette.
+    pub theme_id: ThemeId,
     /// The playlist the last reconciled view showed, so switching playlists
     /// starts its listing at the top instead of inheriting a scroll.
     viewed: Option<PlaylistId>,
@@ -107,9 +122,21 @@ impl UiState {
             clock_mode: ClockMode::Elapsed,
             filter: String::new(),
             sort_cursor: 0,
+            settings_cursor: 0,
             queue_offset: 0,
+            theme: Theme::default(),
+            theme_id: ThemeId::default(),
             viewed: None,
         }
+    }
+
+    /// The session's appearance: the palette `theme` this session opens
+    /// with and its id `theme_id` — the pair the settings overlay then
+    /// switches live.
+    pub fn with_appearance(mut self, theme: Theme, theme_id: ThemeId) -> Self {
+        self.theme = theme;
+        self.theme_id = theme_id;
+        self
     }
 
     /// Keeps the selection pointing at a row that exists after the queue

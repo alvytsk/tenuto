@@ -77,6 +77,7 @@ use crate::tui::layout::{regions, tier_for};
 use crate::tui::render::{CoverView, HitMap, Visuals};
 use crate::tui::spectrum::{DrawSource, SpectrumDisplay, wants_analysis};
 use crate::tui::state::{Overlay, UiState};
+use crate::tui::theme::ThemeId;
 
 /// How long one loop pass waits for terminal input before pumping the
 /// runtime again; also the bound on how late a signal or fatal panic is seen.
@@ -95,6 +96,10 @@ pub enum MouseMode {
 pub struct TuiOptions {
     pub mouse: MouseMode,
     pub artwork: ArtworkMode,
+    /// `--theme`'s raw spelling: written through to the saved state at
+    /// startup, so an explicitly chosen theme becomes the default for later
+    /// runs too. `None` leaves the saved theme alone.
+    pub theme: Option<String>,
 }
 
 type Tty = Terminal<CrosstermBackend<Stdout>>;
@@ -225,7 +230,16 @@ fn start_and_loop(
     let artwork = Artwork::new(options.artwork, picker, hook);
     stage!(signals, cleanup);
 
-    let ui = UiState::new(options.mouse == MouseMode::On);
+    // The appearance (M14 §2.1): an explicit `--theme` writes through to the
+    // saved state — it becomes later runs' default too. It resolves once,
+    // here, before the loop reads it.
+    if let Some(theme) = &options.theme {
+        runtime.handle(AppCommand::SetTheme(Some(theme.clone())));
+    }
+    let state = runtime.session().state();
+    let theme_id = ThemeId::from_stored(state.theme().unwrap_or("")).unwrap_or_default();
+    let ui =
+        UiState::new(options.mouse == MouseMode::On).with_appearance(theme_id.theme(), theme_id);
     run_loop(runtime, terminal, ui, artwork, cleanup, signals)
 }
 
@@ -425,9 +439,9 @@ fn run_loop(
 }
 
 /// Runs analysis only while this frame has a spectrum row and playback is
-/// `Playing`, then settles the levels the row will draw: the latest frame's
-/// when it is fresh and belongs to the adopted playback, otherwise the
-/// previous levels decayed.
+/// `Playing`, then settles what the row will draw: the latest frame's when it
+/// is fresh and belongs to the adopted playback, otherwise the previous
+/// levels decayed.
 fn update_spectrum(
     runtime: &PlayerRuntime,
     terminal: &Tty,

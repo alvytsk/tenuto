@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 
 use crate::tui::MouseMode;
 use crate::tui::images::ArtworkMode;
+use crate::tui::theme::ThemeId;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,6 +20,19 @@ pub struct Cli {
     /// `tenuto tui` uses when its flags are omitted.
     #[command(subcommand)]
     pub command: Option<CliCommand>,
+    // The bare form's own player flags, identical to the `tui` subcommand's:
+    // a bare `tenuto` is the same player, so it takes the same flags.
+    // Top-level args apply to the bare invocation only; the subcommand's
+    // stay its own (clap keeps the two apart).
+    /// Whether the player captures the mouse.
+    #[arg(long, value_enum, default_value_t = MouseMode::On)]
+    pub mouse: MouseMode,
+    /// How the player draws cover art.
+    #[arg(long, value_enum, default_value_t = ArtworkMode::Auto)]
+    pub artwork: ArtworkMode,
+    /// The theme to start with; saved as the new default.
+    #[arg(long, value_parser = validate_theme)]
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +74,9 @@ pub enum CliCommand {
         /// How the player draws cover art.
         #[arg(long, value_enum, default_value_t = ArtworkMode::Auto)]
         artwork: ArtworkMode,
+        /// The theme to start with; saved as the new default.
+        #[arg(long, value_parser = validate_theme)]
+        theme: Option<String>,
     },
     /// List every subscription.
     Feeds,
@@ -104,4 +121,15 @@ fn positive_count(value: &str) -> Result<NonZeroUsize, String> {
         .ok()
         .and_then(NonZeroUsize::new)
         .ok_or_else(|| "expected a positive count".into())
+}
+
+/// §2.1: a theme typo is a usage error, not a silent default, and the error
+/// names every valid spelling. The value travels as the raw string — the
+/// same spelling storage carries — so this stays a parse-time check only.
+fn validate_theme(value: &str) -> Result<String, String> {
+    ThemeId::from_stored(value)
+        .map(|_| value.to_owned())
+        .ok_or_else(|| {
+            format!("unknown theme \"{value}\" (valid: gruvbox, winamp, nord, solarized-dark)")
+        })
 }

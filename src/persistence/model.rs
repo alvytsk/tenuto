@@ -75,6 +75,13 @@ pub struct PersistedState {
     /// the schema stays 4 — a build without the field ignores it, a build
     /// with it defaults it (M13 §1.1's recorded precedent).
     repeat_mode: RepeatMode,
+    /// The selected theme's stored spelling (M14 §2.1), session-wide.
+    /// Additive with the same rule as `repeat_mode` above, and raw: this
+    /// layer carries the string and never parses the vocabulary (`ThemeId`
+    /// lives in `tui`), so an unknown spelling passes through and the
+    /// *reader* defaults it. The schema stays 4 (M13 §1.1's recorded
+    /// precedent).
+    theme: Option<String>,
     next_seq: u64,
 }
 
@@ -101,6 +108,10 @@ pub(super) struct RawState {
     playing: Option<serde_json::Value>,
     #[serde(default)]
     repeat_mode: Option<String>,
+    /// M14 §2.1's additive field, held raw: unknown to older builds,
+    /// defaulted by newer ones, and never parsed here.
+    #[serde(default)]
+    theme: Option<String>,
     #[serde(default, deserialize_with = "present")]
     next_entry_id: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "present")]
@@ -167,6 +178,7 @@ impl RawState {
                     .repeat_mode
                     .and_then(|raw| RepeatMode::from_stored(&raw))
                     .unwrap_or(RepeatMode::Off),
+                theme: self.theme,
                 next_seq,
             },
             recovered.reset,
@@ -196,6 +208,10 @@ impl Serialize for PersistedState {
             /// M13 §1.1's additive field: `Off` serializes as `null`, so a
             /// file written by this build stays readable by an older one.
             repeat_mode: Option<&'static str>,
+            /// M14 §2.1's additive field: the stored spelling passes
+            /// through raw, and `None` serializes as `null` — the M13 rule
+            /// again, so older builds keep reading the file.
+            theme: &'a Option<String>,
         }
         Out {
             schema_version: self.schema_version,
@@ -207,6 +223,7 @@ impl Serialize for PersistedState {
             next_entry_id: self.playlists.next_entry_id(),
             next_playlist_id: self.playlists.next_playlist_id(),
             repeat_mode: self.repeat_mode.as_stored(),
+            theme: &self.theme,
         }
         .serialize(serializer)
     }
@@ -221,6 +238,7 @@ impl Default for PersistedState {
             checkpoints: Arc::new(BTreeMap::new()),
             playlists: PlaylistSet::default(),
             repeat_mode: RepeatMode::Off,
+            theme: None,
             next_seq: 1,
         }
     }
@@ -246,6 +264,18 @@ impl PersistedState {
 
     pub fn set_repeat(&mut self, mode: RepeatMode) {
         self.repeat_mode = mode;
+    }
+
+    /// The selected theme's raw stored spelling (M14 §2.1), read by the
+    /// startup path that maps it to a `ThemeId` — mapping, and the default
+    /// for an unknown or absent spelling, are the reader's job, exactly as
+    /// `RepeatMode::from_stored`'s is for repeat.
+    pub fn theme(&self) -> Option<&str> {
+        self.theme.as_deref()
+    }
+
+    pub fn set_theme(&mut self, theme: Option<String>) {
+        self.theme = theme;
     }
 
     /// Read-only from outside `persistence`: the only path that can change the

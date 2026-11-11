@@ -10,7 +10,7 @@ The rules the player and the feed commands follow, stated precisely. The [README
 | `play <path-or-url>` | Play one file or URL with a status line and a few keys |
 | `play <slug> <index>` | Play a subscribed feed's episode by its 1-based index |
 | `play ... --probe-only` | Open the source, print what was found, and exit without a device or a terminal |
-| `tui [--mouse on\|off] [--artwork auto\|blocks\|off]` | Open the full-screen player on the saved playlists |
+| `tui [--mouse on\|off] [--artwork auto\|blocks\|off] [--theme gruvbox\|winamp\|nord\|solarized-dark]` | Open the full-screen player on the saved playlists |
 | `subscribe <url> [--as <slug>]` | Fetch a feed once, store the subscription, cache its episodes |
 | `feeds` | List every subscription |
 | `episodes <slug> [-n N] [--reverse]` | List a feed's cached episodes with your progress |
@@ -41,18 +41,25 @@ A file with no such header lands on a rough estimate. The landing can be in a su
 ## The terminal player
 
 ```sh
-tenuto tui [--mouse on|off] [--artwork auto|blocks|off]
+tenuto tui [--mouse on|off] [--artwork auto|blocks|off] [--theme gruvbox|winamp|nord|solarized-dark]
 ```
 
 `tui` restores every playlist, the playing one's active entry, the volume and every checkpoint. It never starts playing on its own. No track is loaded and nothing is fetched until you press a playback key. Local files' tags and the active local entry's cover are read in the background. The audio device is created on the first load, so the player opens on a machine with no output device.
 
-Options:
+Options — the same flags are accepted on the bare `tenuto` and on `tenuto tui`:
 
 - `--mouse off` starts with mouse capture disabled and leaves the terminal's own selection and scrolling alone. `m` toggles it at any time. The default is `on`.
 - `--artwork auto` asks the terminal which image protocol it supports and falls back to colored half-blocks after 250 ms without an answer. `blocks` always uses half-blocks. `off` never loads artwork and shows only the placeholder, including in place of the built-in covers.
 - Under tmux, `auto` and `blocks` run `tmux set -p allow-passthrough on` for the current pane. `off` avoids that.
+- `--theme <name>` starts with a built-in palette: `gruvbox` (the default), `winamp`, `nord` or `solarized-dark`. A misspelled name is refused before the player opens, with the valid set named. The choice is saved as the new default and applied again at the next startup; the settings overlay switches it live while the player runs.
 
 The layout adapts to the terminal size. At 80 columns by 28 rows and above the player shows the cover with the track information, the spectrum and the time beside it, then progress and transport, above the viewed playlist. The spectrum takes the rows the information leaves, so it is taller when a track has only a title. Below 80 columns or 28 rows it is compact: a smaller cover beside the title, the artist, a spectrum of three or four rows and the time. Below 22 rows the compact player shrinks to a small cover and a one-row spectrum. Below 50 columns or 18 rows it is minimal, with no cover and no spectrum. Below 30 columns or 8 rows it asks for a larger window, while space and `q` keep working. Either dimension alone drops a tier.
+
+The visual panel is the spectrum, drawn as it has always been: equal bars over the analyzed bands with a peak cap over each — the cap holds where its bar last reached and falls more slowly than the bar. On silence the bars fall flat and the row goes dark; nothing moves on its own.
+
+**Themes.** The palette is a built-in choice, made with `--theme` or in the settings overlay: `gruvbox` — the default, and the palette the player has always had — or `winamp`, `nord` and `solarized-dark`. gruvbox paints no background of its own, so the terminal's own background shows through exactly as before. The three dark themes paint a full-screen background under their palettes: winamp `#0a0a0a` near-black, nord `#2e3440`, solarized-dark `#002b36`.
+
+**Settings.** `o` opens the settings overlay: the four themes as a cursor list, with the cursor starting on the current theme, and a muted line below them reading `tenuto <version>` — the same value `tenuto --version` prints. Up, Down, `j` and `k` move the cursor, and every move recolors the whole interface at once and saves the choice, so quitting straight from settings keeps it. `Esc` or `o` closes.
 
 ### Keys
 
@@ -79,6 +86,7 @@ The layout adapts to the terminal size. At 80 columns by 28 rows and above the p
 | `z` | Toggle shuffle on the viewed playlist |
 | `R` | Repeat, session-wide: off → repeat one → repeat all → off |
 | `t` | Cycle the time label: elapsed → −remaining → total. −remaining and total need a decoded duration and fall back to elapsed without one |
+| `o` | Open settings: the four themes and the version |
 | `f` | Jump to file: type to filter the viewed playlist, arrows move within the matches, Enter plays the selected match, Esc cancels |
 | `S` | Organize the viewed playlist: sort by title/artist/path/duration, reverse, randomize, remove duplicates, remove dead entries. Reorders clear shuffle on that playlist; the two removals take a `y` confirmation |
 | `?` | Show the key help |

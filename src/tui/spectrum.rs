@@ -46,17 +46,26 @@ pub struct DrawSource<'a> {
 }
 
 impl<'a> DrawSource<'a> {
+    /// Whether `frame` may be drawn at `now`: playback is still `Playing`,
+    /// the frame belongs to the adopted playback's revision, that playback's
+    /// token is the adopted one, and the frame is fresh.
+    fn drawable(&self, frame: &SpectrumFrame, now: Instant) -> bool {
+        let Some(now_playing) = self.now_playing else {
+            return false;
+        };
+        self.phase == PlaybackPhase::Playing
+            && frame.session_rev == now_playing.session_rev
+            && now_playing.load.is_some()
+            && now_playing.load == self.adopted
+            && frame_is_fresh(frame, now)
+    }
+
     /// The frame's levels, when they may be drawn at `now`: playback is still
     /// `Playing`, the frame belongs to the adopted playback's revision, that
     /// playback's token is the adopted one, and the frame is fresh.
     pub fn fresh_levels(&self, now: Instant) -> Option<&'a [f32]> {
-        let now_playing = self.now_playing?;
         let frame = self.frame?;
-        let owned = self.phase == PlaybackPhase::Playing
-            && frame.session_rev == now_playing.session_rev
-            && now_playing.load.is_some()
-            && now_playing.load == self.adopted;
-        (owned && frame_is_fresh(frame, now)).then_some(frame.levels.as_slice())
+        self.drawable(frame, now).then_some(frame.levels.as_slice())
     }
 }
 

@@ -69,12 +69,13 @@ const HELP_LINE: &str =
 /// else dispatches to [`crate::commands`], which prints every line a feed
 /// command reports and maps a partial failure to a failing exit status.
 pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
-    // A bare `tenuto` opens the player. The defaults are the ones
-    // `tenuto tui` applies when neither flag is given.
+    // A bare `tenuto` opens the player, with the flags the bare form
+    // parsed — the same three the `tui` subcommand takes.
     let Some(command) = cli.command else {
         return crate::tui::run(crate::tui::TuiOptions {
-            mouse: crate::tui::MouseMode::default(),
-            artwork: crate::tui::images::ArtworkMode::default(),
+            mouse: cli.mouse,
+            artwork: cli.artwork,
+            theme: cli.theme,
         })
         .map_err(AppError::from);
     };
@@ -127,9 +128,16 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
             // the enclosure, what is checkpointed is the episode.
             run_resolved(media, location)
         }
-        CliCommand::Tui { mouse, artwork } => {
-            crate::tui::run(crate::tui::TuiOptions { mouse, artwork }).map_err(AppError::from)
-        }
+        CliCommand::Tui {
+            mouse,
+            artwork,
+            theme,
+        } => crate::tui::run(crate::tui::TuiOptions {
+            mouse,
+            artwork,
+            theme,
+        })
+        .map_err(AppError::from),
         command => crate::commands::run(command)
             .map(|()| RunOutcome::Completed)
             .map_err(Into::into),
