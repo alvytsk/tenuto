@@ -158,6 +158,32 @@ fn absent_theme_and_visualizer_flags_parse_to_none() {
     assert_eq!(visualizer, None);
 }
 
+/// M14 §1.3: the bare form parses the same flag — `tenuto --visualizer
+/// flow` opens the player with that mode for the run, an unknown spelling
+/// is refused with the valid set named, and the bare invocation with no
+/// flags carries `None` (the startup's "use the saved state").
+#[test]
+fn bare_visualizer_parses_a_stored_spelling_and_names_the_valid_set_when_rejected() {
+    let parsed = Cli::try_parse_from(["tenuto", "--visualizer", "flow"]).expect("flow parses");
+    assert!(
+        parsed.command.is_none(),
+        "the bare form carries no subcommand"
+    );
+    assert_eq!(parsed.visualizer.as_deref(), Some("flow"));
+
+    let error = Cli::try_parse_from(["tenuto", "--visualizer", "plasma"])
+        .expect_err("an unknown visualizer is a usage error");
+    assert!(
+        error.to_string().contains("valid: bars, scope, flow"),
+        "{error}"
+    );
+
+    let parsed = Cli::try_parse_from(["tenuto"]).expect("the bare form parses");
+    assert_eq!(parsed.visualizer, None);
+}
+
+// ------------------------------------------------ the waveform trace points
+
 // ------------------------------------------------ the decimated waveform
 
 /// §1.1: a constant block decimates to the same `(min, peak)` pair in every

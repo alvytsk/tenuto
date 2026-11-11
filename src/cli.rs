@@ -21,6 +21,22 @@ pub struct Cli {
     /// `tenuto tui` uses when its flags are omitted.
     #[command(subcommand)]
     pub command: Option<CliCommand>,
+    // The bare form's own player flags, identical to the `tui` subcommand's:
+    // a bare `tenuto` is the same player, so it takes the same flags.
+    // Top-level args apply to the bare invocation only; the subcommand's
+    // stay its own (clap keeps the two apart).
+    /// Whether the player captures the mouse.
+    #[arg(long, value_enum, default_value_t = MouseMode::On)]
+    pub mouse: MouseMode,
+    /// How the player draws cover art.
+    #[arg(long, value_enum, default_value_t = ArtworkMode::Auto)]
+    pub artwork: ArtworkMode,
+    /// The theme to start with; saved as the new default.
+    #[arg(long, value_parser = validate_theme)]
+    pub theme: Option<String>,
+    /// The visualizer for this run; the saved mode is kept.
+    #[arg(long, value_parser = validate_visualizer)]
+    pub visualizer: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

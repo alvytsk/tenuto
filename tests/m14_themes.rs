@@ -58,6 +58,34 @@ fn tui_theme_parses_a_stored_spelling_and_names_the_valid_set_when_rejected() {
     );
 }
 
+// ----------------------------------------- the bare form of the theme flag
+
+/// The bare form parses the same flag — `tenuto --theme winamp` opens the
+/// player with that palette (and saves it, like the `tui` form), an unknown
+/// spelling is refused with the valid set named, and the bare invocation
+/// with no flags carries `None`.
+#[test]
+fn bare_theme_parses_a_stored_spelling_and_names_the_valid_set_when_rejected() {
+    let parsed = Cli::try_parse_from(["tenuto", "--theme", "winamp"]).expect("winamp parses");
+    assert!(
+        parsed.command.is_none(),
+        "the bare form carries no subcommand"
+    );
+    assert_eq!(parsed.theme.as_deref(), Some("winamp"));
+
+    let error = Cli::try_parse_from(["tenuto", "--theme", "dracula"])
+        .expect_err("an unknown theme is a usage error");
+    assert!(
+        error
+            .to_string()
+            .contains("valid: gruvbox, winamp, nord, solarized-dark"),
+        "{error}"
+    );
+
+    let parsed = Cli::try_parse_from(["tenuto"]).expect("the bare form parses");
+    assert_eq!(parsed.theme, None);
+}
+
 // ----------------------------------------- §2.2: the background fill pass
 
 mod background_fill {

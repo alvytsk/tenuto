@@ -78,6 +78,76 @@ fn version_flag_prints_the_package_version() {
     );
 }
 
+/// The bare form takes the same four flags with the same help: the Options
+/// block of the bare long help is pinned byte-exactly, and the bare
+/// `--mouse`/`--artwork` defaults are the `tui` ones.
+#[test]
+fn the_bare_command_takes_the_player_flags_with_the_same_help()
+-> Result<(), Box<dyn std::error::Error>> {
+    const BARE_OPTIONS_HELP: &str = concat!(
+        "Options:\n",
+        "      --mouse <MOUSE>\n",
+        "          Whether the player captures the mouse\n",
+        "          \n",
+        "          [default: on]\n",
+        "          [possible values: on, off]\n",
+        "\n",
+        "      --artwork <ARTWORK>\n",
+        "          How the player draws cover art\n",
+        "          \n",
+        "          [default: auto]\n",
+        "          [possible values: auto, blocks, off]\n",
+        "\n",
+        "      --theme <THEME>\n",
+        "          The theme to start with; saved as the new default\n",
+        "\n",
+        "      --visualizer <VISUALIZER>\n",
+        "          The visualizer for this run; the saved mode is kept\n",
+        "\n",
+        "  -h, --help\n",
+        "          Print help\n",
+        "\n",
+        "  -V, --version\n",
+        "          Print version\n",
+    );
+    let parsed = Cli::try_parse_from(["tenuto"])?;
+    assert_eq!(
+        (parsed.mouse, parsed.artwork),
+        (MouseMode::On, ArtworkMode::Auto),
+        "the bare form defaults like `tui`"
+    );
+    assert_eq!(parsed.theme, None);
+    assert_eq!(parsed.visualizer, None);
+
+    let bare = Cli::try_parse_from([
+        "tenuto",
+        "--mouse",
+        "off",
+        "--artwork",
+        "blocks",
+        "--theme",
+        "winamp",
+        "--visualizer",
+        "scope",
+    ])?;
+    assert_eq!(
+        (bare.mouse, bare.artwork),
+        (MouseMode::Off, ArtworkMode::Blocks)
+    );
+    assert_eq!(bare.theme.as_deref(), Some("winamp"));
+    assert_eq!(bare.visualizer.as_deref(), Some("scope"));
+    assert!(bare.command.is_none(), "still no subcommand");
+
+    let mut command = Cli::command();
+    let help = command.render_long_help().to_string();
+    let options = help
+        .split("Options:\n")
+        .nth(1)
+        .ok_or("the bare help has an Options block")?;
+    assert_eq!(options, BARE_OPTIONS_HELP.trim_start_matches("Options:\n"));
+    Ok(())
+}
+
 /// M9 foundation cleanup §5: `MouseMode` and `ArtworkMode` move modules,
 /// and `tui`'s flags must parse, default and print exactly as before. A
 /// bare `tenuto` uses `default()`, so that is pinned too.

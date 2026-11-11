@@ -69,14 +69,14 @@ const HELP_LINE: &str =
 /// else dispatches to [`crate::commands`], which prints every line a feed
 /// command reports and maps a partial failure to a failing exit status.
 pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
-    // A bare `tenuto` opens the player. The defaults are the ones
-    // `tenuto tui` applies when neither flag is given.
+    // A bare `tenuto` opens the player, with the flags the bare form
+    // parsed — the same four the `tui` subcommand takes.
     let Some(command) = cli.command else {
         return crate::tui::run(crate::tui::TuiOptions {
-            mouse: crate::tui::MouseMode::default(),
-            artwork: crate::tui::images::ArtworkMode::default(),
-            theme: None,
-            visualizer: None,
+            mouse: cli.mouse,
+            artwork: cli.artwork,
+            theme: cli.theme,
+            visualizer: cli.visualizer,
         })
         .map_err(AppError::from);
     };
