@@ -95,7 +95,6 @@ mod background_fill {
 
     use tenuto::application::transport::PlaybackPhase;
     use tenuto::tui::render::{Visuals, draw};
-    use tenuto::tui::spectrum::VisualizerMode;
     use tenuto::tui::state::UiState;
     use tenuto::tui::theme::{Theme, ThemeId};
 
@@ -158,7 +157,7 @@ mod background_fill {
     fn a_winamp_themed_frame_fills_every_cell() {
         let theme = ThemeId::Winamp.theme();
         let base = theme.bg.expect("winamp paints a background");
-        let ui = UiState::new(true).with_appearance(theme, VisualizerMode::Bars);
+        let ui = UiState::new(true).with_appearance(theme);
         let buffer = filled_buffer(100, 30, &ui);
         assert_backgrounds(&buffer, 100, 30, &theme, base);
     }
@@ -181,7 +180,7 @@ mod background_fill {
     fn every_tier_fills_completely() {
         let theme = ThemeId::Winamp.theme();
         let base = theme.bg.expect("winamp paints a background");
-        let ui = UiState::new(true).with_appearance(theme, VisualizerMode::Bars);
+        let ui = UiState::new(true).with_appearance(theme);
         for (width, height) in [(80, 28), (79, 27), (60, 21), (49, 17)] {
             let buffer = filled_buffer(width, height, &ui);
             assert_backgrounds(&buffer, width, height, &theme, base);

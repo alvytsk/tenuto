@@ -6,7 +6,6 @@ use clap::{Parser, Subcommand};
 
 use crate::tui::MouseMode;
 use crate::tui::images::ArtworkMode;
-use crate::tui::spectrum::VisualizerMode;
 use crate::tui::theme::ThemeId;
 
 #[derive(Debug, Parser)]
@@ -34,9 +33,6 @@ pub struct Cli {
     /// The theme to start with; saved as the new default.
     #[arg(long, value_parser = validate_theme)]
     pub theme: Option<String>,
-    /// The visualizer for this run; the saved mode is kept.
-    #[arg(long, value_parser = validate_visualizer)]
-    pub visualizer: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,9 +77,6 @@ pub enum CliCommand {
         /// The theme to start with; saved as the new default.
         #[arg(long, value_parser = validate_theme)]
         theme: Option<String>,
-        /// The visualizer for this run; the saved mode is kept.
-        #[arg(long, value_parser = validate_visualizer)]
-        visualizer: Option<String>,
     },
     /// List every subscription.
     Feeds,
@@ -139,11 +132,4 @@ fn validate_theme(value: &str) -> Result<String, String> {
         .ok_or_else(|| {
             format!("unknown theme \"{value}\" (valid: gruvbox, winamp, nord, solarized-dark)")
         })
-}
-
-/// §1.3: the visualizer validates the same way, over its three-mode set.
-fn validate_visualizer(value: &str) -> Result<String, String> {
-    VisualizerMode::from_stored(value)
-        .map(|_| value.to_owned())
-        .ok_or_else(|| format!("unknown visualizer \"{value}\" (valid: bars, scope, flow)"))
 }

@@ -47,9 +47,6 @@ pub const FRAME_MAX_AGE: Duration = Duration::from_millis(150);
 /// `level = max(new, previous × SMOOTHING)` between successive frames of one
 /// mapping.
 pub const SMOOTHING: f32 = 0.85;
-/// The reference output width of a frame's decimated waveform: one signed
-/// point per column (§1.1).
-pub const WAVEFORM_COLUMNS: usize = 96;
 
 /// `1 s / MAX_FRAMES_PER_SECOND`.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(1_000 / MAX_FRAMES_PER_SECOND as u64);
@@ -73,11 +70,6 @@ pub struct SpectrumFrame {
     pub session_rev: u64,
     pub bands: Vec<(f64, f64)>,
     pub levels: Vec<f32>,
-    /// The block's decimated waveform trace from [`waveform_points`],
-    /// present only while a listener has asked for scope mode since the
-    /// last frame (`SpectrumHandle::set_wants_waveform`). When nobody wants
-    /// it this is `None` and the worker's work per pass is unchanged.
-    pub waveform: Option<Vec<f32>>,
     pub at: Nanos,
     pub published_at: Instant,
 }
@@ -87,34 +79,6 @@ pub struct SpectrumFrame {
 pub fn frame_is_fresh(frame: &SpectrumFrame, now: Instant) -> bool {
     now.checked_duration_since(frame.published_at)
         .is_some_and(|age| age < FRAME_MAX_AGE)
-}
-
-/// Decimates one block of interleaved PCM into exactly [`WAVEFORM_COLUMNS`]
-/// signed points for the scope's trace. Column `c` covers the samples
-/// `[c * len / WAVEFORM_COLUMNS, (c+1) * len / WAVEFORM_COLUMNS)` in plain
-/// `usize` math and takes the sample at the slice's midpoint index — the
-/// wave itself, not an envelope a trace could never be recovered from. A
-/// slice that covers no sample (the input is shorter than the columns
-/// before it) contributes `0.0`, so an empty input decimates to 96 midline
-/// points. A non-finite sample is silence — the same rule the levels follow
-/// in `Analysis::accept` — and every point clamps to `[-1.0, 1.0]`, the
-/// range the widget renders. Pure: the same samples always decimate to the
-/// same points.
-pub fn waveform_points(samples: &[f32]) -> Vec<f32> {
-    let len = samples.len();
-    let mut points = Vec::with_capacity(WAVEFORM_COLUMNS);
-    for column in 0..WAVEFORM_COLUMNS {
-        let start = column * len / WAVEFORM_COLUMNS;
-        let end = (column + 1) * len / WAVEFORM_COLUMNS;
-        let point = if start < end {
-            let sample = samples[start + (end - start) / 2];
-            if sample.is_finite() { sample } else { 0.0 }
-        } else {
-            0.0
-        };
-        points.push(point.clamp(-1.0, 1.0));
-    }
-    points
 }
 
 /// The label a tap block carries, and the key a mapping is published under.
@@ -142,9 +106,6 @@ pub struct AnalyzedWindow {
     pub session_rev: u64,
     pub bands: Vec<(f64, f64)>,
     pub levels: Vec<f32>,
-    /// The block's decimated waveform trace, or `None` when no listener
-    /// asked for it this pass.
-    pub waveform: Option<Vec<f32>>,
     /// The predicted output instant of the block that completed the window.
     pub predicted: Nanos,
 }
@@ -300,7 +261,6 @@ impl FrameSchedule {
             session_rev,
             bands,
             mut levels,
-            waveform,
             predicted,
         } = window;
         if let Some((previous_key, previous)) = &self.smoothed
@@ -321,8 +281,6 @@ impl FrameSchedule {
             session_rev,
             bands,
             levels,
-            // The trace is honest: copied verbatim, never smoothed.
-            waveform,
             at: predicted,
             published_at: now,
         }
@@ -360,7 +318,6 @@ impl Analysis {
         descriptor: &TapDescriptor,
         mapping: &TapMapping,
         samples: &[f32],
-        wants_waveform: bool,
         schedule: &mut FrameSchedule,
     ) {
         let key = MappingKey::of(descriptor);
@@ -400,15 +357,11 @@ impl Analysis {
                 *level = 0.0;
             }
         }
-        // Only the block that completes a window pays for the decimation,
-        // and only when a listener actually wants the waveform.
-        let waveform = wants_waveform.then(|| waveform_points(samples));
         schedule.offer(AnalyzedWindow {
             key,
             session_rev: mapping.session_rev,
             bands: self.bands.clone(),
             levels,
-            waveform,
             predicted: descriptor.predicted,
         });
     }
@@ -428,10 +381,6 @@ struct Shared {
     /// the worker last reset under, and only a frame tagged with the current
     /// value is ever handed out.
     switches: AtomicU64,
-    /// Set while a listener wants each frame's decimated waveform (scope
-    /// mode). A level, not an event: the runner re-reads it on every enabled
-    /// pass (≤10 ms), so no wake travels on it.
-    wants_waveform: AtomicBool,
     latest: Mutex<Option<(u64, SpectrumFrame)>>,
     shutdown: AtomicBool,
 }
@@ -462,15 +411,6 @@ impl SpectrumHandle {
             *self.shared.latest() = None;
         }
         let _ = self.control.send(Control::Wake);
-    }
-
-    /// Requests (or cancels) each published frame's decimated waveform for
-    /// the scope. A Relaxed store is enough — the runner re-reads the flag
-    /// on every enabled pass, and a frame or two of lag is invisible at
-    /// [`MAX_FRAMES_PER_SECOND`] — so no wake is sent: when nothing else
-    /// stirs, there is no frame to carry a waveform anyway.
-    pub fn set_wants_waveform(&self, wanted: bool) {
-        self.shared.wants_waveform.store(wanted, Ordering::Relaxed);
     }
 
     /// The latest published frame, if analysis is enabled and one exists.
@@ -543,7 +483,6 @@ pub(crate) fn spawn(
     let shared = Arc::new(Shared {
         enabled: Arc::new(AtomicBool::new(false)),
         switches: AtomicU64::new(0),
-        wants_waveform: AtomicBool::new(false),
         latest: Mutex::new(None),
         shutdown: AtomicBool::new(false),
     });
@@ -671,9 +610,6 @@ impl Runner {
     }
 
     fn analyze_blocks(&mut self) {
-        // Read once per pass: every block of this pass sees the same
-        // waveform request, whatever the front end does mid-pass.
-        let wants_waveform = self.shared.wants_waveform.load(Ordering::Relaxed);
         let Self {
             readers,
             registry,
@@ -696,7 +632,7 @@ impl Runner {
                         if mapping.sample_rate == descriptor.sample_rate
                             && mapping.channels == descriptor.channels =>
                     {
-                        analysis.accept(&descriptor, &mapping, scratch, wants_waveform, schedule);
+                        analysis.accept(&descriptor, &mapping, scratch, schedule);
                     }
                     // Unknown, retired or mislabelled: discarded.
                     _ => {}
@@ -750,7 +686,7 @@ mod tests {
         let mut schedule = FrameSchedule::default();
         let mut samples = vec![0.25_f32; super::super::bands::WINDOW];
         samples[7] = f32::NAN;
-        analysis.accept(&descriptor(0), &MAPPING, &samples, false, &mut schedule);
+        analysis.accept(&descriptor(0), &MAPPING, &samples, &mut schedule);
         let SlotUpdate::Publish(frame) = schedule.tick(Instant::now(), Nanos(0)) else {
             panic!("a full window was not published");
         };
@@ -767,7 +703,6 @@ mod tests {
         let shared = Arc::new(Shared {
             enabled: Arc::new(AtomicBool::new(true)),
             switches: AtomicU64::new(0),
-            wants_waveform: AtomicBool::new(false),
             latest: Mutex::new(None),
             shutdown: AtomicBool::new(false),
         });
@@ -809,7 +744,6 @@ mod tests {
             session_rev: 1,
             bands: vec![(40.0, 85.0)],
             levels: vec![1.0],
-            waveform: None,
             at: Nanos(0),
             published_at: Instant::now(),
         };
@@ -823,23 +757,6 @@ mod tests {
         handle.set_enabled(true);
         assert_eq!(handle.latest(), None);
         thread.stop();
-        thread.stop();
-    }
-
-    /// §1.1: the waveform request is a cheap level, not an event: a Relaxed
-    /// store on `Shared`, and no wake — the runner re-reads it on every
-    /// enabled pass (≤10 ms).
-    #[test]
-    fn set_wants_waveform_sets_and_clears_the_shared_flag() {
-        let (handle, _port, mut thread) = spawn(Arc::new(AtomicU64::new(0)));
-        assert!(
-            !handle.shared.wants_waveform.load(Ordering::Relaxed),
-            "nobody has asked yet"
-        );
-        handle.set_wants_waveform(true);
-        assert!(handle.shared.wants_waveform.load(Ordering::Relaxed));
-        handle.set_wants_waveform(false);
-        assert!(!handle.shared.wants_waveform.load(Ordering::Relaxed));
         thread.stop();
     }
 }

@@ -155,7 +155,6 @@ fn an_unchanged_frame_expires_even_when_its_revision_still_matches() {
         session_rev: 1,
         bands: vec![(40.0, 85.0)],
         levels: vec![1.0],
-        waveform: None,
         at: Nanos(0),
         published_at: now,
     };
@@ -178,7 +177,6 @@ fn window(key: MappingKey, predicted_ms: u64, level: f32) -> AnalyzedWindow {
         session_rev: 7,
         bands: vec![(40.0, 85.0), (85.0, 170.0)],
         levels: vec![level, level],
-        waveform: None,
         predicted: Nanos(predicted_ms * 1_000_000),
     }
 }

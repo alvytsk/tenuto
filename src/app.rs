@@ -70,13 +70,12 @@ const HELP_LINE: &str =
 /// command reports and maps a partial failure to a failing exit status.
 pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
     // A bare `tenuto` opens the player, with the flags the bare form
-    // parsed — the same four the `tui` subcommand takes.
+    // parsed — the same three the `tui` subcommand takes.
     let Some(command) = cli.command else {
         return crate::tui::run(crate::tui::TuiOptions {
             mouse: cli.mouse,
             artwork: cli.artwork,
             theme: cli.theme,
-            visualizer: cli.visualizer,
         })
         .map_err(AppError::from);
     };
@@ -133,12 +132,10 @@ pub fn run(cli: cli::Cli) -> Result<RunOutcome, AppError> {
             mouse,
             artwork,
             theme,
-            visualizer,
         } => crate::tui::run(crate::tui::TuiOptions {
             mouse,
             artwork,
             theme,
-            visualizer,
         })
         .map_err(AppError::from),
         command => crate::commands::run(command)

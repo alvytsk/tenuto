@@ -78,7 +78,17 @@ fn version_flag_prints_the_package_version() {
     );
 }
 
-/// The bare form takes the same four flags with the same help: the Options
+/// M14 rollback: the visualizer flag is gone from both command forms —
+/// an unknown argument at parse time, on the bare invocation and on `tui`.
+#[test]
+fn the_visualizer_flag_is_gone_from_both_command_forms() {
+    let bare = Cli::try_parse_from(["tenuto", "--visualizer", "scope"]);
+    let tui = Cli::try_parse_from(["tenuto", "tui", "--visualizer", "scope"]);
+    assert!(bare.is_err());
+    assert!(tui.is_err());
+}
+
+/// The bare form takes the same three flags with the same help: the Options
 /// block of the bare long help is pinned byte-exactly, and the bare
 /// `--mouse`/`--artwork` defaults are the `tui` ones.
 #[test]
@@ -101,9 +111,6 @@ fn the_bare_command_takes_the_player_flags_with_the_same_help()
         "      --theme <THEME>\n",
         "          The theme to start with; saved as the new default\n",
         "\n",
-        "      --visualizer <VISUALIZER>\n",
-        "          The visualizer for this run; the saved mode is kept\n",
-        "\n",
         "  -h, --help\n",
         "          Print help\n",
         "\n",
@@ -117,7 +124,6 @@ fn the_bare_command_takes_the_player_flags_with_the_same_help()
         "the bare form defaults like `tui`"
     );
     assert_eq!(parsed.theme, None);
-    assert_eq!(parsed.visualizer, None);
 
     let bare = Cli::try_parse_from([
         "tenuto",
@@ -127,15 +133,12 @@ fn the_bare_command_takes_the_player_flags_with_the_same_help()
         "blocks",
         "--theme",
         "winamp",
-        "--visualizer",
-        "scope",
     ])?;
     assert_eq!(
         (bare.mouse, bare.artwork),
         (MouseMode::Off, ArtworkMode::Blocks)
     );
     assert_eq!(bare.theme.as_deref(), Some("winamp"));
-    assert_eq!(bare.visualizer.as_deref(), Some("scope"));
     assert!(bare.command.is_none(), "still no subcommand");
 
     let mut command = Cli::command();
@@ -173,9 +176,6 @@ fn the_tui_flags_keep_their_defaults_and_help() -> Result<(), Box<dyn std::error
         "\n",
         "      --theme <THEME>\n",
         "          The theme to start with; saved as the new default\n",
-        "\n",
-        "      --visualizer <VISUALIZER>\n",
-        "          The visualizer for this run; the saved mode is kept\n",
         "\n",
         "  -h, --help\n",
         "          Print help\n",
