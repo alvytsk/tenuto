@@ -119,8 +119,7 @@ impl ThemeId {
     }
 
     /// The exact spelling written to storage. Total over the four variants:
-    /// an explicitly chosen theme always has a spelling, unlike the visualizer
-    /// default, which is stored as an absence.
+    /// an explicitly chosen theme always has a spelling.
     pub fn as_stored(self) -> Option<&'static str> {
         match self {
             Self::Gruvbox => Some("gruvbox"),

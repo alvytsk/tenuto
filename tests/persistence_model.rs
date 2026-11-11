@@ -269,9 +269,20 @@ fn a_full_state_serializes_to_exactly_these_bytes() {
         r#""display":{"title":null,"artist":null,"album":null,"year":null,"#,
         r#""duration_ms":1000,"duration_source":"decoded"}}],"active_entry":1}],"#,
         r#""playing":1,"next_entry_id":3,"next_playlist_id":2,"repeat_mode":null,"#,
-        r#""theme":null,"visualizer_mode":null}"#,
+        r#""theme":null}"#,
     );
     let state: PersistedState = serde_json::from_str(STATE).unwrap();
     assert_eq!(state.volume(), Volume::new(0.5));
     assert_eq!(serde_json::to_string(&state).unwrap(), STATE);
+}
+
+/// The visualizer rollback: a state file written while `visualizer_mode`
+/// existed still carries the key, which no build after the rollback knows.
+/// serde ignores unknown keys on the way in, so the old shape still loads —
+/// the schema stays 4 and nothing migrates.
+#[test]
+fn a_saved_visualizer_mode_key_is_ignored() {
+    let raw = r#"{"schema_version":4,"theme":"winamp","visualizer_mode":"flow"}"#;
+    let state: PersistedState = serde_json::from_str(raw).unwrap();
+    assert_eq!(state.theme(), Some("winamp"));
 }
