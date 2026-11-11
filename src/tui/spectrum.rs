@@ -14,15 +14,16 @@
 //!
 //! M14 makes the row selectable: [`VisualizerMode`] names what it draws,
 //! and `v` cycles bars → scope → flow → bars. The scope draws the frame's
-//! decimated waveform about a midline ([`draw_scope`]); like the levels, the
-//! drawn waveform lives in [`SpectrumDisplay`] between draws and decays when
-//! no fresh frame carries one. Flow keeps a per-column energy ring
-//! ([`FlowHistory`]): every fresh frame resamples into it, frames that stop
-//! cool it toward silence, and [`draw_flow`] stacks each column bottom-up,
-//! colored green → amber → cream by energy. Storage folds the default to
-//! absent — `Bars` never serializes — but the spelling vocabulary here is
-//! the CLI's `--visualizer` too, where `bars` is a legal value; parsing is
-//! total over the vocabulary, and only storage hides the default.
+//! decimated waveform as a connected trace about a midline ([`draw_scope`]);
+//! like the levels, the drawn waveform lives in [`SpectrumDisplay`] between
+//! draws and decays when no fresh frame carries one. Flow keeps a
+//! per-column energy ring ([`FlowHistory`]): every fresh frame resamples
+//! into it, frames that stop cool it toward silence, and [`draw_flow`]
+//! stacks each column bottom-up, colored green → amber → cream by energy.
+//! Storage folds the default to absent — `Bars` never serializes — but the
+//! spelling vocabulary here is the CLI's `--visualizer` too, where `bars`
+//! is a legal value; parsing is total over the vocabulary, and only
+//! storage hides the default.
 
 use std::time::{Duration, Instant};
 
@@ -129,10 +130,10 @@ impl<'a> DrawSource<'a> {
         self.drawable(frame, now).then_some(frame.levels.as_slice())
     }
 
-    /// The frame's decimated `(min, peak)` waveform, under the same gate
-    /// chain as [`Self::fresh_levels`]. `None` also when the frame carries no
+    /// The frame's decimated waveform trace, under the same gate chain as
+    /// [`Self::fresh_levels`]. `None` also when the frame carries no
     /// waveform, as when nobody has asked for scope since it was analyzed.
-    pub fn fresh_waveform(&self, now: Instant) -> Option<&'a [(f32, f32)]> {
+    pub fn fresh_waveform(&self, now: Instant) -> Option<&'a [f32]> {
         let frame = self.frame?;
         let waveform = frame.waveform.as_deref()?;
         self.drawable(frame, now).then_some(waveform)
@@ -244,10 +245,10 @@ impl FlowHistory {
 pub struct SpectrumDisplay {
     levels: Vec<f32>,
     peaks: Vec<f32>,
-    /// The drawn waveform between draws, scope mode's state: `(min, peak)`
-    /// pairs about the midline, decayed like the levels when no fresh frame
-    /// carries one.
-    waveform: Option<Vec<(f32, f32)>>,
+    /// The drawn waveform between draws, scope mode's state: the frame's
+    /// signed points about the midline, decayed like the levels when no
+    /// fresh frame carries one.
+    waveform: Option<Vec<f32>>,
     /// The flow's per-column energy history, kept across draws so each
     /// fresh frame can push into it and stopped frames can cool it.
     flow: FlowHistory,
@@ -311,9 +312,8 @@ impl SpectrumDisplay {
             Some(waveform) => self.waveform = Some(waveform.to_vec()),
             None => {
                 if let Some(waveform) = &mut self.waveform {
-                    for (min, peak) in waveform {
-                        *min *= DECAY_PER_DRAW;
-                        *peak *= DECAY_PER_DRAW;
+                    for point in waveform {
+                        *point *= DECAY_PER_DRAW;
                     }
                 }
             }
@@ -364,7 +364,7 @@ impl SpectrumDisplay {
 
     /// The drawn waveform between draws, `None` until scope took one: the
     /// row then shows the flat midline.
-    pub fn waveform(&self) -> Option<&[(f32, f32)]> {
+    pub fn waveform(&self) -> Option<&[f32]> {
         self.waveform
             .as_deref()
             .filter(|waveform| !waveform.is_empty())
@@ -375,52 +375,64 @@ impl SpectrumDisplay {
 /// the midline down to the minimum's below it.
 const SCOPE_BLOCK: &str = "█";
 
-/// The waveform's `(min, peak)` envelope about the midline: one column per
-/// `area.width`, resampled from the frame's [`WAVEFORM_COLUMNS`] by nearest
-/// index, green from where the peak reaches up to where the minimum dips
-/// down, both clamped into the area. A silent column (`min == peak == 0`) is
-/// the midline cell in the muted color while two rows can spare a line,
-/// nothing one row tall; absent or short data is silence, so a stale or
-/// waveform-less frame falls flat exactly as bars fall.
-pub fn draw_scope(buffer: &mut Buffer, area: Rect, waveform: Option<&[(f32, f32)]>, theme: &Theme) {
+/// The waveform trace about the midline: one column per `area.width`,
+/// resampled from the frame's [`WAVEFORM_COLUMNS`] points by nearest index.
+/// The column's cell sits at `midline - round(point * half)`, clamped into
+/// the area, and the cells between it and the previous column's row fill in
+/// too, so the trace reads as a line — the wave itself — and not dots;
+/// column 0 has no predecessor. Every painted cell is `theme.green`.
+///
+/// Absent points, or points that are all zero (a silent block), are the
+/// existing silence: muted midline cells while two rows can spare a line,
+/// nothing one row tall. No idle animation — a silent block is a flat
+/// line, which is honest.
+pub fn draw_scope(buffer: &mut Buffer, area: Rect, waveform: Option<&[f32]>, theme: &Theme) {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
     if width == 0 || height == 0 {
         return;
     }
     let midline = area.y + area.height / 2;
+    // Silence: nothing to trace, so the muted midline (and at one row,
+    // nothing) is all a silent block ever draws.
+    if waveform.is_none_or(|points| {
+        points
+            .iter()
+            .all(|point| !point.is_finite() || *point == 0.0)
+    }) {
+        if height >= 2 {
+            for x in area.x..area.right() {
+                if let Some(cell) = buffer.cell_mut((x, midline)) {
+                    cell.set_symbol(SCOPE_BLOCK).set_fg(theme.muted);
+                }
+            }
+        }
+        return;
+    }
     let half = f32::from(area.height / 2);
+    let top = i32::from(area.y);
+    let bottom = i32::from(area.bottom()) - 1;
+    // The previous column's trace row; column 0 has none, so it draws its
+    // cell alone.
+    let mut previous: Option<u16> = None;
     for x in area.x..area.right() {
         let column = usize::from(x - area.x) * WAVEFORM_COLUMNS / width;
-        // A non-finite bound is silence, the rule the levels draw by.
-        let (min, peak) = waveform
-            .and_then(|waveform| waveform.get(column))
-            .and_then(|&(min, peak)| {
-                min.is_finite()
-                    .then_some(min)
-                    .zip(peak.is_finite().then_some(peak))
-            })
-            .unwrap_or((0.0, 0.0));
-        if min == 0.0 && peak == 0.0 {
-            if height >= 2
-                && let Some(cell) = buffer.cell_mut((x, midline))
-            {
-                cell.set_symbol(SCOPE_BLOCK).set_fg(theme.muted);
-            }
-            continue;
-        }
-        // Both extents round into [0, half], so they stay in the area.
-        let up = (peak.clamp(0.0, 1.0) * half).round() as u16;
-        let down = (min.abs().clamp(0.0, 1.0) * half).round() as u16;
-        let top = midline.saturating_sub(up);
-        let bottom = midline
-            .saturating_add(down)
-            .min(area.bottom().saturating_sub(1));
-        for y in top..=bottom {
+        // A non-finite point is silence, the rule the levels draw by.
+        let point = waveform
+            .and_then(|points| points.get(column))
+            .copied()
+            .filter(|point| point.is_finite())
+            .unwrap_or(0.0)
+            .clamp(-1.0, 1.0);
+        let row = (i32::from(midline) - (point * half).round() as i32).clamp(top, bottom) as u16;
+        let from = previous.map_or(row, |previous| previous.min(row));
+        let to = previous.map_or(row, |previous| previous.max(row));
+        for y in from..=to {
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_symbol(SCOPE_BLOCK).set_fg(theme.green);
             }
         }
+        previous = Some(row);
     }
 }
 

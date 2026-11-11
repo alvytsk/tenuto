@@ -45,7 +45,7 @@ pub struct Visuals<'a> {
     pub peaks: Option<&'a [f32]>,
     /// The scope's drawn `(min, peak)` waveform, kept across draws so it can
     /// decay.
-    pub waveform: Option<&'a [(f32, f32)]>,
+    pub waveform: Option<&'a [f32]>,
     /// The flow's per-column energy history, kept across draws so each frame
     /// pushes into it.
     pub flow: Option<&'a FlowHistory>,
@@ -599,7 +599,7 @@ fn draw_spectrum(
     area: Rect,
     levels: Option<&[f32]>,
     peaks: Option<&[f32]>,
-    waveform: Option<&[(f32, f32)]>,
+    waveform: Option<&[f32]>,
     flow: Option<&FlowHistory>,
     mode: VisualizerMode,
     theme: &Theme,
@@ -1316,18 +1316,19 @@ mod tests {
         assert_eq!(column(2), [" ", " ", " ", "█"]);
     }
 
-    /// §1.2's minimal tier: one row cannot stack a scope's envelope or a
-    /// flow's history, so every mode renders the bars row there — spare on
-    /// the left, the gap column blank, loud bars amber. Scope at this height
-    /// would paint its midline green and flow would paint every column
-    /// cream, so the amber bar beside the blanks proves the fallback.
+    /// §1.2's minimal tier: one row cannot stack a scope's trace or a
+    /// flow's field, so every mode renders the bars row there — spare on
+    /// the left, the gap column blank, loud bars amber. Scope at this
+    /// height would paint its midline green and flow would paint every
+    /// column cream, so the amber bar beside the blanks proves the
+    /// fallback.
     #[test]
     fn one_row_of_any_mode_is_bars() {
         let theme = Theme::default();
         let area = Rect::new(0, 0, 4, 1);
         let levels = [1.0_f32; 2];
         let peaks = [1.0_f32; 2];
-        let waveform = [(-1.0_f32, 1.0_f32); 4];
+        let waveform = [0.5_f32; 4];
         let mut history = FlowHistory::default();
         history.push(4, Some(&[1.0_f32; 4]));
         for mode in [

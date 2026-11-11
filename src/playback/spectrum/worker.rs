@@ -47,8 +47,8 @@ pub const FRAME_MAX_AGE: Duration = Duration::from_millis(150);
 /// `level = max(new, previous × SMOOTHING)` between successive frames of one
 /// mapping.
 pub const SMOOTHING: f32 = 0.85;
-/// The reference output width of a frame's decimated waveform: one
-/// `(min, peak)` pair per column (§1.1).
+/// The reference output width of a frame's decimated waveform: one signed
+/// point per column (§1.1).
 pub const WAVEFORM_COLUMNS: usize = 96;
 
 /// `1 s / MAX_FRAMES_PER_SECOND`.
@@ -73,12 +73,11 @@ pub struct SpectrumFrame {
     pub session_rev: u64,
     pub bands: Vec<(f64, f64)>,
     pub levels: Vec<f32>,
-    /// The block's decimated `(min, peak)` envelope from
-    /// [`decimate_waveform`], present only while a listener has asked for
-    /// scope mode since the last frame (`SpectrumHandle::set_wants_waveform`).
-    /// When nobody wants it this is `None` and the worker's work per pass is
-    /// unchanged.
-    pub waveform: Option<Vec<(f32, f32)>>,
+    /// The block's decimated waveform trace from [`waveform_points`],
+    /// present only while a listener has asked for scope mode since the
+    /// last frame (`SpectrumHandle::set_wants_waveform`). When nobody wants
+    /// it this is `None` and the worker's work per pass is unchanged.
+    pub waveform: Option<Vec<f32>>,
     pub at: Nanos,
     pub published_at: Instant,
 }
@@ -91,36 +90,31 @@ pub fn frame_is_fresh(frame: &SpectrumFrame, now: Instant) -> bool {
 }
 
 /// Decimates one block of interleaved PCM into exactly [`WAVEFORM_COLUMNS`]
-/// `(min, peak)` pairs for the scope's envelope. Column `c` covers the
-/// samples `[c * len / WAVEFORM_COLUMNS, (c+1) * len / WAVEFORM_COLUMNS)` in
-/// plain `usize` math; a column that covers no sample (the input is shorter
-/// than the columns before it) is `(0.0, 0.0)`, so an empty input decimates
-/// to 96 midline pairs. Each bound clamps to `[-1.0, 1.0]`, the range the
-/// widget renders, and a non-finite sample is silence — the same rule the
-/// levels follow in `Analysis::accept`. Pure: the same samples always
-/// decimate to the same pairs.
-pub fn decimate_waveform(samples: &[f32]) -> Vec<(f32, f32)> {
+/// signed points for the scope's trace. Column `c` covers the samples
+/// `[c * len / WAVEFORM_COLUMNS, (c+1) * len / WAVEFORM_COLUMNS)` in plain
+/// `usize` math and takes the sample at the slice's midpoint index — the
+/// wave itself, not an envelope a trace could never be recovered from. A
+/// slice that covers no sample (the input is shorter than the columns
+/// before it) contributes `0.0`, so an empty input decimates to 96 midline
+/// points. A non-finite sample is silence — the same rule the levels follow
+/// in `Analysis::accept` — and every point clamps to `[-1.0, 1.0]`, the
+/// range the widget renders. Pure: the same samples always decimate to the
+/// same points.
+pub fn waveform_points(samples: &[f32]) -> Vec<f32> {
     let len = samples.len();
-    let mut columns = Vec::with_capacity(WAVEFORM_COLUMNS);
+    let mut points = Vec::with_capacity(WAVEFORM_COLUMNS);
     for column in 0..WAVEFORM_COLUMNS {
         let start = column * len / WAVEFORM_COLUMNS;
         let end = (column + 1) * len / WAVEFORM_COLUMNS;
-        let bounds = samples[start..end]
-            .iter()
-            .copied()
-            .fold(None::<(f32, f32)>, |acc, sample| {
-                let sample = if sample.is_finite() { sample } else { 0.0 };
-                match acc {
-                    Some((min, max)) => Some((min.min(sample), max.max(sample))),
-                    None => Some((sample, sample)),
-                }
-            });
-        // A column that covers no sample is the flat midline; every real
-        // bound clamps into the unit interval the widget renders.
-        let (min, max) = bounds.unwrap_or((0.0, 0.0));
-        columns.push((min.clamp(-1.0, 1.0), max.clamp(-1.0, 1.0)));
+        let point = if start < end {
+            let sample = samples[start + (end - start) / 2];
+            if sample.is_finite() { sample } else { 0.0 }
+        } else {
+            0.0
+        };
+        points.push(point.clamp(-1.0, 1.0));
     }
-    columns
+    points
 }
 
 /// The label a tap block carries, and the key a mapping is published under.
@@ -148,9 +142,9 @@ pub struct AnalyzedWindow {
     pub session_rev: u64,
     pub bands: Vec<(f64, f64)>,
     pub levels: Vec<f32>,
-    /// The block's decimated waveform, or `None` when no listener asked for
-    /// it this pass.
-    pub waveform: Option<Vec<(f32, f32)>>,
+    /// The block's decimated waveform trace, or `None` when no listener
+    /// asked for it this pass.
+    pub waveform: Option<Vec<f32>>,
     /// The predicted output instant of the block that completed the window.
     pub predicted: Nanos,
 }
@@ -327,7 +321,7 @@ impl FrameSchedule {
             session_rev,
             bands,
             levels,
-            // The envelope is honest: copied verbatim, never smoothed.
+            // The trace is honest: copied verbatim, never smoothed.
             waveform,
             at: predicted,
             published_at: now,
@@ -408,7 +402,7 @@ impl Analysis {
         }
         // Only the block that completes a window pays for the decimation,
         // and only when a listener actually wants the waveform.
-        let waveform = wants_waveform.then(|| decimate_waveform(samples));
+        let waveform = wants_waveform.then(|| waveform_points(samples));
         schedule.offer(AnalyzedWindow {
             key,
             session_rev: mapping.session_rev,

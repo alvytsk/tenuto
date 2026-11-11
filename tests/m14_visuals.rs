@@ -20,7 +20,7 @@ use tenuto::persistence::model::PersistedState;
 use tenuto::playback::output::Nanos;
 use tenuto::playback::spectrum::worker::{
     AnalyzedWindow, FrameSchedule, MappingKey, SlotUpdate, SpectrumFrame, WAVEFORM_COLUMNS,
-    decimate_waveform,
+    waveform_points,
 };
 use tenuto::session::{Action, Session};
 
@@ -184,70 +184,95 @@ fn bare_visualizer_parses_a_stored_spelling_and_names_the_valid_set_when_rejecte
 
 // ------------------------------------------------ the waveform trace points
 
-// ------------------------------------------------ the decimated waveform
-
-/// §1.1: a constant block decimates to the same `(min, peak)` pair in every
-/// one of the 96 output columns.
+/// §1.1: a constant block decimates to that constant in every one of the 96
+/// output points.
 #[test]
-fn a_constant_block_decimates_to_the_same_pair_in_every_column() {
-    let waveform = decimate_waveform(&vec![0.5_f32; 2048]);
-    assert_eq!(waveform.len(), WAVEFORM_COLUMNS);
+fn a_constant_block_decimates_to_the_same_point_in_every_column() {
+    let points = waveform_points(&[0.5_f32; 2048]);
+    assert_eq!(points.len(), WAVEFORM_COLUMNS);
     assert!(
-        waveform.iter().all(|pair| *pair == (0.5, 0.5)),
-        "every column is (0.5, 0.5), got {waveform:?}"
+        points.iter().all(|point| *point == 0.5),
+        "every point is 0.5, got {points:?}"
     );
 }
 
-/// §1.1: column `c` covers samples `[c * len / 96, (c+1) * len / 96)`, so a
-/// spike at sample 1024 of 2048 lands in column 48 (`48 * 2048 / 96 == 1024`)
-/// and nowhere else.
+/// §1.1: column `c` takes the sample at its slice's midpoint: for the slice
+/// `[start, end)` the point is `samples[(start + end) / 2]`, so a block of
+/// distinct in-range marks decimates to exactly those marks read back by
+/// the same tiling.
 #[test]
-fn a_spike_lands_in_the_column_that_covers_its_sample() {
-    let mut samples = vec![0.0_f32; 2048];
-    samples[1024] = -1.0;
-    let waveform = decimate_waveform(&samples);
-    assert_eq!(waveform[48], (-1.0, 0.0), "column 48 covers sample 1024");
+fn a_column_carries_its_slice_midpoint_sample() {
+    let len = 2048_usize;
+    let samples: Vec<f32> = (0..len)
+        .map(|sample| (sample % 200) as f32 / 100.0 - 1.0)
+        .collect();
+    let points = waveform_points(&samples);
+    assert_eq!(points.len(), WAVEFORM_COLUMNS);
+    for (column, point) in points.iter().enumerate() {
+        let start = column * len / WAVEFORM_COLUMNS;
+        let end = (column + 1) * len / WAVEFORM_COLUMNS;
+        let expected = if start < end {
+            samples[(start + end) / 2]
+        } else {
+            0.0
+        };
+        assert_eq!(*point, expected, "column {column}");
+    }
+}
+
+/// §1.1: a 2048-sample 440 Hz sine traces the sine — each point equals the
+/// wave at its midpoint sample, and the trace swings to both sides.
+#[test]
+fn a_sine_block_yields_points_that_trace_the_sine() {
+    let len = 2048_usize;
+    let sine = |i: usize| 0.9 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin();
+    let samples: Vec<f32> = (0..len).map(sine).collect();
+    let points = waveform_points(&samples);
+    let mut above = 0_usize;
+    let mut below = 0_usize;
+    for (column, point) in points.iter().enumerate() {
+        let start = column * len / WAVEFORM_COLUMNS;
+        let end = (column + 1) * len / WAVEFORM_COLUMNS;
+        assert_eq!(*point, sine((start + end) / 2), "column {column}");
+        above += usize::from(*point > 0.1);
+        below += usize::from(*point < -0.1);
+    }
     assert!(
-        waveform
-            .iter()
-            .enumerate()
-            .all(|(c, pair)| c == 48 || *pair == (0.0, 0.0)),
-        "every other column stays on the midline: {waveform:?}"
+        above > 10 && below > 10,
+        "the trace oscillates: {above} above, {below} below"
     );
 }
 
 /// §1.1: a block shorter than the columns it precedes still decimates to 96
-/// pairs, and every column without samples is the flat midline. With ten
-/// samples the samples tile into columns 9, 19, 28, ... (`c * 10 / 96`
-/// reaches 1 only at `c == 10`), so the zeros after the first keep every
-/// column from 10 up empty.
+/// points, and every column without samples is the midline. With ten
+/// samples the samples tile so that only column 9 covers one (`start` and
+/// `end` both reach past zero first at `c == 9`), and columns 10 and up
+/// carry nothing.
 #[test]
 fn a_short_block_zero_fills_the_columns_without_samples() {
     let mut samples = vec![0.0_f32; 10];
     samples[0] = 0.5;
-    let waveform = decimate_waveform(&samples);
-    assert_eq!(waveform.len(), WAVEFORM_COLUMNS);
-    assert_eq!(waveform[9], (0.5, 0.5), "column 9 covers sample 0");
+    let points = waveform_points(&samples);
+    assert_eq!(points.len(), WAVEFORM_COLUMNS);
+    assert_eq!(points[9], 0.5, "column 9's midpoint is sample 0");
     assert!(
-        waveform
+        points
             .iter()
             .enumerate()
-            .all(|(c, pair)| c == 9 || *pair == (0.0, 0.0)),
-        "columns without samples are zero-filled: {waveform:?}"
+            .all(|(c, point)| c == 9 || *point == 0.0),
+        "columns without samples are zero-filled: {points:?}"
     );
     assert!(
-        waveform[10..].iter().all(|pair| *pair == (0.0, 0.0)),
-        "columns 10 and up carry no sample: {waveform:?}"
+        points[10..].iter().all(|point| *point == 0.0),
+        "columns 10 and up carry no sample: {points:?}"
     );
 }
 
-/// §1.1: an empty block is silence — 96 midline pairs, the scope's flat line.
+/// §1.1: an empty block is silence — 96 midline points, the scope's flat
+/// line.
 #[test]
-fn an_empty_block_decimates_to_96_midline_pairs() {
-    assert_eq!(
-        decimate_waveform(&[]),
-        vec![(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS]
-    );
+fn an_empty_block_decimates_to_96_midline_points() {
+    assert_eq!(waveform_points(&[]), vec![0.0_f32; WAVEFORM_COLUMNS]);
 }
 
 /// §1.1: NaN is silence — the same rule the levels follow in
@@ -255,21 +280,23 @@ fn an_empty_block_decimates_to_96_midline_pairs() {
 /// interval the widget renders.
 #[test]
 fn non_finite_samples_are_silence_and_out_of_range_samples_clamp() {
-    let waveform = decimate_waveform(&[f32::NAN; 2048]);
+    let points = waveform_points(&[f32::NAN; 2048]);
     assert!(
-        waveform.iter().all(|pair| *pair == (0.0, 0.0)),
-        "all-NaN input decimates to the midline: {waveform:?}"
+        points.iter().all(|point| *point == 0.0),
+        "all-NaN input decimates to the midline: {points:?}"
     );
 
-    // A NaN beside real samples vanishes from that column's envelope.
+    // A NaN at a column's midpoint is silence there.
     let mut samples = vec![0.5_f32; 2048];
-    samples[3] = f32::NAN;
-    assert_eq!(decimate_waveform(&samples)[0], (0.0, 0.5));
+    samples[10] = f32::NAN;
+    assert_eq!(waveform_points(&samples)[0], 0.0, "NaN midpoint is silence");
 
     let mut samples = vec![0.0_f32; 2048];
-    samples[10] = 2.5;
-    samples[15] = -4.0;
-    assert_eq!(decimate_waveform(&samples)[0], (-1.0, 1.0), "clamped");
+    samples[10] = 2.5; // column 0's midpoint is sample 10
+    samples[31] = -4.0; // column 1's midpoint is sample 31
+    let points = waveform_points(&samples);
+    assert_eq!(points[0], 1.0, "clamped up");
+    assert_eq!(points[1], -1.0, "clamped down");
 }
 
 // ------------------------------------------ the frame carries the waveform
@@ -280,7 +307,7 @@ const KEY: MappingKey = MappingKey {
     epoch: 2,
 };
 
-fn window(level: f32, waveform: Option<Vec<(f32, f32)>>) -> AnalyzedWindow {
+fn window(level: f32, waveform: Option<Vec<f32>>) -> AnalyzedWindow {
     AnalyzedWindow {
         key: KEY,
         session_rev: 7,
@@ -305,14 +332,14 @@ fn published(update: SlotUpdate) -> SpectrumFrame {
 fn a_published_frame_carries_its_window_s_waveform_untouched() {
     let t0 = Instant::now();
     let mut schedule = FrameSchedule::default();
-    let first = vec![(0.25_f32, 0.75_f32), (-0.5_f32, 0.5_f32)];
+    let first = vec![0.25_f32, -0.5, 0.75];
     schedule.offer(window(1.0, Some(first.clone())));
     let frame = published(schedule.tick(t0, Nanos(0)));
     assert_eq!(frame.waveform, Some(first));
 
     // The second publication's level smooths against the first; its
     // waveform must arrive verbatim.
-    let second = vec![(-1.0_f32, 1.0_f32); WAVEFORM_COLUMNS];
+    let second = vec![1.0_f32; WAVEFORM_COLUMNS];
     schedule.offer(window(0.0, Some(second.clone())));
     let frame = published(schedule.tick(t0 + Duration::from_millis(50), Nanos(10)));
     assert_eq!(
@@ -356,7 +383,7 @@ mod scope_display {
         }
     }
 
-    fn frame(published_at: Instant, waveform: Option<Vec<(f32, f32)>>) -> SpectrumFrame {
+    fn frame(published_at: Instant, waveform: Option<Vec<f32>>) -> SpectrumFrame {
         SpectrumFrame {
             session_rev: 9,
             bands: vec![(40.0, 85.0)],
@@ -380,12 +407,13 @@ mod scope_display {
         }
     }
 
-    /// Both tuple entries decayed once toward zero by `DECAY_PER_DRAW`.
-    fn decayed(display: &SpectrumDisplay, min: f32, peak: f32) -> bool {
+    /// Every point decayed once toward zero by `DECAY_PER_DRAW`.
+    fn decayed(display: &SpectrumDisplay, points: &[f32]) -> bool {
         display.waveform().is_some_and(|waveform| {
-            waveform.iter().all(|&(drawn_min, drawn_peak)| {
-                (drawn_min - min * 0.85).abs() < 1e-6 && (drawn_peak - peak * 0.85).abs() < 1e-6
-            })
+            waveform
+                .iter()
+                .zip(points)
+                .all(|(drawn, point)| (drawn - point * 0.85).abs() < 1e-6)
         })
     }
 
@@ -395,8 +423,8 @@ mod scope_display {
     fn scope_takes_a_fresh_matching_waveform() {
         let t0 = Instant::now();
         let np = now_playing();
-        let pairs = vec![(-0.5_f32, 0.25_f32), (0.0_f32, 0.75_f32)];
-        let fresh = frame(t0, Some(pairs.clone()));
+        let points = vec![0.5_f32, -0.25, 0.75];
+        let fresh = frame(t0, Some(points.clone()));
         let mut display = SpectrumDisplay::default();
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
@@ -404,16 +432,16 @@ mod scope_display {
             VisualizerMode::Scope,
             0,
         );
-        assert_eq!(display.waveform(), Some(&pairs[..]));
+        assert_eq!(display.waveform(), Some(&points[..]));
     }
 
-    /// A stale waveform (only the clock moved) decays both tuple entries
-    /// toward zero, exactly as bars fall.
+    /// A stale waveform (only the clock moved) decays every point toward
+    /// zero, exactly as bars fall.
     #[test]
     fn a_stale_waveform_decays_both_entries() {
         let t0 = Instant::now();
         let np = now_playing();
-        let stale = frame(t0, Some(vec![(-1.0_f32, 0.5_f32)]));
+        let stale = frame(t0, Some(vec![-1.0_f32, 0.5]));
         let mut display = SpectrumDisplay::default();
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&stale)),
@@ -428,7 +456,7 @@ mod scope_display {
             VisualizerMode::Scope,
             0,
         );
-        assert!(decayed(&display, -1.0, 0.5), "{:?}", display.waveform());
+        assert!(decayed(&display, &[-1.0, 0.5]), "{:?}", display.waveform());
     }
 
     /// Bars never take the waveform: its state stays `None` even when the
@@ -437,7 +465,7 @@ mod scope_display {
     fn bars_mode_never_takes_the_waveform() {
         let t0 = Instant::now();
         let np = now_playing();
-        let fresh = frame(t0, Some(vec![(-1.0_f32, 1.0_f32)]));
+        let fresh = frame(t0, Some(vec![-1.0_f32, 1.0]));
         let mut display = SpectrumDisplay::default();
         display.update(
             &source(PlaybackPhase::Playing, &np, Some(&fresh)),
@@ -455,13 +483,13 @@ mod scope_display {
     fn fresh_waveform_refuses_a_foreign_revision_or_token() {
         let t0 = Instant::now();
         let np = now_playing();
-        let fresh = frame(t0, Some(vec![(0.0_f32, 0.5_f32)]));
+        let fresh = frame(t0, Some(vec![0.0_f32, 0.5]));
         let own = source(PlaybackPhase::Playing, &np, Some(&fresh));
-        assert_eq!(own.fresh_waveform(t0), Some(&[(0.0, 0.5)][..]));
+        assert_eq!(own.fresh_waveform(t0), Some(&[0.0, 0.5][..]));
 
         let other_rev = SpectrumFrame {
             session_rev: 10,
-            ..frame(t0, Some(vec![(0.0, 1.0)]))
+            ..frame(t0, Some(vec![0.0, 1.0]))
         };
         let foreign = source(PlaybackPhase::Playing, &np, Some(&other_rev));
         assert_eq!(foreign.fresh_waveform(t0), None);
@@ -483,47 +511,108 @@ mod scope_display {
 mod scope_renderer {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
 
-    use tenuto::playback::spectrum::worker::WAVEFORM_COLUMNS;
+    use tenuto::playback::spectrum::worker::{WAVEFORM_COLUMNS, waveform_points};
     use tenuto::tui::spectrum::draw_scope;
     use tenuto::tui::theme::Theme;
 
-    /// Column `x` as one `(symbol, fg)` per row, top to bottom.
-    fn column(buffer: &Buffer, x: u16) -> Vec<(&str, Color)> {
+    /// The green (trace) rows painted in column `x`, top to bottom — any
+    /// cell the renderer touched.
+    fn painted_rows(buffer: &Buffer, x: u16, theme: &Theme) -> Vec<u16> {
         (0..buffer.area.height)
-            .map(|y| (buffer[(x, y)].symbol(), buffer[(x, y)].fg))
+            .filter(|y| {
+                let cell = &buffer[(x, *y)];
+                cell.symbol() == "█" && (cell.fg == theme.green || cell.fg == theme.muted)
+            })
             .collect()
     }
 
-    /// A spike renders green blocks above and below the midline at its
-    /// column: width 48 resamples column `x` to the waveform's `2x`, so the
-    /// spike at 48 lands on x 24; ten rows put the midline at 5, half at 5,
-    /// so peak 0.4 reaches two rows up and min −0.6 three rows down. Every
-    /// other column is silence: the muted midline and nothing else.
-    #[test]
-    fn a_spike_draws_green_blocks_about_the_midline_at_its_column() {
-        let theme = Theme::default();
-        let area = Rect::new(0, 0, 48, 10);
-        let mut waveform = vec![(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS];
-        waveform[48] = (-0.6, 0.4);
-        let mut buffer = Buffer::empty(area);
-        draw_scope(&mut buffer, area, Some(&waveform), &theme);
+    /// A 2048-sample block of `wave`, decimated to the worker's points.
+    fn points_of(wave: impl Fn(usize) -> f32) -> Vec<f32> {
+        waveform_points(&(0..2048).map(wave).collect::<Vec<f32>>())
+    }
 
-        let blank = (" ", Color::Reset);
-        let mut silent = vec![blank; 10];
-        silent[5] = ("█", theme.muted);
-        let mut spike = vec![blank; 10];
-        for y in 3..=8 {
-            spike[y as usize] = ("█", theme.green);
-        }
-        for x in 0..48 {
-            let expected = match x {
-                24 => &spike,
-                _ => &silent,
+    fn sine(i: usize) -> f32 {
+        0.9 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 44_100.0).sin()
+    }
+
+    /// Dense "music": low bass + mid melody + a third partial, near full
+    /// scale — a different shape from the pure sine.
+    fn dense(i: usize) -> f32 {
+        let t = i as f32 / 44_100.0;
+        let v = 0.5 * (2.0 * std::f32::consts::PI * 60.0 * t).sin()
+            + 0.3 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()
+            + 0.2 * (2.0 * std::f32::consts::PI * 3_000.0 * t).sin();
+        v * 0.85
+    }
+
+    /// The defect this replaces: the midline row painted solid in every
+    /// column, every frame. A 440 Hz sine at 60×6 draws a connected trace
+    /// that swings about the midline instead: the midline row is not solid,
+    /// cells sit above and below it, and consecutive columns connect.
+    #[test]
+    fn a_sine_draws_a_connected_trace_about_the_midline() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 60, 6);
+        let mut buffer = Buffer::empty(area);
+        draw_scope(&mut buffer, area, Some(&points_of(sine)), &theme);
+
+        let midline = 3_u16;
+        let solid_midline = (0..60_u16).all(|x| buffer[(x, midline)].fg == theme.green);
+        assert!(
+            !solid_midline,
+            "the old defect: every midline cell painted in every column"
+        );
+        let midline_green = (0..60_u16)
+            .filter(|&x| buffer[(x, midline)].fg == theme.green)
+            .count();
+        assert!(
+            midline_green < 60,
+            "the midline row is not solid: {midline_green}/60 green"
+        );
+
+        let above = (0..60)
+            .flat_map(|x| painted_rows(&buffer, x, &theme))
+            .any(|y| y < midline);
+        let below = (0..60)
+            .flat_map(|x| painted_rows(&buffer, x, &theme))
+            .any(|y| y > midline);
+        assert!(above, "the trace climbs above the midline");
+        assert!(below, "the trace dips below the midline");
+
+        // Vertical connect: consecutive columns' painted rows overlap or
+        // touch — no gap larger than one row between neighbours.
+        for x in 1..60_u16 {
+            let previous = painted_rows(&buffer, x - 1, &theme);
+            let own = painted_rows(&buffer, x, &theme);
+            let (Some(&previous_top), Some(&previous_bottom)) =
+                (previous.iter().min(), previous.iter().max())
+            else {
+                panic!("column {} paints nothing", x - 1);
             };
-            assert_eq!(column(&buffer, x), *expected, "column {x}");
+            let (Some(&own_top), Some(&own_bottom)) = (own.iter().min(), own.iter().max()) else {
+                panic!("column {x} paints nothing");
+            };
+            assert!(
+                own_top <= previous_bottom + 1 && own_bottom + 1 >= previous_top,
+                "columns {} and {x} disconnect: {previous:?} vs {own:?}",
+                x - 1
+            );
         }
+    }
+
+    /// The bar the user set: sine and dense music draw visibly different
+    /// traces — the buffers are not equal, and the dense trace paints some
+    /// column differently than the sine's.
+    #[test]
+    fn sine_and_dense_music_draw_different_traces() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 60, 6);
+        let mut sine_buffer = Buffer::empty(area);
+        draw_scope(&mut sine_buffer, area, Some(&points_of(sine)), &theme);
+        let mut dense_buffer = Buffer::empty(area);
+        draw_scope(&mut dense_buffer, area, Some(&points_of(dense)), &theme);
+        assert_ne!(sine_buffer, dense_buffer, "the two shapes differ");
     }
 
     /// §1.2: silence looks silent — an all-zero waveform is the flat muted
@@ -533,24 +622,34 @@ mod scope_renderer {
     fn silence_draws_only_the_muted_midline_and_nothing_at_one_row() {
         let theme = Theme::default();
         let area = Rect::new(0, 0, 12, 6);
-        let mut silent = vec![(" ", Color::Reset); 6];
-        silent[3] = ("█", theme.muted);
 
         let mut buffer = Buffer::empty(area);
         draw_scope(
             &mut buffer,
             area,
-            Some(&[(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS][..]),
+            Some(&[0.0_f32; WAVEFORM_COLUMNS][..]),
             &theme,
         );
-        for x in 0..12 {
-            assert_eq!(column(&buffer, x), silent, "column {x}");
+        for x in 0..12_u16 {
+            for y in 0..6_u16 {
+                let cell = &buffer[(x, y)];
+                if y == 3 {
+                    assert_eq!(cell.symbol(), "█", "the midline, column {x}");
+                    assert_eq!(cell.fg, theme.muted, "muted, column {x}");
+                } else {
+                    assert_eq!(cell.symbol(), " ", "blank, column {x}, row {y}");
+                }
+            }
         }
 
         let mut buffer = Buffer::empty(area);
         draw_scope(&mut buffer, area, None, &theme);
-        for x in 0..12 {
-            assert_eq!(column(&buffer, x), silent, "absent, column {x}");
+        for x in 0..12_u16 {
+            assert_eq!(
+                painted_rows(&buffer, x, &theme),
+                vec![3],
+                "absent, column {x}"
+            );
         }
 
         let area = Rect::new(0, 0, 12, 1);
@@ -558,10 +657,37 @@ mod scope_renderer {
         draw_scope(
             &mut buffer,
             area,
-            Some(&[(0.0_f32, 0.0_f32); WAVEFORM_COLUMNS][..]),
+            Some(&[0.0_f32; WAVEFORM_COLUMNS][..]),
             &theme,
         );
         assert!(buffer.content().iter().all(|cell| cell.symbol() == " "));
+    }
+
+    /// A spike draws a green block about the midline at its column: width
+    /// 48 resamples column `x` to the waveform's `2x`, so the spike at 48
+    /// lands on x 24; ten rows put the midline at 5, half at 5, so point
+    /// 0.4 climbs two rows. The connect fills between rows, so the spike's
+    /// column and the one after it (whose row returns to the midline) both
+    /// span the climb, and every other column rides the trace's zero level.
+    #[test]
+    fn a_spike_draws_about_the_midline_at_its_column() {
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 48, 10);
+        let mut waveform = vec![0.0_f32; WAVEFORM_COLUMNS];
+        waveform[48] = 0.4;
+        let mut buffer = Buffer::empty(area);
+        draw_scope(&mut buffer, area, Some(&waveform), &theme);
+
+        for x in 0..48 {
+            let rows = painted_rows(&buffer, x, &theme);
+            let expected = match x {
+                // The spike climbs (connect to column 23's midline row), and
+                // column 25 fills back down from the spike row to its own.
+                24 | 25 => vec![3, 4, 5],
+                _ => vec![5],
+            };
+            assert_eq!(rows, expected, "column {x}");
+        }
     }
 }
 
