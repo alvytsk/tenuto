@@ -1,94 +1,86 @@
-# M14 acceptance: Winamp visuals
+# M14 acceptance: themes, the settings overlay and the bars panel
 
-Scope: visualizer modes and built-in themes
-(`docs/superpowers/specs/2026-11-09-tenuto-m14-winamp-visuals-design.md` §7).
-Branch `m14-winamp-visuals`, from `main` at `5a7db09`.
+Scope: what M14 ships after the revision
+(`docs/superpowers/specs/2026-11-11-tenuto-m14-settings-and-visuals-rollback-design.md`,
+whose Part 3 names this page) — the four built-in themes, the settings
+overlay, and the spectrum panel back at bars-only after the scope and flow
+modes were removed. Branch `m14-winamp-visuals`, from `main` at `5a7db09`.
 
 ## Automated evidence
 
 All four gates ran green on this branch on 2026-11-11, Linux, Rust 1.98.1,
-at the M14 fix wave that ends with this commit (the scope trace, the flow
-waterfall and the bare-CLI flags):
+at this revision's final commit (the docs commit this page ships in, after
+the rollback and the settings overlay landed):
 
 - `cargo fmt --check` — exit 0.
 - `cargo clippy --locked --all-targets --all-features -- -D warnings` —
   exit 0, no warnings.
-- `cargo test --locked --no-fail-fast` — exit 0: 1,739 passed, 0 failed,
+- `cargo test --locked --no-fail-fast` — exit 0: 1,707 passed, 0 failed,
   5 ignored (the `#[ignore]`d device smoke and the manual-measurement
-  snapshots) across 123 test binaries, doc-tests included. One full run
-  saw `http_cancellation` fail under parallel load; the test passes in
-  isolation and the whole suite passed on the rerun — the
-  known load-flake class the repo's build notes describe, in a suite no
-  fix-wave commit touches.
+  snapshots) across 123 test binaries and the doc-tests. No suite failed
+  in this run.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps` — exit 0.
 
 What the M14 suites pin, so the manual rows below carry only what a
 buffer cannot see:
 
-- `tests/m14_visuals.rs` (45 tests) — the mode's additive persistence
-  roundtrip and an unknown stored spelling passing through raw;
-  `SetVisualizer` writing and clearing the stored spelling, `SetTheme`
-  landing in state through the runtime; `--visualizer` and `--theme`
-  parsing their stored spellings and rejecting others with the valid set
-  named, absent flags parsing to none — the bare `tenuto` form's flags
-  likewise; waveform midpoint sampling (constant block, midpoint
-  placement, a sine tracing the wave, short and empty blocks zero-filled,
-  non-finite samples as silence, out-of-range clamped) and the publish
-  gate (a frame carries its waveform only when a listener asked);
-  the widget's scope gate (a fresh matching waveform taken, a stale one
-  decaying every drawn point, bars mode never taking the waveform, a
-  foreign revision or token refused); scope rendering (a connected trace
-  about the midline — the midline row not solid, cells above and below
-  it, consecutive columns connecting, sine and dense music drawing
-  different traces, a spike at its column, silence as the muted midline
-  alone and nothing at one row); flow history (fresh frames pushing
-  newest at the right edge, a width or height change rebuilding, a mode
-  switch resetting, stale frames cooling instead of pushing, the field
-  capped at the panel width, a push without levels pushing a zero column)
-  and flow rendering (bass at the bottom frozen by value, two distinct
-  pushes scrolling the newest to the right edge with older columns
-  frozen, an all-zero field drawing nothing, an empty history drawing
-  nothing); the `v` key cycling and dispatching each
-  spelling, a one-row panel skipping flow, startup appearance from
-  `with_appearance`, a restored flow mode rendering the waterfall through
-  the draw path and rendering bars at one row; the flag beating the saved
-  mode and the saved beating the default, an unknown saved spelling
-  losing to the default, the theme flag writing through and startup
-  resolution reading it back.
+- `tests/m14_visuals.rs` (6 tests) — the theme's raw spelling through the
+  session (`set_theme` writing it, `None` clearing the field),
+  `SetTheme` landing in state through the runtime; the absent `--theme`
+  parsing to `None`; `with_appearance` setting the startup palette and
+  keeping the theme id in sync; the flag writing through and the startup
+  resolution reading the saved spelling back, an unknown or absent one
+  defaulting to gruvbox; the one-row panel rendering bars, as before M14.
 - `tests/m14_themes.rs` (7 tests) — the theme's additive persistence
-  roundtrip, an unknown spelling passing through raw, `--theme` naming
-  the valid set on rejection; the background property as buffers: a
+  roundtrip and an unknown stored spelling passing through raw;
+  `--theme` naming the valid set on rejection, on the `tui` form and on
+  the bare `tenuto` form alike; the background property as buffers: a
   winamp-themed frame fills every cell, the gruvbox default leaves the
   terminal background visible, and every tier fills completely.
-- Neighbors held green through the milestone: the M5 TUI render and
-  input suites (whose snapshots pin gruvbox rendering unchanged),
-  `m5_spectrum_*` (whose worker and tap contracts the waveform extension
-  had to keep), `m9_layering` (no rank changes) and the whole suite above.
+- `tests/m14_settings.rs` (7 tests) — `o` opening the overlay with the
+  cursor on the session's current theme and dispatching nothing; a cursor
+  move re-theming the session at once and dispatching exactly one
+  `SetTheme` carrying the persisted spelling (the live preview); the
+  clamped edges moving and dispatching nothing; `Esc` and `o` closing
+  without dispatching; re-opening after a move landing on the moved-to
+  theme; the drawn box listing the four storage spellings in order,
+  marking the cursor with `▶` and naming the app version on a muted
+  footer; a move live-previewing the themed fill behind the open box at
+  the normal and minimal tiers, no cell left unpainted.
+- The rollback pins, outside the M14 suites: `tests/cli.rs` rejects
+  `--visualizer` as an unknown argument on both command forms, and
+  `tests/persistence_model.rs` loads a state file still carrying the old
+  `visualizer_mode` key with the key ignored (`schema_version` stays 4).
+- Neighbors held green through the revision: the M5 TUI render and input
+  suites (whose snapshots pin gruvbox rendering unchanged),
+  `m5_spectrum_*` (the worker publishing its pre-M14 frame shape, no
+  waveform) and `m9_layering` (no rank changes).
 
 ## Manual checks (pending, human)
 
 The writer of this page has no terminal, no audio device and no display.
 **Every row below is marked pending**; none is marked passed, and nothing
-here should be read as evidence that the modes and themes look right on a
-real screen. A person performs each row and replaces *pending* with
-*pass* or *fail*, noting the terminal, its color support and, for a
-failure, what was seen.
+here should be read as evidence that the themes, the settings overlay and
+the bars panel look right on a real screen. A person performs each row and
+replaces *pending* with *pass* or *fail*, noting the terminal, its color
+support and, for a failure, what was seen.
 
 Build with `cargo build --release --locked` and run `target/release/tenuto
-tui …` from a shell. The audio rows need a real output device and a real
-file with dynamics (music, not a sine); the theme, tier, persistence and
-color rows can run with `TENUTO_AUDIO_OUTPUT=null` when no device is at
-hand. Media to prepare: one local music file and one live radio station
-in the playlists.
+tui …` from a shell. The bars row needs a real output device and a real
+file with dynamics (music, not a sine); the theme, settings and color rows
+can run with `TENUTO_AUDIO_OUTPUT=null` when no device is at hand. Media
+to prepare: one local music file.
 
 | Check | Procedure and pass condition | Result |
 |---|---|---|
-| All three modes on a real file | Play the file. `v` once: `scope` draws a connected block-character trace about the midline, moving with the music. `v` again: `flow` scrolls a color field right to left, newest at the right edge, low frequencies at the bottom, each column frozen as it was drawn. `v` once more returns to `bars`, unchanged from before M14. Pause: the flow drains away and the scope falls flat — silence looks silent in every mode, no idle animation | pending |
-| All three modes on a live station | Play the station, `v` to `scope`. Between musical bursts the scope falls to the flat midline and picks back up; it never freezes on a stale frame. Then `bars` and `flow` on the same station | pending |
-| `--theme winamp` at 80×28 | `tenuto tui --theme winamp` in an 80×28 terminal: near-black background behind every pane, LED-green text and meters, amber selection, nothing left in the terminal's own color. Shrink below 28 rows (still ≥22): the compact tier, smaller cover and three- or four-row panel, background still full. Shrink below 50 columns or 18 rows: the minimal tier, no cover and no panel, background still full. Every cell of every tier is painted | pending |
+| Bars-only panel on a real file | Play the file: the panel draws the spectrum as before M14 — equal bars with peak caps over them, falling flat on silence, nothing moving on its own. No other mode is reachable and no key switches the panel | pending |
+| Bars at the one-row tier | Shrink below 22 rows: the compact player's one-row panel still draws the bars row (pinned at the buffer level by `a_one_row_panel_renders_bars`; the eye on a real terminal is what is left) | pending |
+| Settings: live preview, then restart | `o` opens settings with the cursor on the current theme. Down (or `j`): the whole interface recolors at once — with a dark theme, the background switches with the move; the cursor line carries the `▶` marker. Up (or `k`) moves back the same way; the list never wraps. Quit straight from settings with `q`, start plain `tenuto tui`: the moved-to theme is back | pending |
+| Version line | In the open overlay, the muted line under the theme list reads `tenuto <version>`; it equals what `tenuto --version` prints | pending |
+| `--theme` on both command forms | `tenuto --theme winamp` and `tenuto tui --theme winamp` both open on winamp, and either choice is saved (a later plain start keeps it). A typo — `--theme dracula` on either form — is refused before the player opens, with the valid set named | pending |
+| `--visualizer` and `v` are gone | `tenuto tui --visualizer scope` and bare `tenuto --visualizer scope` both fail as unknown arguments; in the player, pressing `v` does nothing | pending |
+| `--theme winamp` at 80×28 | `tenuto tui --theme winamp` in an 80×28 terminal: near-black background behind every pane, LED-green text and meters, amber selection, nothing left in the terminal's own color. Shrink below 28 rows (still ≥22): the compact tier, background still full. Shrink below 50 columns or 18 rows: the minimal tier, background still full. Every cell of every tier is painted | pending |
 | gruvbox default unchanged | Plain `tenuto tui`, no flags and no saved theme: the rendering is exactly the pre-M14 look — no background painted, the terminal's own background showing through. The buffer-level claim is pinned by the M5 snapshots and `the_gruvbox_default_leaves_the_terminal_background_visible`; the eye against the old look is what is left | pending |
-| Theme and visualizer survive restart | `--theme winamp`, `v` to `flow`, quit with `q`, start plain `tenuto tui`: winamp and flow are both back. Start once more with `--visualizer scope`, quit, start plain: the saved flow mode returns — the flag held for its run only | pending |
-| `--visualizer flow --theme winamp` together | One run with both flags: flow's green-amber-cream stacks on the winamp near-black background, panel fully painted | pending |
 | 8/16-color terminal | In a terminal without truecolor (8- or 16-color palette), `tenuto tui --theme winamp`: the panel is still fully painted — every cell covered, no unpainted holes; the RGB palette arrives as the terminal's nearest approximations | pending |
 
 A failure stays recorded here even after it is fixed, with the fixing
